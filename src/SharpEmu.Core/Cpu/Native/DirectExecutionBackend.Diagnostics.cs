@@ -112,6 +112,11 @@ public sealed partial class DirectExecutionBackend
 					$"[PERF][HLE] fast_path: self_hits={fastPath.SelfHits} " +
 					$"getspecific_hits={fastPath.GetspecificHits} blocks={fastPath.Blocks}");
 			}
+
+			foreach (var line in SharpEmu.Libs.Diagnostics.HleCallShapeProfile.FormatLines())
+			{
+				System.Console.Error.WriteLine(line);
+			}
 		}
 	}
 

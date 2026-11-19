@@ -247,7 +247,9 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        var encoder = RetainEncoder(MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder));
+        var encoder = RetainEncoder(PassProfileEnabled
+            ? PassProfileOpenEncoder(EnsureCommandBuffer(), MetalProfiledEncoder.HostCompute, "occlusion-prefix-sum")
+            : MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder));
         if (encoder == 0) throw Fatal("Could not encode the occlusion prefix sum.");
         WaitForPreviousEncoder(encoder, render: false);
         EncodeOcclusionReduction(encoder, batch, length);
@@ -285,7 +287,10 @@ internal sealed partial class MetalRenderHost
     private void EncodePendingOcclusionReductions()
     {
         if (_oqPendingReductions.Count == 0) return;
-        var encoder = RetainEncoder(MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder));
+        var encoder = RetainEncoder(PassProfileEnabled
+            ? PassProfileOpenEncoder(
+                EnsureCommandBuffer(), MetalProfiledEncoder.HostCompute, $"occlusion-prefix-sums n={_oqPendingReductions.Count}")
+            : MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder));
         if (encoder == 0) throw Fatal("Could not encode the occlusion prefix sums.");
         WaitForPreviousEncoder(encoder, render: false);
         foreach (var (batch, length) in _oqPendingReductions) EncodeOcclusionReduction(encoder, batch, length);
@@ -395,6 +400,7 @@ internal sealed partial class MetalRenderHost
             // the pass ends below; there is no next slot to initialize.
             if (batch.Slot < OcclusionIntervalCapacity) InitializeOcclusionSlot(batch);
         }
+        using var overlapTag = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Occlusion);
         _ = EncodeOrderedCopies(copies[..count], address, null, 0, MetalGpuWriteOrigin.Copy,
             "occlusion dump", null, (ulong)count * sizeof(ulong), sourceIsFinal: false, deferStableGpuResult: batch is not null,
             noteAsOneRange: CoalesceOcclusionDumps);

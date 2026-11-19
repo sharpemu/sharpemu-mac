@@ -40,8 +40,8 @@ public sealed class MetalMipStatisticsFunctionTests
         nint on = 0;
         try
         {
-            off = MetalRenderHost.NewMipStatisticsFunction(library, "gen5_ps", enabled: false, out var offError);
-            on = MetalRenderHost.NewMipStatisticsFunction(library, "gen5_ps", enabled: true, out var onError);
+            off = MetalRenderHost.NewTranslatedFunction(library, "gen5_ps", false, [], [], out var offError);
+            on = MetalRenderHost.NewTranslatedFunction(library, "gen5_ps", true, [], [], out var onError);
             Assert.True(off != 0, MetalNative.DescribeError(offError));
             Assert.True(on != 0, MetalNative.DescribeError(onError));
             Assert.NotEqual(off, on);

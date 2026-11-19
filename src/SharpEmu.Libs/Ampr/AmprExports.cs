@@ -1234,8 +1234,11 @@ public static partial class AmprExports
             fileOffset = 0;
         }
 
+        // The read's start too: what lands in its destination while it runs is what a race shows.
+        SharpEmu.HLE.GpuWriteRing.RecordHle(destination, size, fileOffset, "hle:ampr-read-begin", hostPath);
         var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out var bytesRead);
         SharpEmu.HLE.GuestLoadProgress.NoteAmprRead((long)bytesRead);
+        SharpEmu.HLE.GpuWriteRing.RecordHle(destination, bytesRead, fileOffset, "hle:ampr-read", hostPath);
         TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, result);
         if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
@@ -1547,8 +1550,15 @@ public static partial class AmprExports
                 if (ctx.Memory.TryFillInPlace(
                         chunkDestination,
                         request,
-                        (File: cachedFile, Offset: unchecked((long)absoluteOffset)),
-                        static (state, span) => state.File.Read(span, state.Offset),
+                        (File: cachedFile, Offset: unchecked((long)absoluteOffset), Address: chunkDestination),
+                        static (state, span) =>
+                        {
+                            // What the destination holds as the fill starts and as it ends.
+                            SharpEmu.HLE.GpuWriteRing.RecordHleSample(state.Address, span, "hle:ampr-fill-start");
+                            var read = state.File.Read(span, state.Offset);
+                            SharpEmu.HLE.GpuWriteRing.RecordHleSample(state.Address, span, "hle:ampr-fill-end");
+                            return read;
+                        },
                         out var filled))
                 {
                     if (filled <= 0)

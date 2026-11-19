@@ -23,11 +23,13 @@ internal enum MetalAliasFallbackReason : byte
     RunUnmapped,
     // The transfer refused the run and retiled nothing.
     RetileRefused,
+    // Run sets: the other image already holds as many stale runs apart as it may.
+    RunSetFull,
 }
 
 internal sealed partial class MetalImageCache
 {
-    private const int AliasFallbackReasons = (int)MetalAliasFallbackReason.RetileRefused + 1;
+    private const int AliasFallbackReasons = (int)MetalAliasFallbackReason.RunSetFull + 1;
     // SHARPEMU_METAL_V2_ALIAS_TRACE=1 logs the first alias declines and publications of
     // every report window with both image descriptions; =depth logs only pairs with a depth
     // image in them, ten times as many, which a frame of other aliases would otherwise crowd out.
@@ -89,7 +91,7 @@ internal sealed partial class MetalImageCache
         var because = write ? $"reason={reason}" : $"reason=ReadUse detail={reason}";
         Console.Error.WriteLine(
             $"[METAL-V2][ALIAS-TRACE] decline use={(write ? "write" : "read")} {because} " +
-            AliasPairText(image, other, otherGpuModified, runStart, runEnd));
+            AliasPairText(image, other, otherGpuModified, runStart, runEnd) + AliasUseText());
     }
 
     // Logs an alias publication with the trace on. Caller holds the lock.
@@ -105,8 +107,15 @@ internal sealed partial class MetalImageCache
 
         Console.Error.WriteLine(
             $"[METAL-V2][ALIAS-TRACE] publish kind={kind} " +
-            AliasPairText(image, other, otherGpuModified, runStart, runEnd));
+            AliasPairText(image, other, otherGpuModified, runStart, runEnd) + AliasUseText());
     }
+
+    // The requester's use (rt-overwrite is a colour target whose pass is proven to overwrite it; rt-load one whose
+    // pass loads or is not proven), and the guest bytes written back for this pair so far in this sync step.
+    private string _aliasSyncRole = "other";
+    private long _aliasTraceMark;
+
+    private string AliasUseText() => $" role={_aliasSyncRole} moved_wb=0x{_writebackBytes - _aliasTraceMark:X}";
 
     // gpu_mod is the requester's and the other image's state when the alias was found,
     // before any writeback cleared it.

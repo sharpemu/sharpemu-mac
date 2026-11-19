@@ -934,10 +934,11 @@ internal static class Gen5ComputeFixtures
     }
 
     public static Gen5MslShader CompileRequestOrThrow(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32,
-        uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint floatMode = ShaderCompileRequest.DefaultFloatMode)
+        uint localDataShareDwords = 0, uint pushDataStartDword = 0, uint floatMode = ShaderCompileRequest.DefaultFloatMode,
+        Gen5MslCodegenOptions? options = null)
     {
         var request = CreateComputeRequest(fixture, waveLaneCount, localSizeX, localDataShareDwords, pushDataStartDword, floatMode);
-        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options))
         {
             throw new InvalidOperationException($"[{fixture.Name}] MSL request emit failed: {error}");
         }

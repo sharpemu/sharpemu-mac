@@ -208,11 +208,13 @@ internal sealed class MetalCompletionQueue : IDisposable
     private long _handlerWakeups;
     private volatile bool _stopping;
 
-    public MetalCompletionQueue(nint sharedEvent)
+    // bindHandler=false: a second queue (SHARPEMU_GATE_HOIST_PROBE) polls its event and leaves the one
+    // global completed-handler binding with the host's queue.
+    public MetalCompletionQueue(nint sharedEvent, bool bindHandler = true)
     {
         _sharedEvent = sharedEvent;
         _wakeHandler = OnGpuCompleted;
-        _handlerBound = !PollCompletions && MetalCompletionSignal.TryBind(_wakeHandler);
+        _handlerBound = bindHandler && !PollCompletions && MetalCompletionSignal.TryBind(_wakeHandler);
         Console.Error.WriteLine(
             _handlerBound
                 ? "[METAL-V2][INFO] Submission completions wake the host through a command-buffer handler."
@@ -269,6 +271,11 @@ internal sealed class MetalCompletionQueue : IDisposable
             var before = Interlocked.CompareExchange(ref _completedHint, value, seen);
             if (before == seen)
             {
+                if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+                {
+                    SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnCompleted(value);
+                }
+
                 return;
             }
 
@@ -279,12 +286,23 @@ internal sealed class MetalCompletionQueue : IDisposable
     /// <summary>Runs the work once the submission with this serial completes.</summary>
     public void Enqueue(ulong serial, Action work)
     {
+        // SHARPEMU_GATE_HOIST_PROBE=1: the work of a command buffer committed on the second queue runs when
+        // that buffer completes, not when everything before it has.
+        if (Route is { } route && route(serial) is { } other && !ReferenceEquals(other, this))
+        {
+            other.Enqueue(serial, work);
+            return;
+        }
+
         lock (_gate)
         {
             _pending.Add((serial, work));
             Monitor.PulseAll(_gate);
         }
     }
+
+    /// <summary>Another queue that takes the completion work of some serials (null: none).</summary>
+    public Func<ulong, MetalCompletionQueue?>? Route { get; set; }
 
     private long _lastSignalObserved;
 

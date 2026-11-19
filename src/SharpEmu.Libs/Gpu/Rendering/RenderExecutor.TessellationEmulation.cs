@@ -48,8 +48,22 @@ public sealed partial class RenderExecutor
     private bool _tessellationAnnounced;
 
     // Whether this draw is a tessellated one the host runs, how many control points its patches have
-    // and whether they are quads.
+    // and whether they are quads. Asked on every draw: a draw without both the local and the hull stage
+    // (nearly all) is answered here, without the call and the frame of the full test.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     private bool IsEmulatedTessellation(RegisterBanks banks, out uint controlPoints, out bool quad)
+    {
+        if ((banks.Context.ShaderStages & (LocalStageEnable | HullStageEnable)) != (LocalStageEnable | HullStageEnable))
+        {
+            controlPoints = 0;
+            quad = false;
+            return false;
+        }
+
+        return IsEmulatedTessellationStaged(banks, out controlPoints, out quad);
+    }
+
+    private bool IsEmulatedTessellationStaged(RegisterBanks banks, out uint controlPoints, out bool quad)
     {
         controlPoints = 0;
         quad = false;

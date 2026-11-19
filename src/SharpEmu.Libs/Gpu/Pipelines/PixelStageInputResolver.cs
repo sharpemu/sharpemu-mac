@@ -61,7 +61,7 @@ public static class PixelStageInputResolver
     // draw still reads it. One read for all of them: this was one guest read per input (up to 32), each
     // taking the memory read lock, to decode a few words.
     // semantics: the words a shader frontend already read (IShaderFrontend), instead of the guest table.
-    private static uint CustomInterpolationMask(CpuContext context, RegisteredShader shader, uint semanticCount, uint[]? semantics = null)
+    internal static uint CustomInterpolationMask(CpuContext context, RegisteredShader shader, uint semanticCount, uint[]? semantics = null)
     {
         if (semanticCount == 0)
         {

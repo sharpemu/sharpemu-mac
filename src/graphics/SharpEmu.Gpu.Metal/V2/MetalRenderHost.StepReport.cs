@@ -85,12 +85,16 @@ internal sealed partial class MetalRenderHost
     private readonly string[] _stepReportStageBySlot = new string[StepReportSlots];
     private readonly long[] _stepCapTotalBySlot = new long[StepReportSlots];
 
+    // Per stage: the program that last took a slot here, and that slot plus one (zero: none yet).
+    private readonly ulong[] _stepReportLastHash = new ulong[StageCount];
+    private readonly int[] _stepReportLastSlot = new int[StageCount];
+
     /// <summary>
     /// The GPU address of the step-report word reserved for one program, or zero when
     /// no slot is left; the shader null-checks the pointer, so zero just disables the
     /// report for that program.
     /// </summary>
-    private ulong StepReportAddress(ulong hash, string stage)
+    private ulong StepReportAddress(ulong hash, int stageIndex)
     {
         for (var index = 0; index < ProbeLogs.Length; index++)
         {
@@ -102,7 +106,14 @@ internal sealed partial class MetalRenderHost
             }
         }
 
-        if (!_stepReportSlotByHash.TryGetValue(hash, out var slot))
+        // A program keeps its slot for good, so the stage's last program answers without the map: consecutive
+        // draws mostly run the same programs.
+        int slot;
+        if (_stepReportLastSlot[stageIndex] != 0 && _stepReportLastHash[stageIndex] == hash)
+        {
+            slot = _stepReportLastSlot[stageIndex] - 1;
+        }
+        else if (!_stepReportSlotByHash.TryGetValue(hash, out slot))
         {
             if (_stepReportUsed == StepReportSlots)
             {
@@ -117,9 +128,11 @@ internal sealed partial class MetalRenderHost
             slot = _stepReportUsed++;
             _stepReportSlotByHash[hash] = slot;
             _stepReportHashBySlot[slot] = hash;
-            _stepReportStageBySlot[slot] = stage;
+            _stepReportStageBySlot[slot] = StepReportStageName(stageIndex);
         }
 
+        _stepReportLastHash[stageIndex] = hash;
+        _stepReportLastSlot[stageIndex] = slot + 1;
         NoteUsedResource(_stepReportBuffer, Mtl.ResourceUsageRead | Mtl.ResourceUsageWrite);
         return _stepReportGpuAddress + (ulong)(slot * StepReportStride * sizeof(uint));
     }

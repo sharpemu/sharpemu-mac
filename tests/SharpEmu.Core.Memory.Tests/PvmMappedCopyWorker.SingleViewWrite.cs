@@ -42,6 +42,9 @@ internal static partial class PvmMappedCopyWorker
         var backing = (HostBackingObject)typeof(SharedBackingViews).GetField("_backing", Private)!.GetValue(shared)!;
         var ledger = typeof(HostBackingObject).GetField("_managedWrites", Private)!.GetValue(backing);
         Assert.NotNull(ledger); // the Mac provider enrolls every backing at construction
+        // The ledger stays dormant until its first observer; these scenarios count admitted
+        // intervals, so observe it first as a mapped copy's revision capture would.
+        Assert.True((bool)ledger!.GetType().GetMethod("TryCaptureRevision", Private)!.Invoke(ledger, [-1L])!);
         Stage("owned-map", scenario);
         Console.WriteLine($"pvm-single-view-write address=0x{address:X} page={page} kernel_page={kernelPage}");
 

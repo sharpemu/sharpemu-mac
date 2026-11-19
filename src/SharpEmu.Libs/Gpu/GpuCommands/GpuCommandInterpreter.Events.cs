@@ -189,7 +189,7 @@ public sealed partial class GpuCommandInterpreter
             Interlocked.Increment(ref _acquireBarriers);
             _acquireMemoryBarriers.Increment();
             Diagnostics.DispatchRunTally.NoteSync();
-            _host.EmitGlobalBarrier();
+            EmitOrderingBarrier();
         }
 
         _host.ReleaseShaderWrites();

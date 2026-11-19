@@ -64,6 +64,24 @@ public static class GpuFatal
     /// <remarks>Backend contract.</remarks>
     public static Exception Fatal(string message) => Fatal(message, null);
 
+    // Verify mismatches (a verify mode found a fast path handing out other results than a full resolution) raised on a
+    // speculative thread: that work is abandoned like any other, so each is counted here as well, for the prefetch PERF
+    // line (abandoned_verify=), instead of disappearing among the plain abandons.
+    private static long _speculativeVerifyFailures;
+
+    public static long TakeSpeculativeVerifyFailures() => Interlocked.Exchange(ref _speculativeVerifyFailures, 0);
+
+    // Fatal for a verify mismatch: on a speculative thread also counted (TakeSpeculativeVerifyFailures).
+    public static Exception VerifyFailed(string message)
+    {
+        if (ThrowOnFatal)
+        {
+            Interlocked.Increment(ref _speculativeVerifyFailures);
+        }
+
+        return Fatal(message, null);
+    }
+
     /// <summary>Reports a GPU failure without losing its original cause.</summary>
     public static Exception Fatal(string message, Exception? innerException)
     {

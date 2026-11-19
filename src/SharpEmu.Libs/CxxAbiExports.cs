@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading;
 using SharpEmu.HLE;
 
@@ -62,9 +63,28 @@ public static class CxaGuardExports
             };
             if (_inProgress.TryAdd(guardPtr, newState))
             {
+                // The guard was read before the claim, so the thread that held it may have released in between: a
+                // release writes the guard complete before it drops its claim, so a read made under ours sees that.
+                // Without it this thread wrote "pending" over "complete" and built the object a second time under
+                // the threads already using it.
+                if (!TryReadGuardState(ctx, guardPtr, out _, out initialized, out _))
+                {
+                    _inProgress.TryRemove(new KeyValuePair<ulong, GuardState>(guardPtr, newState));
+                    ctx[CpuRegister.Rax] = 0;
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                if (initialized)
+                {
+                    _inProgress.TryRemove(new KeyValuePair<ulong, GuardState>(guardPtr, newState));
+                    ctx[CpuRegister.Rax] = 0;
+                    LogGuardResult("guard_acquire", guardPtr, result: 0, initialized, inProgress: false, ownerThreadId: 0);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
+
                 if (!TryWriteGuardState(ctx, guardPtr, GuardPendingValue))
                 {
-                    _inProgress.TryRemove(guardPtr, out _);
+                    _inProgress.TryRemove(new KeyValuePair<ulong, GuardState>(guardPtr, newState));
                     ctx[CpuRegister.Rax] = 0;
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                 }

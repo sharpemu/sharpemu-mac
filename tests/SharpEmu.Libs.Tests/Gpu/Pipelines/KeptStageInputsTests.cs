@@ -16,7 +16,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 
 [Collection(SchedulingStateCollection.Name)]
-public sealed class KeptStageInputsTests : IDisposable
+public sealed partial class KeptStageInputsTests : IDisposable
 {
     private const ulong VertexAddress = PipelineTestGuest.MemoryBase + 0x1000;
     private const ulong VertexHeader = PipelineTestGuest.MemoryBase + 0x8000;
@@ -46,7 +46,8 @@ public sealed class KeptStageInputsTests : IDisposable
 
     public KeptStageInputsTests()
     {
-        _cache = new ShaderPipelineCache(_guest.Context, _guest.Host, _guest.Compiler, _guest.Registry);
+        // The kept programs of the last draw are what these tests check; the resolve memo replaces them when on.
+        _cache = new ShaderPipelineCache(_guest.Context, _guest.Host, _guest.Compiler, _guest.Registry) { ResolveMemoMode = ResolveMemoMode.Off };
         WriteQword(UserDataBlock, DirectOffsets);
         WriteHalf(UserDataBlock + 0x2C, (ushort)DirectResourceCount);
         for (uint type = 0; type < DirectResourceCount; type++)

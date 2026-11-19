@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.IO.Hashing;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.Diagnostics;
@@ -73,6 +74,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             input.Stage = stage;
             return TryCreateComputePipeline(input, program, out _);
         };
+        CreateShards(ResolveShards.Default);
     }
 
     public bool SupportsPrimitiveShaderMeshPipelines => _compiler.SupportsPrimitiveShaderMeshPipelines;
@@ -288,7 +290,241 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // Program resolution runs on the render thread and on a thread resolving draws ahead of it;
     // the program, decode and materialization caches it updates are used under this lock only.
     // A pipeline lookup takes no lock, so it does not wait for a resolution.
+    // With resolver shards (ResolveShards), the shared tier only: what every shard's resolution shares (the program,
+    // decode and materialization caches, the vertex tables, the user data memos and last sources a full resolution
+    // fills, translation and links). A shard's memo hit or words rebuild does not take it; its miss does, inside the
+    // shard's own gate (lock order: shard gate, then this; never a shard gate while holding this).
     private readonly object _resolveGate = new();
+
+    // One resolver shard: a part of the resolve memo's keys (ResolveShards.DrawRoute) and the lock its memo is used
+    // under. With one shard, its gate is _resolveGate itself and its memo _resolveMemo: everything as before.
+    private sealed class ResolveShard
+    {
+        public required object Gate;
+        public GraphicsResolveMemo? Memo;
+    }
+
+    private ResolveShard[] _shards = [];
+
+    private void CreateShards(int count)
+    {
+        var shards = new ResolveShard[count];
+        shards[0] = new ResolveShard { Gate = count == 1 ? _resolveGate : new object(), Memo = _resolveMemo };
+        for (var index = 1; index < count; index++)
+        {
+            shards[index] = new ResolveShard { Gate = new object(), Memo = NewMemoLike(_resolveMemo) };
+        }
+
+        _shards = shards;
+        // A memo hit's revalidation of a cached (not fast) materialization reads the materialization cache, which only
+        // the shared tier may use.
+        _programs.MaterializationGate = count == 1 ? null : _resolveGate;
+    }
+
+    private static GraphicsResolveMemo? NewMemoLike(GraphicsResolveMemo? memo) =>
+        memo is null ? null : new GraphicsResolveMemo(memo.Mode, GraphicsResolveMemo.DefaultCapacity)
+        {
+            Rebuild = memo.Rebuild,
+            HoldChurn = memo.HoldChurn,
+            AdmitSeen = memo.AdmitSeen,
+        };
+
+    // The resolver shards (IShaderPipelineProvider.ResolveShardCount), ResolveShards.Default unless a test or bench sets
+    // it before the first resolution.
+    public int ResolveShardCount
+    {
+        get => _shards.Length;
+        internal set
+        {
+            lock (_resolveGate)
+            {
+                CreateShards(Math.Clamp(value, 1, ResolveShards.Maximum));
+            }
+        }
+    }
+
+    public int ResolveShardOf(RegisterBanks banks, bool compute) =>
+        _shards.Length == 1 ? 0
+        : ResolveShards.ShardOf(compute ? ResolveShards.ComputeRoute(banks) : ResolveShards.DrawRoute(banks, RenderExecutor.PixelStageActive(banks)),
+            _shards.Length);
+
+    // The sharded paths' use of the shared tier and of their own gates, for the prefetch line (TakeShardReport): shared
+    // gate takes and wait, shard gate wait (a shard's thread against the worker resolving a job of that shard), draws
+    // resolved through a shard's memo, and nested resolutions that went to the shared tier whole.
+    private static readonly ThreadCounter _sharedTakes = new();
+    private static readonly ThreadCounter _sharedWaitTicks = new();
+    private static readonly ThreadCounter _shardWaitTicks = new();
+    private static readonly ThreadCounter _shardedDraws = new();
+    private static readonly ThreadCounter _nestedShared = new();
+    private static int _nestedReports;
+
+    // Depth of sharded draw resolutions on this thread (any cache): a resolution inside one never waits for a shard gate.
+    [ThreadStatic]
+    private static int t_shardedDepth;
+
+    // How this thread's last resolution was answered, for the prefetch's allocation sample by path (alloc_by_path=).
+    internal enum ResolvePath : byte
+    {
+        Other,          // refused, abandoned, or a path not named here
+        DrawHit,        // the shard memo's entry, revalidated
+        DrawRebuilt,    // the entry rebuilt from its words revalidation
+        DrawFull,       // a full graphics resolution (memo miss)
+        ComputeKept,    // the kept compute program
+        ComputeRebound, // the kept program rebound to new user data
+        ComputeResolve, // a full compute resolution
+        Count,
+    }
+
+    internal static readonly string[] ResolvePathNames = ["other", "draw_hit", "draw_rebuilt", "draw_full", "compute_kept", "compute_rebound", "compute_resolve"];
+
+    [ThreadStatic]
+    internal static ResolvePath t_resolvePath;
+
+    // Why a resolution took the shared tier (shared_by= and shared_wait_by= in TakeShardReport).
+    internal enum SharedReason
+    {
+        DrawNew,        // a draw whose key the shard's memo does not hold
+        DrawMiss,       // a draw whose memo entry missed for another reason, or that cannot be kept (uncacheable)
+        DrawUnsharded,  // a draw resolved without a shard's memo (memo off)
+        Nested,         // a draw resolved inside another resolution on one thread (ResolveNestedShared)
+        Verify,         // RESOLVE_MEMO=verify's full resolutions
+        ComputeResolve, // a dispatch with no kept program of its shape: resolved in full
+        ComputeRebind,  // a kept program's rebinding that the shared tier has to make (rebind_shared_by=)
+        ComputeWorker,  // a dispatch resolved where the kernel may be predicted (the worker with predictions on)
+        ComputeRetry,   // a dispatch that may suspend on its pipeline (ComputeProgramRetry)
+        Other,          // tessellation, mesh and register-form resolutions, frontend fallback compiles
+        Count,
+    }
+
+    private static readonly string[] SharedReasonNames =
+        ["draw_new", "draw_miss", "draw_unsharded", "nested", "verify", "compute_resolve", "compute_rebind", "compute_worker", "compute_retry", "other"];
+
+    private static readonly ThreadCounter[] _sharedTakesBy = Enumerable.Range(0, (int)SharedReason.Count).Select(_ => new ThreadCounter()).ToArray();
+    private static readonly ThreadCounter[] _sharedWaitTicksBy = Enumerable.Range(0, (int)SharedReason.Count).Select(_ => new ThreadCounter()).ToArray();
+
+    // Dispatches answered off the shared tier with shards (kept, rebound), and the rebindings it had to make, by why.
+    private static readonly ThreadCounter _unsharedComputeKept = new();
+    private static readonly ThreadCounter _unsharedComputeRebound = new();
+    private static readonly ThreadCounter[] _rebindSharedBy =
+        Enumerable.Range(0, (int)ShaderProgramCache.UnsharedRefusal.Count).Select(_ => new ThreadCounter()).ToArray();
+
+    public static string TakeShardReport()
+    {
+        static string Milliseconds(long ticks) =>
+            (ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+        var by = new System.Text.StringBuilder();
+        var waitBy = new System.Text.StringBuilder();
+        for (var index = 0; index < (int)SharedReason.Count; index++)
+        {
+            var separator = index == 0 ? "" : ",";
+            by.Append(separator).Append(SharedReasonNames[index]).Append('=').Append(_sharedTakesBy[index].Take());
+            waitBy.Append(separator).Append(SharedReasonNames[index]).Append('=').Append(Milliseconds(_sharedWaitTicksBy[index].Take()));
+        }
+
+        var rebind = new System.Text.StringBuilder();
+        for (var index = 0; index < (int)ShaderProgramCache.UnsharedRefusal.Count; index++)
+        {
+            rebind.Append(index == 0 ? "" : ",").Append(ShaderProgramCache.UnsharedRefusalNames[index]).Append('=').Append(_rebindSharedBy[index].Take());
+        }
+
+        return FormattableString.Invariant($"shared_takes={_sharedTakes.Take()} shared_wait_ms={Milliseconds(_sharedWaitTicks.Take())} ") +
+            FormattableString.Invariant($"shard_wait_ms={Milliseconds(_shardWaitTicks.Take())} sharded_draws={_shardedDraws.Take()} ") +
+            FormattableString.Invariant($"nested_shared={_nestedShared.Take()} materialization_shared={ShaderProgramCache.TakeMaterializationGateTakes()} ") +
+            FormattableString.Invariant($"shared_by=({by}) shared_wait_by=({waitBy}) ") +
+            FormattableString.Invariant($"unshared_compute=(kept={_unsharedComputeKept.Take()},rebound={_unsharedComputeRebound.Take()}) rebind_shared_by=({rebind})");
+    }
+
+    // The shared tier's gate; timed and counted by reason with shards (with one shard, exactly the lock it always was).
+    private void EnterShared(SharedReason reason)
+    {
+        if (_shards.Length == 1)
+        {
+            Monitor.Enter(_resolveGate);
+            return;
+        }
+
+        _sharedTakes.Increment();
+        _sharedTakesBy[(int)reason].Increment();
+        if (Monitor.TryEnter(_resolveGate))
+        {
+            return;
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        Monitor.Enter(_resolveGate);
+        var waited = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+        _sharedWaitTicks.Add(waited);
+        _sharedWaitTicksBy[(int)reason].Add(waited);
+    }
+
+    // EnterShared for a block (using): the forms that held the gate with a lock statement.
+    private SharedScope EnterSharedScope(SharedReason reason)
+    {
+        EnterShared(reason);
+        return new SharedScope(_resolveGate);
+    }
+
+    private readonly ref struct SharedScope(object gate)
+    {
+        public void Dispose() => Monitor.Exit(gate);
+    }
+
+    // A full resolution under the shared tier (with one shard the caller already holds it: re-entered).
+    private GraphicsPrograms ResolveFullShared(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags,
+        SharedReason reason)
+    {
+        EnterShared(reason);
+        try
+        {
+            return ResolveFull(banks, targetExportMapping, flags);
+        }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
+        }
+    }
+
+    // A draw through its shard's memo, under the shard's gate; a miss takes the shared tier inside (ResolveThroughMemo).
+    private GraphicsPrograms GetGraphicsProgramsSharded(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    {
+        var shard = _shards[ResolveShards.ShardOf(ResolveShards.DrawRoute(banks, flags.PixelActive), _shards.Length)];
+        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
+        if (!Monitor.TryEnter(shard.Gate))
+        {
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            Monitor.Enter(shard.Gate);
+            _shardWaitTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        }
+
+        t_shardedDepth++;
+        try
+        {
+            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            _shardedDraws.Increment();
+            return ResolveThroughMemo(shard.Memo!, banks, targetExportMapping, flags);
+        }
+        finally
+        {
+            t_shardedDepth--;
+            Monitor.Exit(shard.Gate);
+        }
+    }
+
+    // A draw resolved inside another resolution on this thread (a guest read that runs deferred work), with shards: it
+    // must not wait for a shard gate while this thread holds the shared tier or another shard's gate, so it resolves in
+    // full under the shared tier and leaves every memo alone. Counted and named once; the programs are the same.
+    private GraphicsPrograms ResolveNestedShared(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    {
+        _nestedShared.Increment();
+        if (Interlocked.Increment(ref _nestedReports) == 1)
+        {
+            Console.Error.WriteLine("[GPU][PREFETCH] a draw resolved inside another resolution on one thread: resolved in full on the shared tier, " +
+                $"not through a resolver shard's memo (vs=0x{banks.Shader.Vertex.ExportAddress:X16} ps=0x{banks.Shader.Pixel.Address:X16}; counted as nested_shared)");
+        }
+
+        _graphicsResolved.Increment();
+        return ResolveFullShared(banks, targetExportMapping, flags, SharedReason.Nested);
+    }
 
     // The draw's programs (IShaderPipelineProvider). A draw whose registers, user data, targets and resolved
     // inputs are those of the last draw this thread resolved keeps its programs after their resources revalidate
@@ -306,19 +542,36 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var vertex = banks.Shader.Vertex;
         var pixel = banks.Shader.Pixel;
         var context = banks.Context;
+        if (_shards.Length > 1 && _resolveMemo is { Mode: ResolveMemoMode.On or ResolveMemoMode.Verify })
+        {
+            var shardedFlags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
+            return t_shardedDepth != 0 || Monitor.IsEntered(_resolveGate)
+                ? ResolveNestedShared(banks, targetExportMapping, shardedFlags)
+                : GetGraphicsProgramsSharded(banks, targetExportMapping, shardedFlags);
+        }
+
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
-        lock (_resolveGate)
+        EnterShared(SharedReason.DrawUnsharded);
+        try
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
+            var flags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
+            if (_resolveMemo is { Mode: ResolveMemoMode.On or ResolveMemoMode.Verify } memo)
+            {
+                // The memo replaces the kept programs of the last draw: it holds them too.
+                return ResolveThroughMemo(memo, banks, targetExportMapping, flags);
+            }
+
             var stamps = new KeptGraphicsStamps(
                 banks.Stamp(RegisterStamp.ShaderPrograms), banks.Stamp(RegisterStamp.VertexUserData), banks.Stamp(RegisterStamp.PixelUserData),
                 banks.Stamp(RegisterStamp.ColorTargets, RegisterStamp.ShaderInterface), ShaderHeaderRegistry.Registrations);
-            var flags = new KeptGraphicsFlags(pixelActive, depthBound, depthAspectBound, stencilAspectBound, triangleList, startInstanceUserData);
+            var shadowMiss = ShadowResolveMemo(banks, targetExportMapping, flags);
             ClaimKeptPrograms();
             var kept = _keptGraphics ??= new KeptGraphicsPrograms();
             if (TryKeepGraphicsPrograms(context, kept, stamps, flags, targetExportMapping, out var keptPrograms))
             {
                 _graphicsKept.Increment();
+                if (shadowMiss) _resolveMemo!.Store();
                 return keptPrograms;
             }
 
@@ -328,8 +581,617 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 depthAspectBound, stencilAspectBound, triangleList, mesh: null, startInstanceUserData: startInstanceUserData,
                 nativeTessellation: true);
             KeepGraphicsPrograms(kept, programs, context, stamps, flags, targetExportMapping);
+            if (shadowMiss) _resolveMemo!.Store();
             return programs;
         }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
+        }
+    }
+
+    // Shader header registrations are in the stamp too: a header registered at a code address changes what a lookup there
+    // finds, and it moves no content epoch.
+    public ProgramStateStamp ProgramState =>
+        new(_programs.ContentEpoch, DeviceDataLoads.Generation, _vertexTables.Generation, ShaderHeaderRegistry.Registrations);
+
+    public string DescribeProgramState() =>
+        $"content_epoch={_programs.ContentEpoch} device_data={DeviceDataLoads.Generation} " +
+        $"registrations={ShaderHeaderRegistry.Registrations} tables={_vertexTables.Generation} linked={_programs.LinkedLookups}";
+
+    // The resolve memo of this cache (GraphicsResolveMemo), or null with it off; SHARPEMU_DRAW_REUSE=0 turns it off too.
+    private GraphicsResolveMemo? _resolveMemo = DrawReuseDisabled || GraphicsResolveMemo.DefaultMode == ResolveMemoMode.Off
+        ? null
+        : new GraphicsResolveMemo(GraphicsResolveMemo.DefaultMode, GraphicsResolveMemo.DefaultCapacity);
+
+    // For tests: the memo's mode on this cache, with a fresh memo.
+    internal ResolveMemoMode ResolveMemoMode
+    {
+        get => _resolveMemo?.Mode ?? ResolveMemoMode.Off;
+        set
+        {
+            lock (_resolveGate)
+            {
+                _resolveMemo = value == ResolveMemoMode.Off ? null : new GraphicsResolveMemo(value, GraphicsResolveMemo.DefaultCapacity);
+                CreateShards(_shards.Length);
+            }
+        }
+    }
+
+    // For tests: whether this cache's memo rebuilds a words miss from its revalidation (GraphicsResolveMemo.Rebuild).
+    internal bool ResolveMemoRebuild
+    {
+        get => _resolveMemo?.Rebuild ?? false;
+        set
+        {
+            lock (_resolveGate)
+            {
+                if (_resolveMemo is { } memo) memo.Rebuild = value;
+                CreateShards(_shards.Length);
+            }
+        }
+    }
+
+    // For tests: whether this cache's memo keeps only rebuilds whose words repeat (GraphicsResolveMemo.HoldChurn).
+    internal bool ResolveMemoHoldChurn
+    {
+        get => _resolveMemo?.HoldChurn ?? false;
+        set
+        {
+            lock (_resolveGate)
+            {
+                if (_resolveMemo is { } memo) memo.HoldChurn = value;
+                CreateShards(_shards.Length);
+            }
+        }
+    }
+
+    // For tests: whether this cache's memo keeps a new key's resolution only on its second miss (GraphicsResolveMemo.AdmitSeen).
+    internal bool ResolveMemoAdmitSeen
+    {
+        get => _resolveMemo?.AdmitSeen ?? false;
+        set
+        {
+            lock (_resolveGate)
+            {
+                if (_resolveMemo is { } memo) memo.AdmitSeen = value;
+                CreateShards(_shards.Length);
+            }
+        }
+    }
+
+    // Shadow mode: counts whether the memo would have the draw's key; true when it has not and the key is to be stored
+    // once the draw resolved.
+    private bool ShadowResolveMemo(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    {
+        if (_resolveMemo is not { Mode: ResolveMemoMode.Shadow } memo)
+        {
+            return false;
+        }
+
+        if (_registry.HasFrontend)
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Frontend);
+            return false;
+        }
+
+        if (!memo.Fill(banks, targetExportMapping, flags, new PixelOutputBlendBits(PixelOutputBlend(banks.Context))))
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Key);
+            return false;
+        }
+
+        if (memo.Find() is not null)
+        {
+            GraphicsResolveMemo.NoteShadowHit();
+            return false;
+        }
+
+        GraphicsResolveMemo.NoteKeyMiss(memo.ClassifyMiss());
+        return true;
+    }
+
+    // A draw through the memo (on or verify): the programs of an entry with its key whose guest reads still give the
+    // same answer, else a full resolution kept for the draws that follow.
+    private GraphicsPrograms ResolveThroughMemo(GraphicsResolveMemo memo, RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        in KeptGraphicsFlags flags)
+    {
+        var cacheable = false;
+        var fillSerial = 0L;
+        var sharedReason = SharedReason.DrawMiss;
+        if (_registry.HasFrontend)
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Frontend);
+        }
+        else if (_programs.TracesLookups)
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Trace);
+        }
+        else if (!memo.Fill(banks, targetExportMapping, flags, new PixelOutputBlendBits(PixelOutputBlend(banks.Context))))
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Key);
+        }
+        else
+        {
+            cacheable = true;
+            fillSerial = memo.FillSerial;
+            if (memo.Find() is { } entry)
+            {
+                if (TryTakeResolveMemo(memo, entry, flags.PixelActive, out var taken, out var fingerprint, out var rebuilt) is not { } miss)
+                {
+                    if (rebuilt)
+                    {
+                        // A words miss answered from its revalidation: counted as the miss it is, not resolved again.
+                        GraphicsResolveMemo.NoteMiss(ResolveMemoMiss.Words);
+                        GraphicsResolveMemo.NoteRebuilt();
+                        t_resolvePath = ResolvePath.DrawRebuilt;
+                    }
+                    else
+                    {
+                        GraphicsResolveMemo.NoteHit();
+                        t_resolvePath = ResolvePath.DrawHit;
+                    }
+
+                    return memo.Mode == ResolveMemoMode.Verify
+                        ? VerifyResolveMemo(memo, entry, taken!, fingerprint, banks, targetExportMapping, flags)
+                        : taken!;
+                }
+
+                GraphicsResolveMemo.NoteMiss(miss);
+            }
+            else
+            {
+                GraphicsResolveMemo.NoteMiss(ResolveMemoMiss.New);
+                sharedReason = SharedReason.DrawNew;
+                GraphicsResolveMemo.NoteKeyMiss(memo.ClassifyMiss());
+                // GraphicsResolveMemo.DefaultAdmitSeen: a key's first miss resolves in full without being kept.
+                if (memo.AdmitSeen && !memo.SeenBefore())
+                {
+                    GraphicsResolveMemo.NoteNotAdmitted();
+                    cacheable = false;
+                }
+            }
+        }
+
+        _graphicsResolved.Increment();
+        t_resolvePath = ResolvePath.DrawFull;
+        // The miss: the full resolution and its store read and fill the shared tier (the last sources StoreResolveMemo
+        // reads are the ones this resolution's PrepareSource left), so both run under it (re-entered with one shard).
+        EnterShared(sharedReason);
+        try
+        {
+            var deviceDataGeneration = DeviceDataLoads.Generation;
+            var contentEpoch = _programs.ContentEpoch;
+            var linkedLookups = _programs.LinkedLookups;
+            var tablesGeneration = _vertexTables.Generation;
+            var programs = ResolveFull(banks, targetExportMapping, flags);
+            if (cacheable && memo.FillSerial != fillSerial)
+            {
+                // The memo holds another draw's key now: this result has no key to be stored under.
+                GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Changed);
+            }
+            else if (cacheable)
+            {
+                StoreResolveMemo(memo, banks, programs, flags.PixelActive, deviceDataGeneration, contentEpoch, linkedLookups, tablesGeneration);
+            }
+
+            return programs;
+        }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
+        }
+    }
+
+    private GraphicsPrograms ResolveFull(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags) =>
+        ResolveGraphicsProgramsCore(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface, banks.Context, targetExportMapping,
+            flags.PixelActive, flags.DepthBound, flags.DepthAspectBound, flags.StencilAspectBound, flags.TriangleList, mesh: null,
+            startInstanceUserData: flags.StartInstanceUserData, nativeTessellation: true);
+
+    // Null when every guest read the entry's resolution made still gives the same answer: the program cache and the
+    // device data loads unchanged, the same header record and code identity at each stage's address, the same vertex
+    // table words and pixel input semantics, and each stage's descriptor words evaluating to its snapshot (the reads
+    // the full resolution records are made here as well).
+    // taken: the programs to hand out (the entry's, or rebuilt from them), with their verify fingerprint. held (verify's
+    // re-check): the programs a take handed out, revalidated in place of the entry's. allowRebuild false (that re-check): a
+    // words miss is a miss, and the entry is left as it is.
+    private ResolveMemoMiss? TryTakeResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, bool pixelActive,
+        out GraphicsPrograms? taken, out ulong fingerprint, out bool rebuilt, bool allowRebuild = true, GraphicsPrograms? held = null)
+    {
+        taken = null;
+        fingerprint = 0;
+        rebuilt = false;
+        if (entry.ContentEpoch != _programs.ContentEpoch || entry.TablesGeneration != _vertexTables.Generation)
+        {
+            return ResolveMemoMiss.Epoch;
+        }
+
+        if (entry.DeviceDataGeneration != DeviceDataLoads.Generation)
+        {
+            return ResolveMemoMiss.Generation;
+        }
+
+        if (!ReferenceEquals(_registry.Require(entry.VertexAddress, "vertex"), entry.VertexShader))
+        {
+            return ResolveMemoMiss.Header;
+        }
+
+        if (HashOf(entry.VertexShader!, entry.VertexAddress, "vertex") != entry.VertexHash)
+        {
+            return ResolveMemoMiss.Identity;
+        }
+
+        if (pixelActive)
+        {
+            if (!ReferenceEquals(_registry.Require(entry.PixelAddress, "pixel"), entry.PixelShader))
+            {
+                return ResolveMemoMiss.Header;
+            }
+
+            if (HashOf(entry.PixelShader!, entry.PixelAddress, "pixel") != entry.PixelHash)
+            {
+                return ResolveMemoMiss.Identity;
+            }
+        }
+
+        if (entry.TableWords is { } words && !VertexInputResolver.SameTableWords(_context, words, entry.AttributeTable, entry.BufferTable,
+                _vertexTableScratch ??= new uint[VertexTableWords.MaxWords]))
+        {
+            return ResolveMemoMiss.Tables;
+        }
+
+        if (pixelActive &&
+            PixelStageInputResolver.CustomInterpolationMask(_context, entry.PixelShader!, entry.PixelSemanticCount) != entry.PixelCustomMask)
+        {
+            return ResolveMemoMiss.Semantics;
+        }
+
+        // Each stage's descriptor words, pixel first as the full resolution reads them. With rebuild, a stage whose words
+        // changed takes the snapshot its full resolution would materialize now from this same evaluation: everything else
+        // that resolution reads is the entry's (checked above or in the key), so it would pick the entry's programs again
+        // as long as the words keep their specialization (RevalidateOrRebuild refuses otherwise).
+        var programs = held ?? entry.Programs!;
+        var pixelStage = programs.PixelInput.Stage;
+        var vertexStage = programs.VertexInput.Stage;
+        var rebuild = allowRebuild && memo.Rebuild;
+        var pixelRebuilt = false;
+        var vertexRebuilt = false;
+        if ((pixelActive && !RevalidateMemoStage(ref pixelStage, rebuild, ref pixelRebuilt)) || !RevalidateMemoStage(ref vertexStage, rebuild, ref vertexRebuilt))
+        {
+            return ResolveMemoMiss.Words;
+        }
+
+        var stageRebuilt = pixelRebuilt || vertexRebuilt;
+
+        // A load learned while the words were read.
+        if (entry.DeviceDataGeneration != DeviceDataLoads.Generation)
+        {
+            if (!stageRebuilt) return ResolveMemoMiss.Generation;
+            GraphicsResolveMemo.NoteRebuildRefused(ResolveMemoRebuildRefusal.Generation);
+            return ResolveMemoMiss.Words;
+        }
+
+        // With shards, a hit runs beside other shards' misses on the shared tier: a program entry replaced or the vertex
+        // tables dropped while its words were read makes it a miss, as a load learned meanwhile does above. With one
+        // shard nothing moves them while the gate is held.
+        if (_shards.Length > 1 && (entry.ContentEpoch != _programs.ContentEpoch || entry.TablesGeneration != _vertexTables.Generation))
+        {
+            return ResolveMemoMiss.Epoch;
+        }
+
+        if (!stageRebuilt)
+        {
+            taken = programs;
+            fingerprint = entry.Fingerprint;
+            if (held is null)
+            {
+                entry.RebuiltLast = false;
+            }
+
+            return null;
+        }
+
+        taken = WithStages(programs, vertexRebuilt ? vertexStage : null, pixelRebuilt ? pixelStage : null);
+        fingerprint = memo.Mode == ResolveMemoMode.Verify ? GraphicsProgramsComparer.Fingerprint(taken) : 0;
+        rebuilt = true;
+        // GraphicsResolveMemo.DefaultHoldChurn: a rebuild right after another is kept only when both evaluated the same words.
+        var signature = 0UL;
+        if (memo.HoldChurn && entry.RebuiltLast)
+        {
+            signature = RebuildSignature(taken, vertexRebuilt, pixelRebuilt);
+            if (signature != entry.RebuildSignature)
+            {
+                entry.RebuildSignature = signature;
+                GraphicsResolveMemo.NoteRebuildHeld();
+                return null;
+            }
+        }
+
+        entry.Programs = taken;
+        entry.Fingerprint = fingerprint;
+        entry.RebuildSignature = signature;
+        entry.RebuiltLast = true;
+        return null;
+    }
+
+    // What a rebuild evaluated, for telling a draw whose words keep moving from one whose words settled (HoldChurn): the
+    // flattened tables of the rebuilt stages (a stage not rebuilt is the entry's own), which hold every descriptor word the
+    // evaluation read from memory; the rest of a fast snapshot comes from the origin's own user data. A collision, or words
+    // the tables miss, only keeps a correct rebuild.
+    private static ulong RebuildSignature(GraphicsPrograms programs, bool vertexRebuilt, bool pixelRebuilt)
+    {
+        var hash = 0x9E3779B97F4A7C15UL ^ (vertexRebuilt ? 1UL : 0) ^ (pixelRebuilt ? 2UL : 0);
+        if (vertexRebuilt) hash = SignTable(hash, programs.VertexInput.Stage.Resources);
+        return pixelRebuilt ? SignTable(hash, programs.PixelInput.Stage.Resources) : hash;
+    }
+
+    private static ulong SignTable(ulong hash, ResourceSnapshot snapshot) =>
+        XxHash3.HashToUInt64(MemoryMarshal.AsBytes(snapshot.FlattenedResourceTable.AsSpan()), (long)hash);
+
+    // False when the stage's words no longer evaluate to its snapshot and it was not rebuilt (refusals counted).
+    private bool RevalidateMemoStage(ref ShaderStageResources stage, bool rebuild, ref bool rebuilt)
+    {
+        _host.BeginGuestWordReads();
+        try
+        {
+            switch (_programs.RevalidateOrRebuild(stage, rebuild, out var next))
+            {
+                case ResourceMaterializer.FastRevalidation.Current:
+                    return true;
+                case ResourceMaterializer.FastRevalidation.Rebuilt:
+                    stage = next;
+                    rebuilt = true;
+                    return true;
+                case ResourceMaterializer.FastRevalidation.NotFast:
+                    GraphicsResolveMemo.NoteRebuildRefused(ResolveMemoRebuildRefusal.Origin);
+                    return false;
+                default:
+                    if (rebuild)
+                    {
+                        GraphicsResolveMemo.NoteRebuildRefused(ResourceMaterializer.LastRebuildRefusal switch
+                        {
+                            ResourceMaterializer.RebuildRefusal.Evaluate => ResolveMemoRebuildRefusal.Evaluate,
+                            ResourceMaterializer.RebuildRefusal.Failed => ResolveMemoRebuildRefusal.Failed,
+                            ResourceMaterializer.RebuildRefusal.Specialization => ResolveMemoRebuildRefusal.Specialization,
+                            _ => ResolveMemoRebuildRefusal.Refused,
+                        });
+                    }
+
+                    return false;
+            }
+        }
+        finally
+        {
+            _host.EndGuestWordReads();
+        }
+    }
+
+    // The programs with these stage resources in place of their own; the input descriptions of a rebuilt stage are
+    // copied, never written: the result held before may still be on its way to the worker. A stage not rebuilt keeps its
+    // input description, shared as a hit shares the whole result.
+    private static GraphicsPrograms WithStages(GraphicsPrograms programs, ShaderStageResources? vertexStage, ShaderStageResources? pixelStage)
+    {
+        var vertexInput = programs.VertexInput;
+        if (vertexStage is { } vertex)
+        {
+            vertexInput = vertexInput.WithoutStage();
+            vertexInput.Stage = vertex;
+        }
+
+        var pixelInput = programs.PixelInput;
+        if (pixelStage is { } pixel)
+        {
+            pixelInput = pixelInput.WithoutStage();
+            pixelInput.Stage = pixel;
+        }
+
+        return new GraphicsPrograms(vertexInput, pixelInput)
+        {
+            Tessellation = programs.Tessellation,
+            Vertex = programs.Vertex,
+            Pixel = programs.Pixel,
+            MeshInput = programs.MeshInput,
+            Available = programs.Available,
+            SolidClear = programs.SolidClear,
+            PositionStream = programs.PositionStream,
+            DisableBlending = programs.DisableBlending,
+            DropUnwrittenColorTargets = programs.DropUnwrittenColorTargets,
+        };
+    }
+
+    // Keeps a full resolution under the filled key, with what a hit re-checks, when it can be repeated from them: one
+    // vertex and pixel program pair with no tessellation, mesh or shader calls, nothing changed while it resolved, and
+    // vertex tables read back to the inputs it decoded (the guest may have written them since).
+    private void StoreResolveMemo(GraphicsResolveMemo memo, RegisterBanks banks, GraphicsPrograms programs, bool pixelActive,
+        int deviceDataGeneration, long contentEpoch, long linkedLookups, long tablesGeneration)
+    {
+        var cause = !programs.Available ? ResolveMemoUncacheable.Unavailable
+            : programs.MeshInput is not null ? ResolveMemoUncacheable.Mesh
+            : programs.Tessellation is not null || programs.VertexInput.Tessellation is not null ? ResolveMemoUncacheable.Tessellation
+            : _programs.LinkedLookups != linkedLookups || HasCalls(programs.VertexInput.Stage) || HasCalls(programs.PixelInput.Stage)
+                ? ResolveMemoUncacheable.Calls
+            : DeviceDataLoads.Generation != deviceDataGeneration || _programs.ContentEpoch != contentEpoch ||
+              _vertexTables.Generation != tablesGeneration ? ResolveMemoUncacheable.Changed
+            : programs.VertexInput.Stage.Program is null || programs.VertexInput.Stage.Resources.Origin is null ||
+              (pixelActive && (programs.PixelInput.Stage.Program is null || programs.PixelInput.Stage.Resources.Origin is null))
+                ? ResolveMemoUncacheable.Origin
+            : (ResolveMemoUncacheable?)null;
+        var vertexSource = _lastSources[(int)ShaderStage.Vertex];
+        var pixelSource = pixelActive ? _lastSources[(int)ShaderStage.Pixel] : null;
+        if (cause is null && (vertexSource is null || vertexSource.Address != banks.Shader.Vertex.ExportAddress ||
+            (pixelActive && (pixelSource is null || pixelSource.Address != banks.Shader.Pixel.Address))))
+        {
+            cause = ResolveMemoUncacheable.Changed;
+        }
+
+        VertexTableWords? tableWords = null;
+        ulong attributeTable = 0, bufferTable = 0;
+        if (cause is null && !TryReadMemoTables(vertexSource!, programs.VertexInput, out tableWords, out attributeTable, out bufferTable))
+        {
+            cause = ResolveMemoUncacheable.Tables;
+        }
+
+        if (cause is { } refused)
+        {
+            GraphicsResolveMemo.NoteUncacheable(refused);
+            return;
+        }
+
+        var entry = memo.Store();
+        entry.Programs = programs;
+        entry.VertexShader = vertexSource!.Registered;
+        entry.VertexAddress = vertexSource.Address;
+        entry.VertexHash = vertexSource.Hash;
+        entry.TableWords = tableWords;
+        entry.AttributeTable = attributeTable;
+        entry.BufferTable = bufferTable;
+        if (pixelSource is not null)
+        {
+            entry.PixelShader = pixelSource.Registered;
+            entry.PixelAddress = pixelSource.Address;
+            entry.PixelHash = pixelSource.Hash;
+            entry.PixelSemanticCount = Math.Min(Math.Min(pixelSource.Registered.InputSemanticsCount, programs.PixelInput.InputCount),
+                (uint)PixelInputInfo.InterpolatorCount);
+            entry.PixelCustomMask = programs.PixelInput.CustomInterpolationMask;
+        }
+
+        entry.ContentEpoch = contentEpoch;
+        entry.DeviceDataGeneration = deviceDataGeneration;
+        entry.TablesGeneration = tablesGeneration;
+        entry.Fingerprint = memo.Mode == ResolveMemoMode.Verify ? GraphicsProgramsComparer.Fingerprint(programs) : 0;
+    }
+
+    private static bool HasCalls(in ShaderStageResources stage) =>
+        stage.CallArguments is { Length: > 0 } || stage.CallTargets is { Length: > 0 } || stage.CallRecords is { Length: > 0 } ||
+        stage.CallRecordRanges is { Length: > 0 };
+
+    // The vertex table words the draw's inputs decode from, read again now: false when they cannot be compared later
+    // (static attributes, more inputs than a table holds, a table not read whole) or no longer decode to the draw's
+    // attributes and buffers. Null words when the program reads no tables.
+    private bool TryReadMemoTables(ShaderSource source, VertexInputInfo resolved, out VertexTableWords? words, out ulong attributeTable,
+        out ulong bufferTable)
+    {
+        words = null;
+        attributeTable = bufferTable = 0;
+        if (!_vertexTables.TryGet(source.Registered, source.Hash, out var metadata) || metadata is null)
+        {
+            return false;
+        }
+
+        if (!VertexInputResolver.ReadsTables(metadata))
+        {
+            return resolved.Attributes.Length == 0 && resolved.Buffers.Length == 0;
+        }
+
+        if (metadata.InputSemantics.Length > VertexInputInfo.MaxBuffers)
+        {
+            return false;
+        }
+
+        foreach (var word in metadata.InputSemantics)
+        {
+            var semantic = new ShaderInputSemantic(word);
+            if (semantic.StaticBufferIndex || semantic.StaticAttribute)
+            {
+                return false;
+            }
+        }
+
+        attributeTable = VertexInputResolver.ReadTablePointer(source.UserData, metadata.VertexAttributeRegister);
+        bufferTable = VertexInputResolver.ReadTablePointer(source.UserData, metadata.VertexBufferRegister);
+        if (attributeTable == 0 || bufferTable == 0)
+        {
+            return false;
+        }
+
+        var decoded = VertexInputResolver.ResolveVertexInputs(_context, source.Registered, metadata, source.UserData, resolved.PositionExportControl,
+            resolved.ClipSpace, out words);
+        return words is { WholeSpans: true } &&
+            decoded.Attributes.AsSpan().SequenceEqual(resolved.Attributes) && decoded.Buffers.AsSpan().SequenceEqual(resolved.Buffers);
+    }
+
+    // Verify: the hit's programs against a full resolution of the same draw, and against what they were when kept; the
+    // programs to hand out. A resolution beside the guest and the worker reads guest memory a little later than the hit's
+    // revalidation did, so a word written between the two shows as a difference no key or revalidation could have
+    // caught: the hit was current when it was made, and the take check judges its recorded reads as it judges a full
+    // resolution's. So a difference is first checked for that race: the hit's revalidation is made again (without a
+    // rebuild), and a miss now means its words changed since (raced, the full resolution handed out); while it still
+    // holds, the draw is resolved in full once more, and an answer equal to the hit means the difference came and went
+    // (raced). Only a hit that still revalidates while a second full resolution still differs from it is a mismatch, and
+    // a result written since it was kept always is; either stops emulation (on a speculative thread the work is
+    // abandoned and counted, GpuFatal.VerifyFailed).
+    // memoPrograms: what the take hands out (the entry's, or a rebuild kept or not), fingerprint: theirs when taken.
+    private GraphicsPrograms VerifyResolveMemo(GraphicsResolveMemo memo, GraphicsResolveMemo.Entry entry, GraphicsPrograms memoPrograms,
+        ulong fingerprint, RegisterBanks banks, ReadOnlySpan<ColorComponentMap> targetExportMapping, in KeptGraphicsFlags flags)
+    {
+        var full = ResolveFullShared(banks, targetExportMapping, flags, SharedReason.Verify);
+        GraphicsResolveMemo.NoteVerified();
+        var difference = GraphicsProgramsComparer.Difference(memoPrograms, full);
+        if (difference is null)
+        {
+            if (GraphicsProgramsComparer.Fingerprint(memoPrograms) == fingerprint)
+            {
+                return memoPrograms;
+            }
+
+            throw ResolveMemoVerifyFailed(entry, "written_since_kept", "");
+        }
+
+        // Named before anything is read again: the words that differ, their addresses, and both permutation keys.
+        var stages = GraphicsProgramsComparer.DescribeStages(memoPrograms, full);
+        // Ahead of the worker, reads that straddle a GPU write recorded since the resolution began (the hit's proof
+        // compared through the write, the full resolution read a line answered clean before it): the take refuses this
+        // resolution (IShaderPipelineHost.ConcurrentReadsSuperseded latches it), whichever programs it hands out.
+        if (_host.ConcurrentReadsSuperseded())
+        {
+            GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.Superseded);
+            ReportResolveMemoRace(entry, difference, "recheck=superseded", stages);
+            return full;
+        }
+
+        if (TryTakeResolveMemo(memo, entry, flags.PixelActive, out _, out _, out _, allowRebuild: false, held: memoPrograms) is { } miss)
+        {
+            GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.Changed);
+            ReportResolveMemoRace(entry, difference, $"recheck=miss:{miss.ToString().ToLowerInvariant()}", stages);
+            return full;
+        }
+
+        var again = ResolveFullShared(banks, targetExportMapping, flags, SharedReason.Verify);
+        if (GraphicsProgramsComparer.Difference(memoPrograms, again) is not { } againDifference)
+        {
+            GraphicsResolveMemo.NoteVerifyRaced(ResolveMemoVerifyRace.CameAndWent);
+            ReportResolveMemoRace(entry, difference, "recheck=current again=same_as_hit", stages);
+            return memoPrograms;
+        }
+
+        throw ResolveMemoVerifyFailed(entry, difference,
+            $" recheck=current again={againDifference} hit_vs_full=[{stages}] hit_vs_again=[{GraphicsProgramsComparer.DescribeStages(memoPrograms, again)}]");
+    }
+
+    private static Exception ResolveMemoVerifyFailed(GraphicsResolveMemo.Entry entry, string difference, string detail)
+    {
+        GraphicsResolveMemo.NoteVerifyFailed();
+        var message = $"[GPU][RESOLVE_MEMO] verify mismatch field={difference} vs=0x{entry.VertexAddress:X16} ps=0x{entry.PixelAddress:X16} " +
+            $"key_hash=0x{entry.Hash:X16}{detail}.";
+        Console.Error.WriteLine(message);
+        return GpuFatal.VerifyFailed(message);
+    }
+
+    // The first races of a run, with what differed: the words and the guest addresses they were read from name the writer.
+    private static int _resolveMemoRaceReports;
+    private const int MaxResolveMemoRaceReports = 32;
+
+    private static void ReportResolveMemoRace(GraphicsResolveMemo.Entry entry, string difference, string how, string stages)
+    {
+        if (Interlocked.Increment(ref _resolveMemoRaceReports) > MaxResolveMemoRaceReports)
+        {
+            return;
+        }
+
+        var thread = Thread.CurrentThread;
+        Console.Error.WriteLine($"[GPU][RESOLVE_MEMO] verify raced field={difference} {how} speculative={GpuFatal.IsSpeculative} " +
+            $"thread={thread.Name ?? thread.ManagedThreadId.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
+            $"vs=0x{entry.VertexAddress:X16} ps=0x{entry.PixelAddress:X16} key_hash=0x{entry.Hash:X16} hit_vs_full=[{stages}].");
     }
 
     // The interface's earlier forms, for callers holding only the four inputs.
@@ -411,8 +1273,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private static readonly ThreadCounter _computeResolved = new();
 
     public static string TakeKeptProgramsReport() =>
-        FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] graphics_kept={_graphicsKept.Take()} graphics_resolved={_graphicsResolved.Take()} ") +
-        FormattableString.Invariant($"compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()}");
+        FormattableString.Invariant($"[PERF][KEPT_PROGRAMS] compute_kept={_computeKept.Take()} compute_rebound={_computeRebound.Take()} compute_resolved={_computeResolved.Take()}");
+
+    /// <summary>
+    /// How graphics resolutions were answered since the last call, for the backend's always-on counter line (the
+    /// prefetch report): by the draw's own kept programs, by a full resolution, and what the resolve memo did.
+    /// </summary>
+    public static string TakeGraphicsResolveReport() =>
+        FormattableString.Invariant($"graphics_kept={_graphicsKept.Take()} graphics_resolved={_graphicsResolved.Take()} ") +
+        GraphicsResolveMemo.TakeReport() + " " + ResourceMaterializer.TakeReadProofReport();
 
     // Besides upstream's register stamps, the fork's resolution reads the host viewport transform (dynamic
     // viewport registers, compared resolved), the depth aspects and triangle-list assembly (per-vertex pixel
@@ -607,7 +1476,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             TessellationMaxFactor(shaderInterface.MaxTessellationLevel),
             quad);
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             var started = TraceTessellationPrograms ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
@@ -725,6 +1594,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
             return new GraphicsPrograms { Available = false };
         }
+        if (ResolveMemoMode is ResolveMemoMode.On or ResolveMemoMode.Verify)
+        {
+            GraphicsResolveMemo.NoteUncacheable(ResolveMemoUncacheable.Mesh);
+        }
+
         return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
             depthAspectBound: depthBound, stencilAspectBound: false, triangleList: false, mesh);
     }
@@ -743,7 +1617,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         MeshDrawConfiguration? mesh)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return ResolveGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound,
@@ -1090,10 +1964,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var outputs = _boundOutputs;
         outputs.Clear();
         var location = 0u;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         foreach (var slot in boundSlots)
         {
             if (unwrittenExportMasks is { } exportMasks &&
-                RenderExecutor.IsUnwrittenColorTarget(context, slot, targetExportMapping[(int)slot], exportMasks))
+                RenderExecutor.IsUnwrittenColorTarget(context, in routing, slot, targetExportMapping[(int)slot], exportMasks))
             {
                 continue;
             }
@@ -1105,7 +1980,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             // A bound slot that no export reaches keeps its contents: its color write mask is zero.
-            var exportTarget = PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
+            var exportTarget = routing.ExportForSlot(slot);
             // The high nibble keys the compiled program by the export that feeds the slot.
             outputModes[(int)slot] = (byte)(((uint)kind + 1) | (uint)((exportTarget + 1) << 4));
             outputMappings[(int)slot] = new ColorComponentMap(mapping.Packed);
@@ -1269,9 +2144,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         var written = 0;
         var writtenSlot = 0u;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         foreach (var slot in boundSlots)
         {
-            if (!RenderExecutor.IsUnwrittenColorTarget(context, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
+            if (!RenderExecutor.IsUnwrittenColorTarget(context, in routing, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
             {
                 written++;
                 writtenSlot = slot;
@@ -1308,11 +2184,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         uint writtenWidth = 0, writtenHeight = 0;
         uint unwrittenWidth = uint.MaxValue, unwrittenHeight = uint.MaxValue;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         for (var index = 0; index < boundSlots.Length; index++)
         {
             var slot = boundSlots[index];
             var extent = boundExtents[index];
-            if (RenderExecutor.IsUnwrittenColorTarget(context, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
+            if (RenderExecutor.IsUnwrittenColorTarget(context, in routing, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
             {
                 unwrittenWidth = Math.Min(unwrittenWidth, extent.Width);
                 unwrittenHeight = Math.Min(unwrittenHeight, extent.Height);
@@ -1402,8 +2279,25 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         refusal = ComputePrefetchRefusal.None;
         var compute = banks.Shader.Compute;
+        var sharedReason = retry is not null ? SharedReason.ComputeRetry : SharedReason.ComputeResolve;
+        // With shards, a dispatch whose kept program holds or rebinds off the shared tier never takes it (the kept programs
+        // are this thread's own); the worker's form only where it predicts nothing (WithPrediction returns the program).
+        if (_shards.Length > 1 && UnsharedCompute && retry is null && !Monitor.IsEntered(_resolveGate))
+        {
+            if (!ahead && PredictsKernels)
+            {
+                sharedReason = SharedReason.ComputeWorker;
+            }
+            else if (TryGetComputeProgramUnshared(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, ahead,
+                         out var unshared, out refusal, ref sharedReason))
+            {
+                return unshared;
+            }
+        }
+
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        EnterShared(sharedReason);
+        try
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             if (retry is not null)
@@ -1443,6 +2337,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     SameUserScalars(previousRegisters.UserScalars, compute.UserScalars, compute.UserScalarCount) && _programs.Revalidate(previous.Input.Stage))
                 {
                     _computeKept.Increment();
+                    t_resolvePath = ResolvePath.ComputeKept;
                     return ahead
                         ? Ahead(previous, kept.Kernel, kept.Source, out refusal)
                         : WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
@@ -1451,6 +2346,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 if (kept.Entry is { } entry && ++kept.Rebinds % IdentityRecheckPeriod != 0)
                 {
                     _computeRebound.Increment();
+                    t_resolvePath = ResolvePath.ComputeRebound;
                     var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
                     KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
                     return ahead
@@ -1460,6 +2356,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             _computeResolved.Increment();
+            t_resolvePath = ResolvePath.ComputeResolve;
             var program = GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null,
                 out var source, out var systemRegisters, out var decoded, ahead);
             if (program.ImageCopy is not null)
@@ -1485,11 +2382,128 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 ? Ahead(program, kept.Kernel, source, out refusal)
                 : WithPrediction(program, kept.Kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
         }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
+        }
     }
+
+    // GetComputeProgramKept's kept and rebound answers without the shared tier (shards only): true with the answer, false
+    // with why the shared tier must make it (reason), having changed nothing the shared path reads differently.
+    private bool TryGetComputeProgramUnshared(ComputeStageRegisters compute, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ,
+        bool indirect, bool ahead, out ComputeProgram? result, out ComputePrefetchRefusal refusal, ref SharedReason reason)
+    {
+        result = null;
+        refusal = ComputePrefetchRefusal.None;
+        if (ahead && _registry.HasFrontend)
+        {
+            refusal = ComputePrefetchRefusal.Frontend;
+            return true;
+        }
+
+        if (DrawReuseDisabled || _registry.HasFrontend)
+        {
+            return false;
+        }
+
+        var registrations = ShaderHeaderRegistry.Registrations;
+        ClaimKeptPrograms();
+        if (_keptComputes is not { } all || !all.TryGetValue(compute.Address, out var keptList))
+        {
+            return false;
+        }
+
+        KeptComputeProgram? kept = null;
+        foreach (var candidate in keptList)
+        {
+            if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator && SameComputeShape(candidate.Registers, compute))
+            {
+                kept = candidate;
+                break;
+            }
+        }
+
+        if (kept is null)
+        {
+            return false;
+        }
+
+        if (kept.Program is { } previous && kept.Registers is { } previousRegisters && kept.DimensionX == dimensionX &&
+            kept.DimensionY == dimensionY && kept.DimensionZ == dimensionZ &&
+            SameUserScalars(previousRegisters.UserScalars, compute.UserScalars, compute.UserScalarCount) && _programs.Revalidate(previous.Input.Stage))
+        {
+            _computeKept.Increment();
+            t_resolvePath = ResolvePath.ComputeKept;
+            _unsharedComputeKept.Increment();
+            result = ahead
+                ? Ahead(previous, kept.Kernel, kept.Source, out refusal)
+                : WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+            return true;
+        }
+
+        if (kept.Entry is not { } entry)
+        {
+            return false;
+        }
+
+        reason = SharedReason.ComputeRebind;
+        if ((kept.Rebinds + 1) % IdentityRecheckPeriod == 0)
+        {
+            _rebindSharedBy[(int)ShaderProgramCache.UnsharedRefusal.Recheck].Increment();
+            return false;
+        }
+
+        var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute", ref t_computeUserData);
+        var source = kept.Source! with { UserData = userData };
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
+        var options = t_computeOptions ??= StageCompileOptions.CreateReusable();
+        options.ComputeInfo = input;
+        options.ComputeSystemRegisters = kept.SystemRegisters;
+        options.Tessellation = null;
+        var pushDataCursor = 0u;
+        bool completed;
+        ShaderProgram handle;
+        ShaderStageResources stage;
+        ShaderProgramCache.UnsharedRefusal refused;
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation))
+        {
+            completed = _programs.TryCompleteProgramUnshared(entry, source, options, ref pushDataCursor, out handle, out stage, out refused);
+        }
+
+        options.ComputeInfo = null;
+        if (!completed)
+        {
+            _rebindSharedBy[(int)refused].Increment();
+            return false;
+        }
+
+        // What GetComputeProgramKept's rebinding leaves behind, with the same program.
+        kept.Rebinds++;
+        kept.Source = source;
+        input.Stage = stage;
+        var rebound = new ComputeProgram { Program = handle, Input = input };
+        _computeRebound.Increment();
+        t_resolvePath = ResolvePath.ComputeRebound;
+        _unsharedComputeRebound.Increment();
+        KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
+        result = ahead
+            ? Ahead(rebound, kept.Kernel, kept.Source, out refusal)
+            : WithPrediction(rebound, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
+        return true;
+    }
+
+    // SHARPEMU_RESOLVE_UNSHARED_COMPUTE=0: with shards, every dispatch takes the shared tier as with one resolver.
+    internal static bool UnsharedCompute { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_RESOLVE_UNSHARED_COMPUTE") != "0";
+
+    // This thread's user data memo and lookup options for unshared rebindings (the cache's own are the shared tier's).
+    [ThreadStatic]
+    private static uint[]? t_computeUserData;
+    [ThreadStatic]
+    private static StageCompileOptions? t_computeOptions;
 
     // A program resolved ahead stands for the dispatch's own only where the dispatch would take it unchanged:
     // WithPrediction returns it as it is, and no frontend or consumption had a say.
-    private static ComputeProgram? Ahead(ComputeProgram program, KernelDemand? kernel, ShaderSource? source, out ComputePrefetchRefusal refusal)
+    private ComputeProgram? Ahead(ComputeProgram program, KernelDemand? kernel, ShaderSource? source, out ComputePrefetchRefusal refusal)
     {
         refusal = !program.Available || program.Consumed || program.ImageCopy is not null ? ComputePrefetchRefusal.Unavailable
             : source?.Registered.Frontend is not null ? ComputePrefetchRefusal.Frontend
@@ -1564,7 +2578,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // A frontend image copy's fallback program, compiled when the executor cannot copy: outside any resolution.
     private ComputeProgram CompileComputeProgram(ShaderSource source, ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters)
     {
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             ShaderProgram handle;
@@ -1597,7 +2611,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionZ)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             // Predicted on the CPU like the bank form (upstream's register form does the same).
@@ -1620,7 +2634,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionZ)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.Other))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry: null, out _, out _, out _, ahead: true);
@@ -1640,7 +2654,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ComputeProgramRetry retry)
     {
         using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
-        lock (_resolveGate)
+        using (EnterSharedScope(SharedReason.ComputeRetry))
         {
             using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return GetComputeProgramCore(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, retry, out _, out _, out _);
@@ -2055,6 +3069,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var colorCount = (uint)colors.Length;
         parameters.ColorCount = colorCount;
         renderingState.ColorCount = colorCount;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         for (var index = 0; index < colors.Length; index++)
         {
             ref readonly var color = ref colors[index];
@@ -2070,7 +3085,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // leave a color target bound and export only to the null target).
             var exportTarget = color.Slot == 0 && context.BlendControls[0].UsesSecondarySource &&
                 (context.ColorTargets[0].Info & (1u << 16)) == 0
-                ? 0 : PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
+                ? 0 : routing.ExportForSlot(color.Slot);
             var exported = pixelStage is not null &&
                 (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
             var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.ColorWriteMaskForSlot(color.Slot)) : 0;

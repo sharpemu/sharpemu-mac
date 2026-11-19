@@ -90,6 +90,8 @@ internal sealed partial class MetalRenderHost :
     private readonly IMetalImageTransfer _transfer;
     private readonly MetalGpuWorkerRelay _relay;
     private readonly MetalCompletionQueue _completions;
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1 only (unguarded measurement probe).
+    private readonly SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe? _overlapProbe;
 
     private nint _commandBuffer;
     private nint _previousCommandBuffer;
@@ -192,6 +194,12 @@ internal sealed partial class MetalRenderHost :
             _singleCopy = new MetalSingleCopy(device, _guestMemory, backing, pages, () => CompletedSerial);
             _imageCache.SingleCopy = _singleCopy;
         }
+        // SHARPEMU_DIAG_FRAME_OVERLAP=1: single-copy holds the one read-watch bit, so the diagnostic then arms writes only.
+        SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Attach(pages, readWatchesShared: _singleCopy is not null);
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetReader((address, destination) => _guestMemory.TryPeek(address, destination));
+        }
         if (MetalStagedRangeCache.Enabled)
         {
             _stagedRanges = new MetalStagedRangeCache(
@@ -199,6 +207,17 @@ internal sealed partial class MetalRenderHost :
             _imageCache.StagedRanges = _stagedRanges;
         }
         _completions = new MetalCompletionQueue(_sharedEvent);
+        if (GateHoistProbe)
+        {
+            InitGateHoist(device);
+        }
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            Console.Error.WriteLine("[METAL-V2][OVERLAP-PROBE][WARN] " + SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.WarningLine);
+            _overlapProbe = new SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe(
+                (serial, action) => _completions.Enqueue(serial, action), () => CompletedSerial);
+            SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Active = _overlapProbe;
+        }
         RegisterMemoryTelemetry();
     }
 
@@ -344,6 +363,11 @@ internal sealed partial class MetalRenderHost :
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private nint OpenCommandBuffer()
     {
+        if (GateHoistProbe)
+        {
+            BeginGateHoistBuffer(_nextSerial + 1);
+        }
+
         _commandBuffer = NewCommandBuffer();
         MetalMemoryTelemetry.CommandBuffers.Add();
         if (_commandBuffer == 0)
@@ -356,6 +380,7 @@ internal sealed partial class MetalRenderHost :
         // Released once, when the in-flight ring is done with it (or in Dispose).
         MetalNative.Send(_commandBuffer, MetalNative.Selector("retain"));
         _submissionSerial = ++_nextSerial;
+        _transferTexturesInBuffer.Clear();
         var completed = CompletedSerial;
         _guestMemory.BeginSubmission(_submissionSerial, completed);
         // Staging slabs idle for a while are released or made purgeable here too, not only
@@ -363,6 +388,7 @@ internal sealed partial class MetalRenderHost :
         StagingTiler?.TrimStaging(completed);
         // So are the shader modules and pipeline states past their bound (ShaderCache).
         MaybeTrimShaderCache(completed);
+        RetireUploadPreludes(completed);
         // Every watch whose submission the GPU has finished is checked here, on the one
         // thread that records them, rather than from the completion handler.
         _guard?.Verify(completed);
@@ -374,7 +400,8 @@ internal sealed partial class MetalRenderHost :
     }
 
     // Everything the cache and the transfers encode needs the encoders closed first.
-    void IMetalImageCacheOwner.LandHeldCopies(ulong address, ulong size) => OrderAfterDeferredCopies(address, size);
+    void IMetalImageCacheOwner.LandHeldCopies(ulong address, ulong size) =>
+        OrderAfterDeferredCopies(address, size, LabelLandCause.Image);
 
     IMetalSubmissionContext IMetalImageCacheOwner.BeginTransfer(MetalTransferCause cause) =>
         BeginTransferTouching(cause, 0, 0);
@@ -389,6 +416,9 @@ internal sealed partial class MetalRenderHost :
         if (PassProfileEnabled)
         {
             _ppTransferCause = $"transfer:{cause}";
+            // A new transfer: the encoders it opens are named for its cause until it labels them.
+            _ppUnlabelled.Clear();
+            _ppEncoderCause = PassProfileCauseNames[(int)cause];
         }
 
         if (_preparation is null)
@@ -401,6 +431,7 @@ internal sealed partial class MetalRenderHost :
 
         _ = EnsureCommandBuffer();
         NoteRecordedWork();
+        NoteTransferTextures(texture, otherTexture);
         _transferInSharedEncoder = false;
         if (TransfersShareCompute && _computeEncoder != 0 && texture != 0 && otherTexture == 0 &&
             cause is (MetalTransferCause.Upload or MetalTransferCause.Writeback) && !PendingClearTouches(texture))
@@ -479,7 +510,11 @@ internal sealed partial class MetalRenderHost :
         if (DeferredLabelCopiesTouch(guestAddress, size) ||
             (_stagedStorageCopies is { Count: > 0 } staged && staged.HasRecordedStoresOver(guestAddress, size)))
         {
-            _landDeferredLabels |= DeferredLabelCopiesTouch(guestAddress, size);
+            if (DeferredLabelCopiesTouch(guestAddress, size))
+            {
+                RequestLabelLanding(LabelLandCause.Transfer);
+            }
+
             ((IMetalSubmissionContext)this).ReleaseSharedEncoder();
             return 0;
         }
@@ -545,6 +580,10 @@ internal sealed partial class MetalRenderHost :
         Other,
     }
 
+    // The causes' names as the pass profile and union-pass notes take them, made once instead of twice per encoder end.
+    private static readonly string[] PassEndCauseNames =
+        Enum.GetValues<PassEndCause>().Select(cause => cause.ToString().ToLowerInvariant()).ToArray();
+
     /// <summary>Why a command buffer was committed (the flush_by field of the PERF line).</summary>
     internal enum MetalFlushCause : byte
     {
@@ -557,6 +596,7 @@ internal sealed partial class MetalRenderHost :
         WaitUncommitted, // a wait targeted the submission being recorded
         Poll,            // a guest poll with a pending write
         Transient,       // transient staging over budget
+        GpuDry,          // the GPU finished everything committed and the open buffer held enough to split
         Other,
     }
 
@@ -566,7 +606,7 @@ internal sealed partial class MetalRenderHost :
         _transferSharesCompute = false;
         if (_renderEncoder != 0)
         {
-            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
+            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : PassEndCauseNames[(int)cause]);
             switch (cause)
             {
                 case PassEndCause.Transfer: _passEndTransfer++; break;
@@ -582,7 +622,7 @@ internal sealed partial class MetalRenderHost :
         if (_computeEncoder != 0)
         {
             _encodersInBuffer++;
-            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : cause.ToString().ToLowerInvariant());
+            PassProfileNoteEnd(cause == PassEndCause.Transfer ? _ppTransferCause : PassEndCauseNames[(int)cause]);
             EndAndReleaseEncoder(_computeEncoder, render: false);
             _computeEncoder = 0;
             _boundComputePipeline = 0;
@@ -635,7 +675,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _flushCauses[(int)why]++;
-        _landDeferredLabels = true;
+        RequestLabelLanding(LabelLandCause.Commit);
         _passEndFlushReason = reason;
         EndEncoders(cause);
         _passEndFlushReason = null;
@@ -647,8 +687,8 @@ internal sealed partial class MetalRenderHost :
         // this watch exists for was lost twice.
         _slotTrap?.Verify(CompletedSerial);
         var serial = _submissionSerial;
-        MetalV2Native.SendEventValue(_commandBuffer, SelEncodeSignalEvent, _sharedEvent, serial);
-        if (_completions.WantsCompletionHandler)
+        MetalV2Native.SendEventValue(_commandBuffer, SelEncodeSignalEvent, _openOnHoist ? _hoistEvent : _sharedEvent, serial);
+        if (_completions.WantsCompletionHandler && !_openOnHoist)
         {
             // The handler is a global block with no state: it only wakes whoever waits
             // on the shared event, which the signal above has already advanced.
@@ -667,6 +707,11 @@ internal sealed partial class MetalRenderHost :
         MetalMemoryTelemetry.Commits.Add();
         Volatile.Write(ref _submittedSerial, serial);
         MetalNative.SendVoid(_commandBuffer, SelCommit);
+        if (GateHoistProbe)
+        {
+            AfterGateHoistCommit(serial, cause == PassEndCause.Present);
+        }
+
         if (DsTrace.Gpu && DsTrace.Armed)
         {
             DsTrace.Emit(DsEv.MCOMMIT, serial, (ulong)cause, _pendingLabelWrites,
@@ -721,6 +766,7 @@ internal sealed partial class MetalRenderHost :
         _previousSerial = serial;
         _commandBuffer = 0;
         _recordedCommands = 0;
+        _gpuDryRecordSince = 0;
         // Whatever cause committed it, a deferred Stream flush is now satisfied.
         _encodersInBuffer = 0;
         _commitWantedSince = 0;
@@ -730,6 +776,12 @@ internal sealed partial class MetalRenderHost :
         _lazyLabelRanges.Clear();
         Interlocked.Increment(ref _flushes);
         _completions.Publish(serial);
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1 (unguarded): what this buffer carries may land now.
+            _overlapProbe!.OnCommit(serial);
+        }
+
         return serial;
     }
 
@@ -1366,6 +1418,16 @@ internal sealed partial class MetalRenderHost :
         {
             _stagedStorageCopies?.Forget(address, size);
             _stagedRanges?.OnGpuWrite(address, size, origin);
+            NoteLabelStagedReadsWrite(address, size);
+        }
+
+        if (SharpEmu.HLE.GpuWriteRing.Enabled)
+        {
+            // Producer strings by reference: the transfer's label, or the draw/dispatch's kind and label.
+            var transfer = origin is MetalGpuWriteOrigin.Fill or MetalGpuWriteOrigin.Copy or MetalGpuWriteOrigin.ImageWriteback;
+            SharpEmu.HLE.GpuWriteRing.Record(
+                address, size, SubmissionSerial, MetalGpuWriteOrigins.RingKinds[(int)origin],
+                transfer ? _lastTransferLabel : _lastWorkKind, transfer ? null : _lastWorkLabel);
         }
 
         if (_guard is not null && size != 0)
@@ -1434,6 +1496,7 @@ internal sealed partial class MetalRenderHost :
         _gpuWrites.NoteUnbounded(SubmissionSerial);
         _cpOverlay.Clear();
         _labelOverlay.Clear();
+        ForgetLabelStagedReads();
     }
 
     void IMetalImageCacheOwner.WaitForGpu() => FlushAndWaitForGpu(MetalWaitReason.ImageCache);
@@ -1638,7 +1701,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         // A label held for the commit over these bytes lands first, so the fill overwrites it in stream order.
-        OrderAfterDeferredCopies(address, size);
+        OrderAfterDeferredCopies(address, size, LabelLandCause.Transfer);
         if (TryDeferFillToPassEnd(address, size, value, in range) ||
             TryFillInComputeEncoder(address, size, value, in range))
         {
@@ -1649,7 +1712,9 @@ internal sealed partial class MetalRenderHost :
         }
 
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(context.CommandBuffer, MetalProfiledEncoder.Blit, "GuestFill")
+            : MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
@@ -1713,6 +1778,7 @@ internal sealed partial class MetalRenderHost :
 
     private void WriteGuestPattern(ulong address, ulong size, uint value)
     {
+        SharpEmu.HLE.GpuWriteRing.Record(address, size, SubmissionSerial, "host-fill", "fill pattern");
         if (_guard is null)
         {
             WriteGuestPatternCore(address, size, value);
@@ -1759,6 +1825,20 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled && _overlapProbe!.Owes(source, size))
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1: the source is a publication still queued, so the copy is one
+            // too, made behind it in stream order. It runs on the completion thread, so it copies raw guest
+            // memory (what the publication before it wrote) and touches nothing the worker owns.
+            _overlapProbe.NoteQueuedCopy();
+            QueueCompletion(() =>
+            {
+                CopyQueuedPublication(destination, source, size);
+                _imageCache.InvalidateMemory(destination, size);
+            }, probeRange: (destination, (int)Math.Min(size, int.MaxValue)));
+            return;
+        }
+
         var target = _guestMemory.ResolveWritable(destination, size);
         var origin = _guestMemory.Resolve(source, size);
         // A source too large to stage resolves to a prefix, which a blit of the whole
@@ -1792,10 +1872,17 @@ internal sealed partial class MetalRenderHost :
             return;
         }
 
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled &&
+            (_imageCache.HasGpuModifiedImageBytes(source, size) || PendingSerialHinted(source, size) != 0))
+        {
+            // SHARPEMU_FRAME_OVERLAP_PROBE=1: the GPU still produces what this copy reads.
+            _overlapProbe!.Refuse(SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapRefusal.CopyFromGpu, source);
+        }
+
         FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
         // A label held for the commit over the source or the destination lands first, as a boundary used to land it.
-        OrderAfterDeferredCopies(source, size);
-        OrderAfterDeferredCopies(destination, size);
+        OrderAfterDeferredCopies(source, size, LabelLandCause.Transfer);
+        OrderAfterDeferredCopies(destination, size, LabelLandCause.Transfer);
         if (TryCopyInComputeEncoder(destination, source, size, in target, in origin))
         {
             _imageCache.InvalidateMemoryFromGpu(destination, size);
@@ -1804,7 +1891,9 @@ internal sealed partial class MetalRenderHost :
         }
 
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(context.CommandBuffer, MetalProfiledEncoder.Blit, "GuestCopy")
+            : MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
@@ -1869,6 +1958,8 @@ internal sealed partial class MetalRenderHost :
         SupersedeKernelCopyChecks(destination, size);
         _cpOverlay.Forget(destination, size);
         _labelOverlay.Forget(destination, size);
+        SharpEmu.HLE.GpuWriteRing.Record(destination, size, SubmissionSerial, "host-copy",
+            SharpEmu.HLE.GpuWriteRing.Enabled ? $"from=0x{source:X16}" : null);
         if (_guard is null)
         {
             CopyGuestBytesOnHostCore(destination, source, size);
@@ -1883,6 +1974,33 @@ internal sealed partial class MetalRenderHost :
         finally
         {
             _guard.End(watch);
+        }
+    }
+
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1 only: a copy of a queued publication, from the completion thread.
+    private void CopyQueuedPublication(ulong destination, ulong source, ulong size)
+    {
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)Math.Min(size, 64 * 1024));
+        try
+        {
+            for (var copied = 0UL; copied < size;)
+            {
+                var count = (int)Math.Min((ulong)buffer.Length, size - copied);
+                var span = buffer.AsSpan(0, count);
+                if (!_memory.TryRead(source + copied, span) || !_memory.TryWrite(destination + copied, span))
+                {
+                    MetalV2Diagnostics.WarnOnce("overlap-probe-copy",
+                        $"[OVERLAP-PROBE] a queued copy could not copy guest memory: destination=0x{destination:X16} " +
+                        $"source=0x{source:X16} size=0x{size:X}.");
+                    break;
+                }
+
+                copied += (ulong)count;
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
@@ -1964,6 +2082,7 @@ internal sealed partial class MetalRenderHost :
                 case MetalOverlayCoverage.Full:
                     _cpOverlay.Apply(address, destination);
                     Interlocked.Increment(ref _overlayReads);
+                    NotePendingAnswer(address, destination.Length);
                     return true;
                 case MetalOverlayCoverage.Partial:
                     if (!TryReadGuestCore(address, destination))
@@ -1973,6 +2092,7 @@ internal sealed partial class MetalRenderHost :
 
                     _cpOverlay.Apply(address, destination);
                     Interlocked.Increment(ref _overlayReads);
+                    NotePendingAnswer(address, destination.Length);
                     return true;
             }
         }
@@ -2017,6 +2137,7 @@ internal sealed partial class MetalRenderHost :
 
         if (TryReadThroughPendingCopy(address, destination))
         {
+            NotePendingAnswer(address, destination.Length);
             return true;
         }
 
@@ -2070,6 +2191,7 @@ internal sealed partial class MetalRenderHost :
         if (_imageCache.HasGpuModifiedImageBytes(address, size))
         {
             AbandonSpeculativeWait(address, size);
+            NoteHostReadWait(address, size, image: true);
             // The writeback is recorded into the buffer being built, so this one has
             // to be committed before the bytes can be read.
             FlushGpuWrites(address, size, MetalWritebackCause.HostRead);
@@ -2089,6 +2211,7 @@ internal sealed partial class MetalRenderHost :
             }
 
             NoteObservedRead(address, size);
+            NoteHostReadWait(address, size, image: false);
             if (TryWaitForWriteFence(address, size, pending))
             {
                 return;
@@ -2103,6 +2226,57 @@ internal sealed partial class MetalRenderHost :
                 WaitForCommittedSerial(pending, MetalWaitReason.ReadRange);
             }
         }
+    }
+
+    // Diagnostics (SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=census): the last host reads that waited, an image's writeback
+    // (image) or a recorded write landing (range), with when; DescribeGuestRangeForDiagnostics names those over a range.
+    private readonly (ulong Address, ulong Size, bool Image, long At)[] _hostReadWaits = new (ulong, ulong, bool, long)[64];
+    private int _hostReadWaitNext;
+
+    private void NoteHostReadWait(ulong address, ulong size, bool image)
+    {
+        if (SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.DrawLookahead !=
+            SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.DrawLookaheadMode.Census)
+        {
+            return;
+        }
+
+        lock (_hostReadWaits)
+        {
+            _hostReadWaits[_hostReadWaitNext++ & (_hostReadWaits.Length - 1)] =
+                (address, size, image, System.Diagnostics.Stopwatch.GetTimestamp());
+        }
+    }
+
+    public string DescribeGuestRangeForDiagnostics(ulong address, ulong size)
+    {
+        Span<byte> backing = stackalloc byte[sizeof(uint)];
+        var raw = _backing.TryReadBacking(address, backing)
+            ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(backing).ToString("X8", System.Globalization.CultureInfo.InvariantCulture)
+            : "unreadable";
+        var waits = new List<string>();
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        lock (_hostReadWaits)
+        {
+            foreach (var wait in _hostReadWaits)
+            {
+                if (wait.Size != 0 && wait.Address < address + size && address < wait.Address + wait.Size)
+                {
+                    waits.Add(FormattableString.Invariant(
+                        $"{(wait.Image ? "image" : "range")}@0x{wait.Address:X}+0x{wait.Size:X} {(now - wait.At) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency}us_ago"));
+                }
+            }
+        }
+
+        var owner = ConcurrentOwnerForDiagnostics(address, size);
+        Func<ulong> serial = SignaledSerial;
+        return $"owner={owner} queued={PendingCommandWriteHoldsForDiagnostics(address, size)} " +
+            FormattableString.Invariant($"gpu_write_pending={IsGpuWritePendingForDiagnostics(address, size)} ") +
+            FormattableString.Invariant($"cp_cover={(_cpOverlay.Count == 0 ? "-" : _cpOverlay.Coverage(address, size, serial).ToString())} ") +
+            FormattableString.Invariant($"label_cover={(_labelOverlay.Count == 0 ? "-" : _labelOverlay.Coverage(address, size, serial).ToString())} ") +
+            FormattableString.Invariant($"backing_w0={raw} gpu_writes_may_cover={_gpuWrites.MayCover(address, size)} ") +
+            FormattableString.Invariant($"cp_overlay={_cpOverlay.Count} label_overlay={_labelOverlay.Count} ") +
+            $"images=[{_imageCache.DescribeRangeOwners(address, size)}] host_read_waits=[{string.Join(" | ", waits)}]";
     }
 
     // A read this small that waits for the GPU is a command-processor operand (an indirect
@@ -2199,6 +2373,7 @@ internal sealed partial class MetalRenderHost :
             // The poll reads bytes this host has yet to land as written: nothing to commit.
             _cpOverlay.Apply(address, destination);
             Interlocked.Increment(ref _overlayReads);
+            NotePendingAnswer(address, destination.Length);
             return true;
         }
 
@@ -2546,19 +2721,38 @@ internal sealed partial class MetalRenderHost :
 
     public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
     {
+        // A read the binding before it answered, while that answer stands (MetalRenderHost.ReadBindingMemo.cs).
+        if (!isWritten && TryReadBindingMemo(address, size, computeStage: false, out var memo))
+        {
+            if (ReadBindingMemoVerify)
+            {
+                VerifyReadBinding(address, size, computeStage: false, MetalWritebackCause.BufferBinding, memo);
+            }
+
+            return new BufferBinding((ulong)memo.Buffer, memo.Offset);
+        }
+
+        var memoStamp = !isWritten && ReadBindingMemoEnabled ? ReadBindingStamp() : default;
         // A buffer binding sees guest memory, so any image that owns these bytes
         // publishes them first; a written binding also invalidates those images.
-        FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding, isWritten);
+        var flushFoundImage = _imageCache.FlushGpuWrites(address, size, MetalWritebackCause.BufferBinding, isWritten);
         // A read takes the storage path: its window, a guest view, or a staged copy that
         // holds the GPU's writes still in flight in this command buffer - whole, however
         // large, up to the largest window.
+        var inPlaceAlias = 0UL;
+        MetalWindowPartition.Window? inPlaceWindow = null;
         var range = isWritten
             ? _guestMemory.Resolve(address, size, whole: true)
-            : ResolveStorageBuffer(address, size, written: false);
+            : ResolveStorageBuffer(address, size, written: false, computeStage: false, out inPlaceAlias, out inPlaceWindow);
 
         if (!range.IsValid)
         {
             return NullBuffer;
+        }
+
+        if (!isWritten && ReadBindingMemoEnabled)
+        {
+            StoreReadBinding(address, size, computeStage: false, memoStamp, flushFoundImage, inPlaceAlias, inPlaceWindow, range);
         }
 
         TraceRingBinding(address, size, isWritten, range);
@@ -2722,6 +2916,9 @@ internal sealed partial class MetalRenderHost :
             // queued or running on the compiler threads now.
             $"draws_skipped_compiling={Interlocked.Exchange(ref _drawsSkippedCompiling, 0)} " +
             $"leave_out=[{FormatLeaveOutCounters()}] " +
+            // Pipelines specialized for a draw's buffer words, and the draws on them (FormatBufferWordCounters).
+            $"buffer_words=[{FormatBufferWordCounters()}] " +
+            $"buffer_words_compute=[{FormatBufferWordComputeCounters()}] " +
             $"pipeline_waits_blocking={Interlocked.Exchange(ref _pipelineWaitsBlocking, 0)} " +
             $"async_compiles_inflight={PipelinesCompiling} " +
             // Read-aheads of the dispatches after one waiting on its pipeline, the dispatches
@@ -2736,6 +2933,9 @@ internal sealed partial class MetalRenderHost :
             // Sampled bindings the texture memo answered, those whose stamp failed between the preparation
             // and the bind, lookups made in full, results memoised, and entries held.
             $"texture_memo=({TakeTextureMemoCounters()}) {FormatGraphicsBindingCounters()} " +
+            // Read-only bindings answered from the one before (hits), looked up and not (misses), kept, and checked
+            // against the full path under =verify; then how often a draw's binding inputs repeat (bind_shape).
+            $"{TakeReadBindingCounters()} " +
             // Modules and pipeline states resident against made, and what the bound released.
             $"{DescribeShaderCache()} " +
             $"images={_imageCache.ImageCount} image_mb={_imageCache.TotalUsedMemory / (1024 * 1024)} " +
@@ -2753,6 +2953,16 @@ internal sealed partial class MetalRenderHost :
             $"msl_dispatcher={ShaderCompiler.Metal.Gen5MslTranslator.Statistics.ControlFlowForms.Dispatcher} " +
             $"uploads={uploads} writebacks={writebacks} evictions={evictions} failed={failed} " +
             (_meshletCache?.TakeCounters() ?? "meshlet_draws=0") + " " + TakeIndirectCounters());
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.TakeWindowLine() is { } overlapLine)
+        {
+            Console.Error.WriteLine(overlapLine);
+        }
+
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            Console.Error.WriteLine(_overlapProbe!.TakeWindowLine() + $" pending_labels={_commandStream?.PendingLabelCount ?? 0}");
+        }
+
         _slowWaitReports = 0;
         ResetSlowCompletionReports();
         if (WaitOrigins && _waitOrigins.Count != 0)
@@ -2821,8 +3031,10 @@ internal sealed partial class MetalRenderHost :
             .Append(" scheduled_labels=").Append(TakeScheduledLabelSubmissions())
             .Append(" keep_warm=").Append(Interlocked.Exchange(ref _keepWarmSubmissions, 0))
             .Append(" label_barriers=").Append(TakeLabelBarriers())
+            .Append(TakeLabelLandingCounters())
             .Append(" encoder_barriers=").Append(TakeEncoderBarriers())
             .Append(" residency_skipped=").Append(TakeSkippedResidencyCalls())
+            .Append(TakeResidencyNameCounters())
             .Append(" device_address_writes=").Append(DeviceAddressWrites)
             .Append(TakeDeviceAddressReachCounters())
             .Append(" data_slots_device=").Append(SharpEmu.ShaderCompiler.Resources.DeviceDataLoads.LearnedSlots)
@@ -2851,6 +3063,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         WriteCopyReadTraces();
+        _imageCache.WriteUploadTrace();
         var causes = _imageCache.TakeTransferCauses();
         var subRange = _imageCache.TakePartialTransfers();
         var aliases = _imageCache.AliasCounters;
@@ -2915,8 +3128,8 @@ internal sealed partial class MetalRenderHost :
             $"clears_encoded={encodedClears} depth_joins={depthJoins} depth_join_sampled={depthJoinsSampled} depth_join_copies={depthJoinsCopies} " +
             $"subset_joins={subsetJoins} subset_join_sampled={subsetJoinsSampled}{TakeSubsetRefusals()} " +
             $"join_device_ranges=[{FormatDeviceRangeJoinChecks()}] " +
-            $"{TakeUnionPassText()} flush_hold=[{FormatHeldCommits()}] {FormatDeferredFills()} " +
-            $"transfers=[{TakeTransferCauses()}]" +
+            $"{TakeUnionPassText()} flush_hold=[{FormatHeldCommits()}] {FormatGpuDryCommits()} {FormatDeferredFills()} " +
+            $"transfers=[{TakeTransferCauses()}] {TakePreludeText()}" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
             $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()} " +
             SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport());
@@ -3045,6 +3258,8 @@ internal sealed partial class MetalRenderHost :
             }
 
             _scheduleNudge?.Dispose();
+            // Committed ahead of the buffer just waited for, so finished with it.
+            RetireUploadPreludes(CompletedSerial, all: true);
             ReleaseInFlightSubmissions();
             ReportStepCaps();
             DisposeStepReport();
@@ -3073,6 +3288,7 @@ internal sealed partial class MetalRenderHost :
         }
 
         _completions.Dispose();
+        _hoistCompletions?.Dispose();
         DisposeNativeOcclusion();
         DisposeLabelScatter();
         DisposeThreadDispatch();

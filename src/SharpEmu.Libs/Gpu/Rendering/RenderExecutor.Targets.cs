@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
@@ -40,13 +41,22 @@ public sealed partial class RenderExecutor
         {
             ref readonly var resolution = ref layout.Colors[index];
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("color-request", $"slot={layout.ColorSlots[index]} address=0x{resolution.Request.Description.Data.Address:X16} size=0x{resolution.Request.Description.Data.Size:X} view={resolution.Request.View}");
-            state.Colors[(int)state.ColorCount++] = new ColorTargetState(in resolution, layout.ColorSlots[index], ResourceSlotIdentifier.Invalid);
+            // Written in place, field by field, as the constructor would: no stack copy of the resolution.
+            ref var color = ref state.Colors[(int)state.ColorCount++];
+            color.Resolution = resolution;
+            color.Slot = layout.ColorSlots[index];
+            color.Image = ResourceSlotIdentifier.Invalid;
+            color.View = default;
         }
 
-        if (layout.Depth is { } depthTarget)
+        if (layout.Depth.HasValue)
         {
+            ref readonly var depthTarget = ref Nullable.GetValueRefOrDefaultRef(in layout.Depth);
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("depth-request", $"address=0x{depthTarget.Target.Request.Description.Data.Address:X16} size=0x{depthTarget.Target.Request.Description.Data.Size:X} view={depthTarget.Target.Request.View}");
-            state.Depth = new DepthAttachmentState(in depthTarget, ResourceSlotIdentifier.Invalid);
+            state.Depth.Target = depthTarget;
+            state.Depth.Image = ResourceSlotIdentifier.Invalid;
+            state.Depth.View = default;
+            state.Depth.MetadataClear = false;
             state.DepthResolved = true;
         }
 
@@ -128,7 +138,45 @@ public sealed partial class RenderExecutor
         }
 
         var context = banks.Context;
-        resolution.ColorCount = 0;
+        if (TargetValueReuse && resolution.TargetVersion != 0 && resolution.Inputs.Matches(context))
+        {
+            // Target registers written again with the values they held (a material or program bind rewrites the
+            // shader interface, the depth control or the target mask with each draw): the same targets, under the
+            // same version, so the recorder keeps their acquisitions (RenderRecorder.RepeatsPreviousTargets).
+            if (TargetValueReuseVerify)
+            {
+                VerifyTargetLayout(context, resolution);
+            }
+
+            resolution.TargetContextStamp = contextStamp;
+            resolution.TargetProgramsStamp = programsStamp;
+            var pixelActive = HasActivePixelShader(banks);
+            if (pixelActive == resolution.PixelActive)
+            {
+                _targetValuesKept.Increment();
+                return resolution;
+            }
+
+            _targetValuesPixelStage.Increment();
+            resolution.PixelActive = pixelActive;
+            resolution.TargetVersion = (uint)Interlocked.Increment(ref _targetVersions);
+            return resolution;
+        }
+
+        _targetValuesResolved.Increment();
+        resolution.ColorCount = ResolveColorTargets(context, resolution.Colors, resolution.ColorSlots);
+        resolution.Depth = DepthTargetResolver.Resolve(context, _host.FormatSupport, HostFatal);
+        resolution.Inputs.Capture(context);
+        resolution.PixelActive = HasActivePixelShader(banks);
+        resolution.TargetContextStamp = contextStamp;
+        resolution.TargetProgramsStamp = programsStamp;
+        resolution.TargetVersion = (uint)Interlocked.Increment(ref _targetVersions);
+        return resolution;
+    }
+
+    internal static int ResolveColorTargets(ContextRegisters context, ColorTargetResolution[] colors, uint[] slots)
+    {
+        var count = 0;
         for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
         {
             if (slot != 0 && (context.RenderTargetMaskForSlot(slot) == 0 || context.ColorTargets[slot].BaseAddress == 0))
@@ -141,16 +189,86 @@ public sealed partial class RenderExecutor
                 continue;
             }
 
-            resolution.Colors[resolution.ColorCount] = color;
-            resolution.ColorSlots[resolution.ColorCount++] = resolvedSlot;
+            colors[count] = color;
+            slots[count++] = resolvedSlot;
         }
 
-        resolution.Depth = DepthTargetResolver.Resolve(context, _host.FormatSupport, HostFatal);
-        resolution.PixelActive = HasActivePixelShader(banks);
-        resolution.TargetContextStamp = contextStamp;
-        resolution.TargetProgramsStamp = programsStamp;
-        resolution.TargetVersion = (uint)Interlocked.Increment(ref _targetVersions);
-        return resolution;
+        return count;
+    }
+
+    // A draw whose target registers changed stamp but not value keeps the resolved targets and their version
+    // (TargetInputs). SHARPEMU_TARGET_VALUE_REUSE=0 resolves them again and gives them a new version whenever a
+    // target register is written; =verify (or SHARPEMU_PERF_VERIFY=1) resolves them again on every kept draw as
+    // well and stops on a difference.
+    internal static readonly bool TargetValueReuse = Environment.GetEnvironmentVariable("SHARPEMU_TARGET_VALUE_REUSE") != "0";
+
+    internal static readonly bool TargetValueReuseVerify =
+        TargetValueReuse && (Environment.GetEnvironmentVariable("SHARPEMU_TARGET_VALUE_REUSE") == "verify" ||
+                             Environment.GetEnvironmentVariable("SHARPEMU_PERF_VERIFY") == "1");
+
+    private static readonly ThreadCounter _targetValuesKept = new();
+    private static readonly ThreadCounter _targetValuesPixelStage = new();
+    private static readonly ThreadCounter _targetValuesResolved = new();
+
+    /// <summary>Target layouts kept on equal values, kept with only the pixel stage flipped, and resolved again.</summary>
+    internal static string TakeTargetValueReport() =>
+        FormattableString.Invariant(
+            $"target_values=(kept={_targetValuesKept.Take()},pixel_stage={_targetValuesPixelStage.Take()},resolved={_targetValuesResolved.Take()}) ");
+
+    private readonly ColorTargetResolution[] _verifyColors = new ColorTargetResolution[RenderingState.ColorAttachmentCapacity];
+    private readonly uint[] _verifySlots = new uint[RenderingState.ColorAttachmentCapacity];
+
+    private void VerifyTargetLayout(ContextRegisters context, DrawResolution resolution)
+    {
+        var count = ResolveColorTargets(context, _verifyColors, _verifySlots);
+        var depth = DepthTargetResolver.Resolve(context, _host.FormatSupport, HostFatal);
+        var same = count == resolution.ColorCount && SameDepth(depth, resolution.Depth);
+        for (var index = 0; same && index < count; index++)
+        {
+            same = _verifySlots[index] == resolution.ColorSlots[index] && SameColor(in _verifyColors[index], in resolution.Colors[index]);
+        }
+
+        if (!same)
+        {
+            throw HostFatal(
+                $"A target layout kept on equal register values resolves differently: colors={resolution.ColorCount}->{count} " +
+                $"depth={resolution.Depth.HasValue}->{depth.HasValue} version={resolution.TargetVersion}.");
+        }
+    }
+
+    internal static bool SameColor(in ColorTargetResolution left, in ColorTargetResolution right) =>
+        SameRequest(left.Request, right.Request) && left with { Request = default } == right with { Request = default };
+
+    internal static bool SameDepth(DepthTargetState? left, DepthTargetState? right)
+    {
+        if (left is not { } first || right is not { } second)
+        {
+            return left.HasValue == right.HasValue;
+        }
+
+        return SameRequest(first.Target.Request, second.Target.Request) &&
+            first.Target with { Request = default } == second.Target with { Request = default } && first.State == second.State;
+    }
+
+    // An image request field for field; the mip layouts by their levels, not by the array that holds them.
+    private static bool SameRequest(ImageRequest left, ImageRequest right)
+    {
+        for (var level = 0; level < ImageDescription.MaxLevels; level++)
+        {
+            if (!left.Description.MipLayout[level].Equals(right.Description.MipLayout[level]))
+            {
+                return false;
+            }
+        }
+
+        var first = left;
+        var second = right;
+        first.Description.MipLayout = default;
+        second.Description.MipLayout = default;
+        return first.Description.Equals(second.Description) && first.View == second.View && first.Role == second.Role &&
+            first.TraceTextureMetadataAddress == second.TraceTextureMetadataAddress &&
+            string.Equals(first.TraceTextureDescriptor, second.TraceTextureDescriptor, StringComparison.Ordinal) &&
+            first.TraceMetadataCompress == second.TraceMetadataCompress && first.TraceWriteCompress == second.TraceWriteCompress;
     }
 
     private bool VertexStageWritesMemory(RegisterBanks banks, ref DrawState state)
@@ -222,6 +340,7 @@ public sealed partial class RenderExecutor
         record.Kind = ResolvedDrawKind.MultisampleResolve;
         record.ResolveSource = from;
         record.ResolveDestination = to;
+        record.TargetCopyFieldsWritten = true;
         return true;
     }
 
@@ -258,6 +377,7 @@ public sealed partial class RenderExecutor
         var write = ImageRequestBuilders.DepthTargetCopy(in words, _host.FormatSupport, writeBuffer: true)
             ?? throw _host.Fatal("A depth/stencil copy has no writable depth target.");
         record.Kind = ResolvedDrawKind.DepthStencilCopy;
+        record.TargetCopyFieldsWritten = true;
         record.CopyRead = read.Request;
         record.CopyWrite = write.Request;
         record.CopyReadFormat = read.Format;
@@ -293,16 +413,23 @@ public sealed partial class RenderExecutor
         }
 
         var exportMasks = pixelProgram?.PixelColorExportMasks ?? 0u;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         var kept = 0u;
         for (var i = 0; i < state.ColorCount; i++)
         {
             ref readonly var target = ref state.Colors[i];
-            if (IsUnwrittenColorTarget(context, target.Slot, target.Resolution.ExportMapping, exportMasks))
+            if (IsUnwrittenColorTarget(context, in routing, target.Slot, target.Resolution.ExportMapping, exportMasks))
             {
                 continue;
             }
 
-            state.Colors[(int)kept++] = target;
+            // Until the first dropped target every kept one is already in its place.
+            if (kept != i)
+            {
+                state.Colors[(int)kept] = target;
+            }
+
+            kept++;
         }
 
         state.ColorCount = kept;
@@ -317,11 +444,12 @@ public sealed partial class RenderExecutor
         }
 
         var exportMasks = pixelProgram?.PixelColorExportMasks ?? 0u;
+        var routing = PixelExportRouting.Routing.Of(context.ShaderInterface);
         var written = 0u;
         for (var i = 0; i < state.ColorCount; i++)
         {
             ref readonly var target = ref state.Colors[i];
-            if (!IsUnwrittenColorTarget(context, target.Slot, target.Resolution.ExportMapping, exportMasks))
+            if (!IsUnwrittenColorTarget(context, in routing, target.Slot, target.Resolution.ExportMapping, exportMasks))
             {
                 written |= 1u << i;
             }
@@ -332,14 +460,19 @@ public sealed partial class RenderExecutor
 
     // The export that reaches the slot is the one routed to it, not the export of the same
     // number: exports are compacted onto the slots CB_SHADER_MASK enables.
-    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks)
+    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks) =>
+        IsUnwrittenColorTarget(context, PixelExportRouting.Routing.Of(context.ShaderInterface), slot, exportMapping, pixelColorExportMasks);
+
+    // As above, with the registers' export routing counted once by a caller that asks for several slots.
+    internal static bool IsUnwrittenColorTarget(
+        ContextRegisters context, in PixelExportRouting.Routing routing, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks)
     {
         if (exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0)
         {
             return true;
         }
 
-        var export = PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
+        var export = routing.ExportForSlot(slot);
         return export < 0 || ((pixelColorExportMasks >> (export * 4)) & 0xFu) == 0;
     }
 }

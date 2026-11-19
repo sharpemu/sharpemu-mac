@@ -169,4 +169,96 @@ public sealed class BindingReuseSceneTests(ITestOutputHelper output) : SceneTest
         output.WriteLine($"graphics binding reuse={reuse} attempted={rig.Host.GraphicsBindingAttempts} skipped={rig.Host.GraphicsBindingSkipped}");
     }
 
+    // Draws of one mesh read its vertex buffer through the same read-only storage binding: the binding after the
+    // first is answered from it (MetalReadBindingMemoV2), in the next command buffer too; the v1 memo
+    // (ranges: false, MetalReadBindingMemo) looks it up in full first in a new command buffer. Every draw renders the
+    // texture it binds either way.
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void DrawsOfOneMeshReuseTheirReadOnlyVertexBindingAndRenderAsWithout(bool memo, bool ranges)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        var host = rig.Host;
+        host.ReadBindingMemoEnabled = memo;
+        host.ReadBindingMemoVerify = memo;
+        host.ReadBindingMemoRanges = ranges;
+        const uint red = 0xFF0000FF;
+        const uint green = 0xFF00FF00;
+        const uint width = 16;
+        var textures = new Dictionary<uint, ulong> { [red] = SolidTexture(rig, red), [green] = SolidTexture(rig, green) };
+        SceneVertex[] quad =
+        [
+            SceneVertex.At(-1, -1, 0.5f, 0, 1, 0, 1), SceneVertex.At(1, -1, 0.5f, 1, 1, 0, 1),
+            SceneVertex.At(-1, 1, 0.5f, 0, 0, 0, 1), SceneVertex.At(-1, 1, 0.5f, 0, 0, 0, 1),
+            SceneVertex.At(1, -1, 0.5f, 1, 1, 0, 1), SceneVertex.At(1, 1, 0.5f, 1, 0, 0, 1),
+        ];
+        var mesh = rig.UploadMesh(quad);
+        var vertex = rig.Program(ScenePrograms.FetchVertex);
+        var pixel = rig.Program(Sample);
+        // One target, a stripe per draw: the same images every draw, so only the vertex binding's lookup varies.
+        var target = rig.ColorTarget(width, width, 16, 0xFF);
+        var state = new SceneState(width, width).ColorTarget(0, target, width, width, format: 14, numberType: 7);
+        void Stripe(ScenePm4 pm4, int stripe, uint colour)
+        {
+            state.ScreenScissor(stripe * 4, 0, stripe * 4 + 4, (int)width);
+            uint[] userData = [.. Descriptors.Texture(textures[colour], Rgba8, Size, Size), .. Descriptors.Sampler(), 0, 0, 0, 0];
+            state.VertexShader(vertex, mesh);
+            state.PixelShader(pixel, userData);
+            state.Emit(pm4);
+            pm4.NumInstances(1);
+            pm4.DrawAuto((uint)quad.Length);
+        }
+
+        float[] Pixel(int x)
+        {
+            var pixels = MemoryMarshal.Cast<byte, float>(rig.ReadImage(target, width, width, 16));
+            return pixels.Slice((int)((8 * width + (uint)x) * 4), 4).ToArray();
+        }
+
+        uint[] first = [red, green, red, red];
+        var stream = new ScenePm4();
+        for (var stripe = 0; stripe < first.Length; stripe++)
+        {
+            Stripe(stream, stripe, first[stripe]);
+        }
+
+        var (hits, _, _, _) = host.ReadBindingMemoCounts;
+        rig.Submit(stream);
+        var afterFirst = host.ReadBindingMemoCounts;
+        for (var stripe = 0; stripe < first.Length; stripe++)
+        {
+            AssertColour($"stripe {stripe}", Pixel(stripe * 4 + 2), first[stripe]);
+        }
+
+        var again = new ScenePm4();
+        Stripe(again, 1, red);
+        rig.Submit(again);
+        AssertColour("next command buffer", Pixel(6), red);
+        var afterSecond = host.ReadBindingMemoCounts;
+        output.WriteLine($"memo={memo} ranges={ranges}: first {afterFirst}, second {afterSecond}");
+        if (memo)
+        {
+            Assert.True(afterFirst.Hits > hits, "no draw's vertex binding was answered from the one before");
+            Assert.Equal(afterFirst.Hits - hits, afterFirst.Verified);
+            if (ranges)
+            {
+                Assert.True(afterSecond.Hits > afterFirst.Hits, "the new command buffer's binding was not answered from the one before");
+                Assert.Equal(afterSecond.Hits - hits, afterSecond.Verified);
+            }
+            else
+            {
+                Assert.True(afterSecond.Misses > afterFirst.Misses, "the new command buffer's first binding did not miss");
+            }
+        }
+        else
+        {
+            Assert.Equal(hits, afterSecond.Hits);
+        }
+
+        Assert.Empty(rig.Fatals);
+    }
+
 }

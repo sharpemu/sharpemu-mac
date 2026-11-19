@@ -421,7 +421,10 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// <summary>
     /// The segments holding pipelines of the shader pair as an NSArray for a descriptor's
     /// binaryArchives, retained for the caller, or zero before the segments are listed or
-    /// when none holds the pair. Opens the ones that are closed (reading each whole).
+    /// when none holds the pair. Opens the ones that are closed (reading each whole) outside
+    /// the lock, so a lookup of the GPU worker never waits for a file another thread (a
+    /// buffer-word variant builder) is reading; two lookups that open the same segment at
+    /// once both read it, and the second copy is released.
     /// </summary>
     public nint AcquirePipelineArchives(UInt128 vertexKey, UInt128 pixelKey)
     {
@@ -433,6 +436,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         var pair = PairKey(vertexKey, pixelKey);
         var acquireStarted = Stopwatch.GetTimestamp();
         using var acquireTimer = new AcquireTimer(this, acquireStarted);
+        List<(int Sequence, string Path)>? closed = null;
         lock (_archivesLock)
         {
             if (Volatile.Read(ref _disposed) != 0 || !_segmentsByPair.TryGetValue(pair, out var sequences))
@@ -440,27 +444,75 @@ internal sealed partial class MetalBinaryArchive : IDisposable
                 return 0;
             }
 
-            var array = MetalNative.Send(MetalNative.Send(MetalNative.Class("NSMutableArray"), SelAlloc), SelInit);
-            var added = 0;
             if (sequences.Count > _maxSegmentsPerPair) _maxSegmentsPerPair = sequences.Count;
-            foreach (var sequence in sequences.ToArray())
+            foreach (var sequence in sequences)
             {
-                var archive = OpenSegment(sequence, sequences);
-                if (archive != 0)
+                if (!_resident.ContainsKey(sequence))
                 {
-                    MetalNative.SendVoid(array, MetalNative.Selector("addObject:"), archive);
-                    added++;
+                    (closed ??= []).Add((sequence, SegmentFile(sequence)));
                 }
             }
 
-            if (added == 0)
+            if (closed is null)
             {
-                MetalNative.SendVoid(array, SelRelease);
+                return ResidentArray(sequences);
+            }
+        }
+
+        var opened = new (nint Archive, long Length)[closed.Count];
+        var started = Stopwatch.GetTimestamp();
+        for (var index = 0; index < closed.Count; index++)
+        {
+            opened[index] = ReadSegment(closed[index].Path);
+        }
+
+        Interlocked.Add(ref _segmentOpenTicks, Stopwatch.GetTimestamp() - started);
+        List<string>? touched = null;
+        nint array;
+        lock (_archivesLock)
+        {
+            var disposed = Volatile.Read(ref _disposed) != 0;
+            _segmentsByPair.TryGetValue(pair, out var sequences);
+            for (var index = 0; index < closed.Count; index++)
+            {
+                var (sequence, path) = closed[index];
+                var (archive, length) = opened[index];
+                if (archive == 0)
+                {
+                    Interlocked.Increment(ref _rejected);
+                    if (!disposed)
+                    {
+                        DropSegment(sequence, path);
+                    }
+
+                    continue;
+                }
+
+                if (disposed || sequences is null || !sequences.Contains(sequence) || _resident.ContainsKey(sequence))
+                {
+                    // Gone, dropped meanwhile, or another lookup opened it first.
+                    MetalNative.SendVoid(archive, SelRelease);
+                    continue;
+                }
+
+                AdmitSegment(sequence, archive, length, sequences);
+                (touched ??= []).Add(path);
+            }
+
+            if (disposed || !_segmentsByPair.TryGetValue(pair, out sequences))
+            {
                 return 0;
             }
 
-            return array;
+            array = ResidentArray(sequences);
         }
+
+        foreach (var path in touched ?? [])
+        {
+            Touch(path);
+        }
+
+        return array;
     }
 
     /// <summary>
@@ -584,12 +636,16 @@ internal sealed partial class MetalBinaryArchive : IDisposable
     /// from its MSL, and its file was never read.
     /// </summary>
     public void NoteRenderPipeline(
-        nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, bool missed, UInt128? pixelPairKey = null)
+        nint descriptor, PipelineKind kind, UInt128 vertexKey, UInt128 pixelKey, bool missed, UInt128? pixelPairKey = null,
+        bool specialized = false, UInt128 variantVertexFile = default, UInt128 variantPixelFile = default)
     {
         if (descriptor == 0 || Volatile.Read(ref _disposed) != 0)
         {
             return;
         }
+
+        var pairKey = PairKey(vertexKey, pixelPairKey ?? pixelKey);
+        (vertexKey, pixelKey) = LibraryFileKeys(vertexKey, pixelKey, specialized, variantVertexFile, variantPixelFile);
 
         // Before the segments are loaded nothing could hit; a pipeline they hold would be
         // stored twice, and one they do not is stored by a later start.
@@ -602,7 +658,7 @@ internal sealed partial class MetalBinaryArchive : IDisposable
         }
 
         MetalNative.Send(descriptor, SelRetain);
-        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, PairKey(vertexKey, pixelPairKey ?? pixelKey))))
+        if (!TryEnqueue(new Job(JobKind.Capture, kind, descriptor, vertex, pixel, missed, null, pairKey)))
         {
             Interlocked.Increment(ref _capturesDropped);
             MetalNative.SendVoid(descriptor, SelRelease);
@@ -610,6 +666,18 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             Forget(pixel);
         }
     }
+
+    /// <summary>
+    /// The stage keys a noted pipeline may be written as the library file of. A pipeline of
+    /// specialized functions (a buffer-word variant) is never written under its modules' keys:
+    /// the file would hold that variant's strides and formats, and the next start would load
+    /// it as the library of every draw of the module. It is written under the keys of its
+    /// specialized stages instead (MetalRenderHost.StageBufferWordArchiveKey, zero for a stage
+    /// that declares none or a module with no key), which name exactly those values.
+    /// </summary>
+    internal static (UInt128 Vertex, UInt128 Pixel) LibraryFileKeys(
+        UInt128 vertexKey, UInt128 pixelKey, bool specialized, UInt128 variantVertexFile = default, UInt128 variantPixelFile = default) =>
+        specialized ? (variantVertexFile, variantPixelFile) : (vertexKey, pixelKey);
 
     /// <summary>Serializes the current segment now; waits when <paramref name="wait"/>.</summary>
     public void Flush(bool wait, TimeSpan? timeout = null)
@@ -1346,39 +1414,40 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             $"segment_mb={listedBytes / 1048576.0:F1} other_translator_segments={foreign.Count}");
     }
 
-    // Under _archivesLock. Opens a segment for a lookup, closing the least recently used
-    // past ResidentLimit (never the ones of the lookup: they are in wanted); zero when its
-    // file does not check out any more.
-    private nint OpenSegment(int sequence, List<int> wanted)
+    // Under _archivesLock: the resident segments of a pair's list as an NSArray retained for
+    // the caller (zero when none is), each marked as just used.
+    private nint ResidentArray(List<int> sequences)
     {
-        if (_resident.TryGetValue(sequence, out var open))
+        nint array = 0;
+        foreach (var sequence in sequences)
         {
+            if (!_resident.TryGetValue(sequence, out var open))
+            {
+                continue;
+            }
+
             open.Tick = ++_residentTick;
-            return open.Archive;
+            if (array == 0)
+            {
+                array = MetalNative.Send(MetalNative.Send(MetalNative.Class("NSMutableArray"), SelAlloc), SelInit);
+            }
+
+            MetalNative.SendVoid(array, MetalNative.Selector("addObject:"), open.Archive);
         }
 
-        var started = Stopwatch.GetTimestamp();
-        try
-        {
-            return OpenSegmentFile(sequence, wanted);
-        }
-        finally
-        {
-            Interlocked.Add(ref _segmentOpenTicks, Stopwatch.GetTimestamp() - started);
-        }
+        return array;
     }
 
-    // Under _archivesLock: reads and checks the whole file, then has Metal read it again.
-    private nint OpenSegmentFile(int sequence, List<int> wanted)
-    {
-        var path = SegmentFile(sequence);
-        if (!TryVerify(path, out var length))
-        {
-            Interlocked.Increment(ref _rejected);
-            DropSegment(sequence, path);
-            return 0;
-        }
+    // Outside _archivesLock: reads and checks the whole file, then has Metal read it again.
+    // The archive and the file's length, or zero when the file fails its trailer or Metal
+    // will not open it.
+    private (nint Archive, long Length) ReadSegment(string path) =>
+        TryVerify(path, out var length) && OpenArchive(path) is var archive and not 0 ? (archive, length) : (0, 0);
 
+    // Under _archivesLock: an opened segment becomes resident, closing the least recently
+    // used past ResidentLimit (never one of the lookup's: they are in wanted).
+    private void AdmitSegment(int sequence, nint archive, long length, List<int> wanted)
+    {
         while (_residentBytes + length > ResidentLimit)
         {
             var victim = -1;
@@ -1402,19 +1471,9 @@ internal sealed partial class MetalBinaryArchive : IDisposable
             _resident.Remove(victim);
         }
 
-        var archive = OpenArchive(path);
-        if (archive == 0)
-        {
-            Interlocked.Increment(ref _rejected);
-            DropSegment(sequence, path);
-            return 0;
-        }
-
         _resident[sequence] = new ResidentSegment(archive, length) { Tick = ++_residentTick };
         _residentBytes += length;
         Interlocked.Increment(ref _segmentsOpened);
-        Touch(path);
-        return archive;
     }
 
     private void DropSegment(int sequence, string path)

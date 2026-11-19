@@ -121,6 +121,79 @@ public sealed class OverlayTelemetryTests : IDisposable
         Assert.Equal(4f, OverlayTelemetry.DataSource.Capture().Frames[^1].GpuMs, 2);
     }
 
+    // The overlay states its demand with every snapshot. That must not resume a capture the render thread paused
+    // until its next sampled frame: it did, so every frame was timed and the sampling never applied.
+    [Fact]
+    public void AnOverlaySnapshotDoesNotResumeAPausedCapture()
+    {
+        if (RenderPhaseProfile.OverlayPhaseSample == 1 || RenderPhaseProfile.Enabled)
+        {
+            return;
+        }
+
+        var floor = RenderPhaseProfile.OverlayPhaseMinTicks;
+        RenderPhaseProfile.OverlayPhaseMinTicks = 0;
+        try
+        {
+            OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.RenderPhases | OverlayCaptureDemand.Timeline);
+            Assert.True(RenderPhaseProfile.Measuring);
+            RenderPhaseProfile.RecordFrame();
+            Assert.False(RenderPhaseProfile.Measuring);
+            for (var frame = 1; frame < RenderPhaseProfile.OverlayPhaseSample; frame++)
+            {
+                _ = OverlayTelemetry.DataSource.Capture();
+                OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.RenderPhases | OverlayCaptureDemand.Timeline);
+                Assert.False(RenderPhaseProfile.Measuring);
+                RenderPhaseProfile.RecordFrame();
+            }
+
+            // The sampled frame, and a changed demand still takes effect at once.
+            Assert.True(RenderPhaseProfile.Measuring);
+            RenderPhaseProfile.RecordFrame();
+            Assert.False(RenderPhaseProfile.Measuring);
+            OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.RenderPhases);
+            Assert.True(RenderPhaseProfile.Measuring);
+        }
+        finally
+        {
+            RenderPhaseProfile.OverlayPhaseMinTicks = floor;
+        }
+    }
+
+    // A capture also waits out the time floor: frames past the sample count stay untimed until it has passed.
+    [Fact]
+    public void ACaptureWaitsForTheTimeFloorAfterTheLastOne()
+    {
+        if (RenderPhaseProfile.OverlayPhaseSample == 1 || RenderPhaseProfile.Enabled)
+        {
+            return;
+        }
+
+        var floor = RenderPhaseProfile.OverlayPhaseMinTicks;
+        RenderPhaseProfile.OverlayPhaseMinTicks = 3600 * Stopwatch.Frequency;
+        try
+        {
+            OverlayTelemetry.DataSource.SetCaptureDemand(OverlayCaptureDemand.RenderPhases | OverlayCaptureDemand.Timeline);
+            Assert.True(RenderPhaseProfile.Measuring);
+            RenderPhaseProfile.RecordFrame();
+            for (var frame = 0; frame < RenderPhaseProfile.OverlayPhaseSample * 3; frame++)
+            {
+                Assert.False(RenderPhaseProfile.Measuring);
+                RenderPhaseProfile.RecordFrame();
+            }
+
+            Assert.False(RenderPhaseProfile.Measuring);
+            RenderPhaseProfile.OverlayPhaseMinTicks = 0;
+            RenderPhaseProfile.RecordFrame();
+            Assert.True(RenderPhaseProfile.Measuring);
+        }
+        finally
+        {
+            RenderPhaseProfile.OverlayPhaseMinTicks = floor;
+            RenderPhaseProfile.SetOverlayCapture(false, false);
+        }
+    }
+
     [Fact]
     public void FramesBetweenCapturedOnesShowTheLastCapturedRenderBreakdown()
     {

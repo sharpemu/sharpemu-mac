@@ -44,6 +44,35 @@ internal interface IMetalImageCacheOwner
     // are not settled yet.
     bool HasPendingGpuWrite(ulong address, ulong size);
 
+    // A transfer begun now would end an open render pass (MetalRenderHost.UploadPrelude.cs).
+    bool UploadWouldEndRenderPass => false;
+
+    // The host's share of the conditions for uploading this texture from these guest bytes ahead
+    // of the open command buffer: what the open buffer has recorded over either.
+    MetalPreludeBlock PreludeBlocks(nint texture, ulong address, ulong size) => MetalPreludeBlock.None;
+
+    // An upload met an open render pass and ended it; blocks are the prelude conditions it failed.
+    void NotePassEndingUpload(MetalImageDirtyCause cause, MetalPreludeBlock blocks)
+    {
+    }
+
+    // SHARPEMU_METAL_V2_UPLOAD_PRELUDE: an upload that fails no prelude condition is encoded ahead
+    // of the open command buffer, through BeginUploadPrelude and EndUploadPrelude.
+    bool UploadPreludeEnabled => false;
+
+    // A command buffer committed ahead of the open one when EndUploadPrelude is called, or null when
+    // none can be had (the switch off, no render pass open).
+    IMetalSubmissionContext? BeginUploadPrelude() => null;
+
+    void EndUploadPrelude(IMetalSubmissionContext prelude)
+    {
+    }
+
+    // The upload a prelude was begun for encoded nothing.
+    void NoteUploadPreludeUnencoded()
+    {
+    }
+
     // Copies the guest bytes of a range into its staged (ring) copy on the GPU, behind the work still
     // writing them, so a transfer reading the staged copy next sees what that work leaves there.
     void GatherStagedRange(ulong address, in MetalGuestRange staging)
@@ -373,6 +402,76 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
     }
 
+    // How many image-set changes a read-only binding memo entry is checked across before it just misses.
+    internal const int ImageSetWalkCap = 16;
+
+    /// <summary>
+    /// Whether no image added or dropped after version <paramref name="since"/> overlaps the guest bytes
+    /// [<paramref name="address"/>, +<paramref name="size"/>) - which then have the same images over them as at
+    /// <paramref name="since"/> - and the version that holds for (<paramref name="now"/>). False when one does, when
+    /// more than <see cref="ImageSetWalkCap"/> changes were made since, or when the ring no longer holds them all
+    /// (MetalReadBindingMemoV2).
+    /// </summary>
+    public bool ImageSetUnchangedOver(long since, ulong address, ulong size, out long now)
+    {
+        lock (_imageSetChangeGate)
+        {
+            now = Volatile.Read(ref _imageSetVersion);
+            if (since < 0 || now < since || now - since > ImageSetWalkCap)
+            {
+                return false;
+            }
+
+            var end = size > ulong.MaxValue - address ? ulong.MaxValue : address + size;
+            for (var version = since + 1; version <= now; version++)
+            {
+                var change = _imageSetChanges[version % ImageSetChangeCount];
+                if (change.Version != version || (change.Start < end && address < change.End))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The images whose guest bytes overlap the range - those FlushGpuWrites would look at - up to two of them, how
+    /// many there are, and the image-set version they are listed at (read under the lock that adds and drops images).
+    /// </summary>
+    public void ListOverlapping(
+        ulong address, ulong size, out MetalCachedImage? first, out MetalCachedImage? second, out int count, out long version)
+    {
+        first = second = null;
+        count = 0;
+        using var held = _lock.Hold();
+        version = ImageSetVersion;
+        if (!IsValidRange(address, size))
+        {
+            return;
+        }
+
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            if (_slots.TryGet(imageIdentifier) is not { } image || !image.Overlaps(address, size))
+            {
+                continue;
+            }
+
+            if (count == 0)
+            {
+                first = image;
+            }
+            else if (count == 1)
+            {
+                second = image;
+            }
+
+            count++;
+        }
+    }
+
     /// <summary>
     /// The guest ranges of the images added or dropped after version <paramref name="since"/> up to
     /// <paramref name="until"/>, sorted by start and merged; false when they are no longer all known.
@@ -526,10 +625,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>Alias syncs that kept this image's newer contents instead of publishing an older alias.</summary>
     public long TakeAliasNewerKept() => Interlocked.Exchange(ref _aliasNewerKept, 0);
 
+    // role names the use for the alias trace: rt, rt-overwrite, rt-load, depth, depth-read, storage, texture, other.
     private void SynchronizeAliases(
-        ResourceSlotIdentifier imageIdentifier, bool takesGpuOwnership, bool keepsDepthPlane = false)
+        ResourceSlotIdentifier imageIdentifier, bool takesGpuOwnership, bool keepsDepthPlane = false,
+        string role = "other")
     {
         var image = _slots[imageIdentifier];
+        _aliasSyncRole = role;
         var address = image.Description.Data.Address;
         var size = image.Description.Data.Size;
         if (takesGpuOwnership)
@@ -562,6 +664,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         var alone = true;
         _syncedScratch.Clear();
+        var writtenBefore = _writebackBytes;
         foreach (var otherIdentifier in FindImagesInRange(address, size, pageOverlap: false))
         {
             if (otherIdentifier == imageIdentifier ||
@@ -589,14 +692,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 // 19 MiB target used to cost a full retile of one and a full detile of
                 // the other, every time the pair was used.
                 ReportAliasPair(image, other);
+                _aliasTraceMark = _writebackBytes;
                 var sharedStart = Math.Max(image.Description.Data.Address, other.Description.Data.Address);
                 var sharedEnd = Math.Min(
                     image.Description.Data.Address + image.Description.Data.Size,
                     other.Description.Data.Address + other.Description.Data.Size);
                 var sharedSize = sharedEnd > sharedStart ? sharedEnd - sharedStart : 0;
                 var (otherStart, otherEnd) = other.OverlapWithin(sharedStart, sharedSize);
-                if (other.IsCpuDirty && otherEnd > otherStart &&
-                    otherStart >= other.DirtyStart && otherEnd <= other.DirtyEnd)
+                if (otherEnd > otherStart && other.IsStaleOver(otherStart, otherEnd))
                 {
                     // The other image already gave these bytes up to a write through an
                     // alias and owns only the rest: its texture is stale here, so it has
@@ -625,6 +728,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
                     _aliasNewerKept++;
                     NoteAliasPublication("newer-kept", image, other, otherOwedGuestMemory, otherStart, otherEnd);
+                    continue;
+                }
+
+                if ((image.Description.Data.Address != other.Description.Data.Address ||
+                     image.Description.Data.Size != other.Description.Data.Size) &&
+                    TryPublishAliasLayerSubset(image, other, takesGpuOwnership, otherStart, otherEnd))
+                {
+                    // Whole layers laid out alike: a slice copy is what the round trip would leave in this
+                    // texture (MetalImageCache.AliasSubset), and it settled the other image's ownership by use.
+                    _aliasPublishes++;
+                    NoteAliasPublication("device-subset", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     continue;
                 }
 
@@ -661,8 +775,6 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     continue;
                 }
 
-                _aliasRoundTrip++;
-                _aliasRoundTripBytes += (long)sharedSize;
                 var (dirtyStart, dirtyEnd) = image.OverlapWithin(sharedStart, sharedSize);
                 var declined = MetalAliasFallbackReason.None;
                 if (takesGpuOwnership && TryHandOverAliasRun(other, otherStart, otherEnd, out declined))
@@ -674,6 +786,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     MarkAliasRunDirty(image, dirtyStart, dirtyEnd);
                     _aliasPublishes++;
                     _aliasNarrowWrites++;
+                    NoteAliasRoundTrip(whole: false, sharedSize);
                     NoteAliasPublication("narrow-write", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     continue;
                 }
@@ -687,6 +800,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     // image does not reload it. Guest memory there is stale until this image's own write is published.
                     other.MarkCpuDirty(MetalImageDirtyCause.AliasWrite, otherStart, otherEnd);
                     _aliasWritesDiscarded++;
+                    _aliasLayoutSkips++;
                     continue;
                 }
 
@@ -700,6 +814,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     // going out through guest memory and back in. The trailing ownership step below still
                     // runs for it.
                     _aliasWritesDiscarded++;
+                    _aliasLayoutSkips++;
                 }
                 else if (takesGpuOwnership)
                 {
@@ -709,11 +824,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                     // follows to replace with the stale guest bytes.
                     NoteAliasFallback(write: true, declined, image, other, otherOwedGuestMemory, otherStart, otherEnd);
                     WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
+                    NoteAliasRoundTrip(whole: true, sharedSize);
                     NoteAliasPublication("whole-write", image, other, otherOwedGuestMemory, otherStart, otherEnd);
                 }
                 else
                 {
                     var whole = PublishAliasRange(other, sharedStart, sharedSize);
+                    NoteAliasRoundTrip(whole != MetalAliasFallbackReason.None, sharedSize);
                     if (whole != MetalAliasFallbackReason.None)
                     {
                         NoteAliasFallback(write: false, whole, image, other, otherOwedGuestMemory, otherStart, otherEnd);
@@ -765,6 +882,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
         }
 
+        _aliasMovedWritebackBytes += _writebackBytes - writtenBefore;
         image.AlonePageVersions = alone ? pageVersions : -1;
         RecordSync(image, alone, pageVersions, kind);
     }
@@ -1068,6 +1186,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(depth);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, depth.Texture);
+        depth.DeviceCopiedSinceRefresh = true;
         if (!_transfer.TryEncodeStencilFromColor(
                 context, in other.Description, other.Texture, in depth.Description, depth.Texture))
         {
@@ -1149,6 +1268,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, depth.Texture, image.Texture);
+        image.DeviceCopiedSinceRefresh = true;
         if (!_transfer.TryEncodeColorFromStencil(
                 context, in depth.Description, depth.Texture, in image.Description, image.Texture))
         {
@@ -1215,24 +1335,35 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // is certain to be a narrow one: an image dirty over the run while it stays
     // GPU-modified must never be refreshed whole, since that would replace bytes only its
     // texture holds. A run already stale on the image is refused for the same reason
-    // when it lies outside the stale interval, which one interval cannot hold apart.
+    // when it lies outside the stale interval, which one interval cannot hold apart. With
+    // run sets (MetalImageCache.RunSets) it is refused only when the set is full, which the
+    // caller's whole writeback then merges by publishing; and a run past half of the image
+    // is reloaded alone like any other (NarrowRefreshPastHalf).
     private bool TryHandOverAliasRun(
         MetalCachedImage other, ulong start, ulong end, out MetalAliasFallbackReason declined)
     {
+        var runSets = other.RunCapacity > 1;
         declined = !SubRangeTransfersEnabled ? MetalAliasFallbackReason.SubRangeDisabled
             : end <= start ? MetalAliasFallbackReason.EmptyRun
             : other.Description.HasStencil ? MetalAliasFallbackReason.Stencil
             : start == 0 && end >= other.Description.Data.Size ? MetalAliasFallbackReason.RunIsWholeOther
-            : end - start > other.Description.Data.Size / 2 ? MetalAliasFallbackReason.RunPastHalf
-            : other.IsCpuDirty && (start < other.DirtyStart || end > other.DirtyEnd)
+            : !runSets && end - start > other.Description.Data.Size / 2 ? MetalAliasFallbackReason.RunPastHalf
+            : runSets && !other.CanAddStaleRun(start, end) ? MetalAliasFallbackReason.RunSetFull
+            : !runSets && other.IsCpuDirty && (start < other.DirtyStart || end > other.DirtyEnd)
                 ? MetalAliasFallbackReason.OtherDirtyOutsideRun
             : MetalAliasFallbackReason.None;
+        if (declined == MetalAliasFallbackReason.RunSetFull)
+        {
+            _runStats.NoteMerged();
+        }
+
         if (declined != MetalAliasFallbackReason.None)
         {
             return false;
         }
 
         if (!other.IsPublished(start, end) &&
+            NoteRefusedReadThrough(other, start, end) &&
             !TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap, out declined))
         {
             return false;
@@ -1248,12 +1379,19 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // them - a refresh of the merged interval would replace those bytes with the guest's.
     // The run it holds is refreshed first instead. That is safe here: an alias still
     // owing those bytes overlaps this image too, so this same loop publishes it and marks
-    // the run stale again.
+    // the run stale again. With run sets only a full set is refreshed first.
     private void MarkAliasRunDirty(MetalCachedImage image, ulong start, ulong end)
     {
         if (image.IsGpuModified && image.IsCpuDirty && end > start &&
-            (start > image.DirtyEnd || end < image.DirtyStart))
+            (image.RunCapacity > 1
+                ? !image.CanAddStaleRun(start, end)
+                : start > image.DirtyEnd || end < image.DirtyStart))
         {
+            if (image.RunCapacity > 1)
+            {
+                _runStats.NoteMerged();
+            }
+
             RefreshFromGuest(image);
         }
 
@@ -1422,8 +1560,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             EnsureStorageUsageLocked(image);
             EnsureSparseBacked(image);
             WatchImage(imageIdentifier);
-            SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
+            SynchronizeAliases(imageIdentifier, takesGpuOwnership: true, role: "storage");
             RefreshFromGuest(image);
+            // Read or written is not known here: counted as a read (conservative), and as a write of unknown extent.
+            NoteRefusedRead(
+                image, RefusedRead.Storage, "bind",
+                layerMask: LayerMask(request.View.BaseLayer, Math.Max(request.View.LayerCount, 1)));
+            NoteRefusedRewrite(image, whole: false);
             image.Uses.Storage = true;
             image.MarkGpuModified();
             NoteLinearGpuWrite(image);
@@ -1452,8 +1595,9 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             }
 
             WatchImage(imageIdentifier);
-            SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
+            SynchronizeAliases(imageIdentifier, takesGpuOwnership: false, role: "texture");
             RefreshFromGuest(image);
+            NoteRefusedSampled(image, request.View.BaseLayer, request.View.LayerCount);
             image.Uses.Texture = true;
             image.NoteUse(_owner.CurrentSerial);
         }
@@ -1674,11 +1818,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var deferAliases = deferRefresh && AliasTransitionsEnabled && CanDeferRefresh(image) &&
             !image.Description.HasStencil && !image.Description.IsBlock && !image.Description.IsVolume &&
             image.Description.Resources.Levels == 1 && image.Description.TransferLayers == 1;
-        if (!deferAliases) SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
+        if (!deferAliases) SynchronizeAliases(imageIdentifier, takesGpuOwnership: true, role: "rt");
         // The pass about to begin may clear or overwrite all of it; BeginRendering decides
         // whether the upload is worth making (MetalImageCache.DeferredRefresh).
-        var defer = deferRefresh && CanDeferRefresh(image);
-        if (!defer)
+        var defer = deferRefresh && (CanDeferRefresh(image) || CanDeferLayerRefresh(image));
+        // Stale layers the view does not name need no pass to decide them: they stay stale and nothing waits.
+        var keepStale = defer && TryKeepOtherLayersStaleLocked(image, request.View.BaseLayer, request.View.LayerCount);
+        defer &= !keepStale;
+        if (!defer && !keepStale)
         {
             RefreshFromGuest(image);
         }
@@ -1703,11 +1850,20 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             image.NoteUse(_owner.CurrentSerial);
             var deferredView = image.GetOrCreateView(request.View);
-            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: false, stencilOnly: false, deferAliases);
+            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: false, stencilOnly: false, deferAliases,
+                request.View.BaseLayer, request.View.LayerCount);
             return deferredView;
         }
 
-        image.MarkGpuModified();
+        if (keepStale)
+        {
+            image.MarkGpuModifiedKeepingStale();
+        }
+        else
+        {
+            image.MarkGpuModified();
+        }
+
         NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
         image.NoteUse(image.GpuWriteSerial);
@@ -1750,13 +1906,17 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var stencil = request.Description.HasStencil
             ? ImageStencilPlane(in image.Description, in request.Description)
             : default;
-        SynchronizeAliases(imageIdentifier, takesGpuOwnership: writes, keepsDepthPlane: stencilOnly);
+        SynchronizeAliases(
+            imageIdentifier, takesGpuOwnership: writes, keepsDepthPlane: stencilOnly, role: writes ? "depth" : "depth-read");
         // Only a target the pass writes can be one it clears. The refresh reads the
         // stencil plane from where the image has it, so a request that moves the plane
         // refreshes now, before the description changes.
-        var defer = deferRefresh && writes && CanDeferRefresh(image) &&
+        var defer = deferRefresh && writes && (CanDeferRefresh(image) || CanDeferLayerRefresh(image)) &&
             (!request.Description.HasStencil || stencil == image.Description.Stencil);
-        if (!defer)
+        // As for a colour target: stale layers the view does not name stay stale and nothing waits.
+        var keepStale = defer && TryKeepOtherLayersStaleLocked(image, request.View.BaseLayer, request.View.LayerCount);
+        defer &= !keepStale;
+        if (!defer && !keepStale)
         {
             RefreshFromGuest(image);
         }
@@ -1790,13 +1950,22 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             image.NoteUse(_owner.CurrentSerial);
             var deferredView = image.GetOrCreateView(request.View);
-            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: true, stencilOnly, aliasesPending: false);
+            DeferRefreshLocked(deferredView, imageIdentifier, image, depth: true, stencilOnly, aliasesPending: false,
+                request.View.BaseLayer, request.View.LayerCount);
             return deferredView;
         }
 
         if (writes)
         {
-            image.MarkGpuModified(depthPlaneChanged: !stencilOnly);
+            if (keepStale)
+            {
+                image.MarkGpuModifiedKeepingStale(depthPlaneChanged: !stencilOnly);
+            }
+            else
+            {
+                image.MarkGpuModified(depthPlaneChanged: !stencilOnly);
+            }
+
             NoteLinearGpuWrite(image);
             image.GpuWriteSerial = _owner.CurrentSerial;
         }
@@ -1873,6 +2042,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // alone keeps whatever the texture held before.
         SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
         RefreshFromGuest(image);
+        // A resolve or depth copy writes one subresource, perhaps not all of it.
+        NoteRefusedRewrite(image, whole: false);
         image.MarkGpuModified();
         NoteLinearGpuWrite(image);
         image.GpuWriteSerial = _owner.CurrentSerial;
@@ -1895,7 +2066,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         EnsureSparseBacked(image);
     }
 
-    public void RefreshImage(ResourceSlotIdentifier imageIdentifier)
+    public void RefreshImage(ResourceSlotIdentifier imageIdentifier, string? readRole = null)
     {
         using var held = _lock.Hold();
         DrainDeferredRefreshesLocked();
@@ -1904,6 +2075,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             WatchImage(imageIdentifier);
             SynchronizeAliases(imageIdentifier, takesGpuOwnership: false);
             RefreshFromGuest(image);
+            if (readRole is not null)
+            {
+                NoteRefusedRead(image, RefusedRead.Transfer, readRole);
+            }
         }
     }
 
@@ -1912,20 +2087,23 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// memory. Called before a buffer binding, an incompatible image request or a
     /// host read can observe the bytes. <paramref name="written"/> says the consumer also
     /// writes them, and is followed by <see cref="InvalidateMemoryFromGpu"/> over the range.
+    /// True when a GPU-modified image overlapped the range (it was published or written back).
     /// </summary>
-    public void FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause, bool written = false)
+    public bool FlushGpuWrites(ulong address, ulong size, MetalWritebackCause cause, bool written = false)
     {
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.GpuWriteFlush);
         if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
         {
-            return;
+            return false;
         }
 
+        var found = false;
         using var held = _lock.Hold();
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
         {
             if (_slots.TryGet(imageIdentifier) is { } image && image.GpuOverlaps(address, size))
             {
+                found = true;
                 if (TryPublishConsumerRunLocked(image, address, size, cause, written))
                 {
                     continue;
@@ -1934,6 +2112,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
                 WriteBackToGuest(image, cause);
             }
         }
+
+        return found;
     }
 
     /// <summary>A GPU shader or transfer wrote these guest bytes: the images reload.</summary>
@@ -2046,6 +2226,31 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return false;
     }
 
+    // Diagnostics (SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=census): the live images over the range, with their extent and state.
+    internal string DescribeRangeOwners(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
+        {
+            return "none";
+        }
+
+        using var held = _lock.Hold();
+        var owners = new List<string>();
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            if (_slots.TryGet(imageIdentifier) is { } image)
+            {
+                owners.Add(FormattableString.Invariant(
+                    $"0x{image.Description.Data.Address:X}+0x{image.Description.Data.Size:X} {image.Description.GuestFormat} ") +
+                    FormattableString.Invariant(
+                    $"{image.Description.Extent.Width}x{image.Description.Extent.Height}x{image.Description.Extent.Depth} tile={image.Description.TileMode} ") +
+                    $"gpu_modified={image.IsGpuModified} cpu_dirty={image.IsCpuDirty} gpu_overlaps={image.GpuOverlaps(address, size)}");
+            }
+        }
+
+        return owners.Count == 0 ? "none" : string.Join(" | ", owners);
+    }
+
     // Two surfaces over exactly the same guest bytes hand their contents over on the
     // device, with guest memory left out of it entirely. The pair that costs the most is
     // a depth-stencil target and the single-channel float alias something samples it
@@ -2081,6 +2286,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         EnsureSparseBacked(image);
         var context = _owner.BeginTransfer(MetalTransferCause.Writeback, other.Texture, image.Texture);
+        image.DeviceCopiedSinceRefresh = true;
         var refusal = "disabled";
         var fused = AliasTransitionsEnabled && _transfer.TryEncodeFusedAlias(
             context, in other.Description, other.Texture, in image.Description, image.Texture, out refusal);
@@ -2103,8 +2309,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             context.ProfileEncoded(ProfileLabel("alias-on-device", in image.Description));
         }
-        // The target now holds what the source holds, so it owes guest memory no upload.
+        // The target now holds what the source holds, so it owes guest memory no upload - and what it had
+        // published is not its content any more (the source still owes these bytes).
         image.RefreshComplete();
+        image.ForgetPublished(0, image.Description.Data.Size);
         image.NotePublishedFrom(other);
         _deviceAliasPublishes++;
         return true;
@@ -2132,7 +2340,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // (MetalImageTransfer.TryEncodeTextureToTexture): neither transfer converts anything
     // for those pairs, so texel for texel the target gets exactly the bits the round trip
     // would have detiled into it.
-    private static readonly bool DeviceAliasPublishEnabled =
+    // Test hook: an instance setting, so a test runs the same pair with the device copy off.
+    internal bool DeviceAliasPublishEnabled { get; set; } =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_ALIAS_ON_DEVICE") != "0";
 
     // Publishes just the shared bytes of a GPU-written image, leaving the texture
@@ -2157,6 +2366,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return MetalAliasFallbackReason.None;
         }
 
+        NoteRefusedRead(other, RefusedRead.Writeback, "alias-run", start, end);
         if (!TryWriteBackRun(other, start, end, MetalWritebackCause.ImageOverlap, out var failure))
         {
             WriteBackToGuest(other, MetalWritebackCause.ImageOverlap);
@@ -2183,13 +2393,20 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
+        if (TrySkipWholeStaleWriteback(image))
+        {
+            // Guest memory holds every byte of the run already; the image owns none of them.
+            failure = MetalAliasFallbackReason.None;
+            return true;
+        }
+
         if (!TryCoveringRun(in description, start, end, out var aligned, out var alignedEnd))
         {
             failure = MetalAliasFallbackReason.CoveringRunRefused;
             return false;
         }
 
-        if (image.IsCpuDirty && aligned < image.DirtyEnd && alignedEnd > image.DirtyStart)
+        if (image.IsCpuDirty && image.StaleOverlaps(aligned, alignedEnd))
         {
             RefreshBeforeWriteback(image);
         }
@@ -2472,6 +2689,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             LevelsChangedFrame = _idleClock.Frames,
             Sparse = sparse,
         };
+        AdmitRunSets(image);
         if (windowView)
         {
             image.MarkWindowLinearView();
@@ -2752,11 +2970,10 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         ref readonly var description = ref image.Description;
         // A texture held from its BASE_LEVEL reads only the coarser levels' bytes; guest
-        // memory changing anywhere else changes nothing it holds. (An empty interval is a
-        // new image, dirty over all of it.)
+        // memory changing anywhere else changes nothing it holds.
         var residentStart = image.ResidentStart;
         var residentEnd = image.ResidentEnd;
-        if (image.FirstLevel != 0 && image.DirtyEnd > image.DirtyStart &&
+        if (image.FirstLevel != 0 &&
             (image.DirtyEnd <= residentStart || image.DirtyStart >= residentEnd))
         {
             image.RefreshComplete();
@@ -2772,36 +2989,58 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             // Stale over a run an alias took while the texture still owns the rest: a
             // whole upload would replace bytes guest memory was never given. The run
-            // stays stale rather than costing them.
-            MetalV2Diagnostics.InfoOnce(
+            // stays stale rather than costing them - which serves the texture's older
+            // bytes there, so it is counted (alias_run_refresh_refused) and warned about.
+            Interlocked.Increment(ref _aliasRunRefreshRefused);
+            var refusal = NoteRunRefusal(image);
+            MetalV2Diagnostics.WarnOnce(
                 $"alias-run-refresh:{description.PixelFormat}:{description.Extent.Width}x{description.Extent.Height}",
                 "A GPU-written image stale over an alias run could not reload just that run, so it keeps " +
                 $"its texture there: {description.PixelFormat} {description.Extent.Width}x{description.Extent.Height} " +
                 $"0x{description.Data.Address:X16}+0x{description.Data.Size:X} " +
-                $"dirty=0x{image.DirtyStart:X}..0x{image.DirtyEnd:X}.");
+                $"dirty=0x{image.DirtyStart:X}..0x{image.DirtyEnd:X} runs={image.StaleRuns.Length} " +
+                $"reason={RunRefusalNames[(int)refusal]} levels={description.Resources.Levels} " +
+                $"layers={description.TransferLayers}.");
             return;
         }
 
-        PrepareSparseUpload(image, residentStart, residentEnd);
-        _owner.LandHeldCopies(description.Data.Address + residentStart, residentEnd - residentStart);
-        var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
-        var residentSize = residentEnd - residentStart;
-        var whole = residentSize <= TransferPieceBytes
-            ? ResolveUploadSource(description.Data.Address + residentStart, residentSize)
-            : default;
-        bool moved;
-        if (whole.IsValid && whole.Size >= residentSize)
+        // Sized before anything below lands or ends: whether this upload meets an open render pass,
+        // and which of the prelude's conditions it fails (MetalImageCache.UploadPrelude.cs). One that
+        // fails none runs ahead of the open command buffer instead of ending its pass.
+        MetalPreludeBlock? prelude = null;
+        var hoisted = false;
+        var moved = false;
+        if (_owner.UploadWouldEndRenderPass)
         {
-            var stencil = description.HasStencil
-                ? ResolveUploadSource(description.Stencil.Address, description.Stencil.Size)
-                : default;
-            moved = EncodeUpload(
-                context, in description, ResidentRange(image), whole, stencil, image.Texture,
-                residentStart, residentSize, image.FirstLevel);
+            var blocks = PreludeBlocks(image, residentStart, residentEnd, whole: true);
+            hoisted = TryUploadInPrelude(image, residentStart, residentEnd, ref blocks, out moved);
+            prelude = blocks;
         }
-        else
+
+        var gathersBefore = _uploadGathers;
+        IMetalSubmissionContext? context = null;
+        if (!hoisted)
         {
-            moved = UploadInPieces(context, image);
+            PrepareSparseUpload(image, residentStart, residentEnd);
+            _owner.LandHeldCopies(description.Data.Address + residentStart, residentEnd - residentStart);
+            context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
+            var residentSize = residentEnd - residentStart;
+            var whole = residentSize <= TransferPieceBytes
+                ? ResolveUploadSource(description.Data.Address + residentStart, residentSize)
+                : default;
+            if (whole.IsValid && whole.Size >= residentSize)
+            {
+                var stencil = description.HasStencil
+                    ? ResolveUploadSource(description.Stencil.Address, description.Stencil.Size)
+                    : default;
+                moved = EncodeUpload(
+                    context, in description, ResidentRange(image), whole, stencil, image.Texture,
+                    residentStart, residentSize, image.FirstLevel);
+            }
+            else
+            {
+                moved = UploadInPieces(context, image);
+            }
         }
 
         if (!moved)
@@ -2813,10 +3052,22 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         }
 
         _uploadCauses[(int)image.DirtyCause]++;
-        if (context.WantsEncodedLabels)
+        if (hoisted)
+        {
+            NoteHoistedUse(image, true);
+        }
+        else
+        {
+            NotePassEndingUpload(image.DirtyCause, prelude, gathersBefore);
+        }
+
+        NoteUploadForTrace(image, image.DirtyCause, residentEnd - residentStart, run: false);
+        if (context is { WantsEncodedLabels: true })
         {
             context.ProfileEncoded(ProfileLabel("upload", in description));
         }
+
+        NoteRefusedEnded(image, released: false);
         image.RefreshComplete();
         Interlocked.Increment(ref _uploads);
     }
@@ -2827,6 +3078,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // the run is most of the image, cannot be aligned or cannot be mapped - the whole
     // image is then refreshed as before, because a partial refresh that loses bytes would
     // leave the texture disagreeing with guest memory for good.
+    // With run sets an image may be stale over several runs: each is refreshed alone, every
+    // one planned before any is encoded, and the half rule counts them all.
     private bool TryRefreshDirtyRun(MetalCachedImage image)
     {
         ref readonly var description = ref image.Description;
@@ -2834,61 +3087,190 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // held from its BASE_LEVEL the coarser levels' run.
         var residentStart = image.ResidentStart;
         var residentEnd = image.ResidentEnd;
-        var dirtyStart = Math.Max(image.DirtyStart, residentStart);
-        var dirtyEnd = Math.Min(image.DirtyEnd, residentEnd);
-        if (!SubRangeTransfersEnabled || description.HasStencil ||
-            dirtyEnd <= dirtyStart ||
-            dirtyEnd - dirtyStart > (residentEnd - residentStart) / 2)
+        if (!SubRangeTransfersEnabled || description.HasStencil)
         {
+            _runRefusal = !SubRangeTransfersEnabled ? MetalRunRefusal.SubRangeOff : MetalRunRefusal.Stencil;
             return false;
         }
 
-        if (!TryCoveringRun(in description, dirtyStart, dirtyEnd, out var start, out var end))
+        Span<(ulong Start, ulong End)> runs = stackalloc (ulong, ulong)[MetalCachedImage.MaxRuns];
+        var count = 0;
+        ulong stale = 0;
+        foreach (var run in image.StaleRuns)
         {
+            var dirtyStart = Math.Max(run.Start, residentStart);
+            var dirtyEnd = Math.Min(run.End, residentEnd);
+            if (dirtyEnd > dirtyStart)
+            {
+                runs[count++] = (dirtyStart, dirtyEnd);
+                stale += dirtyEnd - dirtyStart;
+            }
+        }
+
+        var overHalf = stale > (residentEnd - residentStart) / 2;
+        // A GPU-written image stale over every resident byte owes guest memory none of them: the run is the whole
+        // resident range, reloaded through this same path (its sources, its order after the publication that made
+        // the bytes) rather than refused for widening to the whole image (MetalImageCache.WholeStale.cs).
+        var wholeStale = count != 0 && IsWholeStale(image, runs[..count], residentStart, residentEnd);
+        if (wholeStale)
+        {
+            if (residentEnd - residentStart > TransferPieceBytes)
+            {
+                _runRefusal = MetalRunRefusal.WholeTooLarge;
+                return false;
+            }
+
+            runs[0] = (residentStart, residentEnd);
+            count = 1;
+        }
+
+        if (count == 0 || (overHalf && !NarrowRefreshPastHalf(image) && !wholeStale))
+        {
+            _runRefusal = count == 0 ? MetalRunRefusal.NoResidentRun : MetalRunRefusal.OverHalf;
             return false;
         }
 
-        // The run's ends widen outward to cuts of the whole chain; the resident run's own
-        // ends are where its levels' transfers start and stop, so cutting there loses none.
-        start = Math.Max(start, residentStart);
-        end = Math.Min(end, residentEnd);
-        var source = ResolveUploadSource(description.Data.Address + start, end - start);
-        if (!source.IsValid || source.Size < end - start)
+        // A whole-stale run is the resident range already: nothing to widen, and no byte around it to protect.
+        for (var index = 0; index < count && !wholeStale; index++)
         {
-            return false;
+            if (!TryCoveringRun(in description, runs[index].Start, runs[index].End, out var start, out var end))
+            {
+                _runRefusal = MetalRunRefusal.NoCoveringRun;
+                return false;
+            }
+
+            // The run's ends widen outward to cuts of the whole chain; the resident run's own
+            // ends are where its levels' transfers start and stop, so cutting there loses none.
+            var staleRun = runs[index];
+            runs[index] = (Math.Max(start, residentStart), Math.Min(end, residentEnd));
+            // A GPU-written image owns the bytes around its stale run. Where the widened run reaches bytes guest
+            // memory was never given (not published, not stale), the reload puts older bytes over them: counted
+            // and warned about, since nothing here can reload less than a whole block row.
+            if (image.IsGpuModified && runs[index] != staleRun &&
+                !GuestHoldsImageBytes(image, runs[index].Start, runs[index].End, staleRun.Start, staleRun.End))
+            {
+                Interlocked.Increment(ref _aliasRunWidened);
+                MetalV2Diagnostics.WarnOnce(
+                    $"alias-run-widened:{description.PixelFormat}:{description.Extent.Width}x{description.Extent.Height}",
+                    "A GPU-written image reloads a stale run widened over bytes only its texture holds: " +
+                    $"{description.PixelFormat} {description.Extent.Width}x{description.Extent.Height} " +
+                    $"0x{description.Data.Address:X16}+0x{description.Data.Size:X} " +
+                    $"stale=0x{staleRun.Start:X}..0x{staleRun.End:X} reload=0x{runs[index].Start:X}..0x{runs[index].End:X}.");
+            }
         }
 
-        PrepareSparseUpload(image, start, end);
-        _owner.LandHeldCopies(description.Data.Address + start, end - start);
-        var context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
-        if (!EncodeUpload(
-                context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
-                image.FirstLevel))
+        var cause = image.DirtyCause;
+        var anyHoisted = false;
+        foreach (var (start, end) in runs[..count])
         {
-            // Nothing reached the texture; the whole refresh decides what becomes of the image.
-            return false;
+            // Each run goes ahead of the open buffer on its own conditions; one that stays in it names the
+            // texture there, so no later run of this image moves ahead of it.
+            MetalPreludeBlock? prelude = null;
+            var hoisted = false;
+            var moved = false;
+            if (_owner.UploadWouldEndRenderPass)
+            {
+                // Whole: a device copy into the texture since its last refresh orders before the reload.
+                var blocks = PreludeBlocks(image, start, end, whole: wholeStale);
+                hoisted = TryUploadInPrelude(image, start, end, ref blocks, out moved);
+                anyHoisted |= hoisted;
+                prelude = blocks;
+            }
+
+            var gathersBefore = _uploadGathers;
+            IMetalSubmissionContext? context = null;
+            if (!hoisted)
+            {
+                var source = ResolveUploadSource(description.Data.Address + start, end - start);
+                if (!source.IsValid || source.Size < end - start)
+                {
+                    _runRefusal = MetalRunRefusal.SourceInvalid;
+                    NoteHoistedUse(image, anyHoisted);
+                    return false;
+                }
+
+                PrepareSparseUpload(image, start, end);
+                _owner.LandHeldCopies(description.Data.Address + start, end - start);
+                context = _owner.BeginTransfer(MetalTransferCause.Upload, image.Texture);
+                moved = EncodeUpload(
+                    context, in description, ResidentRange(image), source, default, image.Texture, start, end - start,
+                    image.FirstLevel);
+            }
+
+            if (!moved)
+            {
+                // Nothing of this run reached the texture; the whole refresh decides what becomes of the image.
+                _runRefusal = MetalRunRefusal.NotMoved;
+                NoteHoistedUse(image, anyHoisted);
+                return false;
+            }
+
+            _uploadCauses[(int)cause]++;
+            if (!hoisted)
+            {
+                NotePassEndingUpload(cause, prelude, gathersBefore);
+            }
+
+            NoteUploadForTrace(image, cause, end - start, run: true);
+            _partialUploads++;
+            _partialUploadBytesSaved += (long)(residentEnd - residentStart - (end - start));
+            if (context is { WantsEncodedLabels: true })
+            {
+                context.ProfileEncoded(ProfileLabel("upload-run", in description));
+            }
+
+            if (image.FirstLevel == 0)
+            {
+                image.RefreshComplete(start, end);
+            }
+
+            NoteRefusedReloadedRun(image, start, end);
+
+            Interlocked.Increment(ref _uploads);
         }
 
-        _uploadCauses[(int)image.DirtyCause]++;
-        _partialUploads++;
-        _partialUploadBytesSaved += (long)(residentEnd - residentStart - (end - start));
-        if (context.WantsEncodedLabels)
-        {
-            context.ProfileEncoded(ProfileLabel("upload-run", in description));
-        }
-
+        NoteHoistedUse(image, anyHoisted);
         if (image.FirstLevel != 0)
         {
             // What is still dirty lies outside the levels the texture holds.
             image.RefreshComplete();
         }
-        else
+
+        if (overHalf)
         {
-            image.RefreshComplete(start, end);
+            _runStats.NoteRefreshOverHalf();
         }
 
-        Interlocked.Increment(ref _uploads);
+        if (wholeStale)
+        {
+            NoteWholeStaleReloaded(image);
+        }
+
         return true;
+    }
+
+    // Past half a stale run still goes alone for a GPU-written array (layered deferral leaves one stale over the
+    // layers its passes have not overwritten yet): the whole refresh is no option there - it would replace the
+    // layers only the texture holds - so the half rule, a cost rule, would only keep the stale layers.
+    // TryRefreshDirtyRun and TryNarrowReloadRun both ask this, so they give one answer.
+    // With run sets every GPU-written image goes the same way: a whole refresh is forbidden for any of them.
+    private long _aliasRunWidened;
+
+    private bool NarrowRefreshPastHalf(MetalCachedImage image) =>
+        image.IsGpuModified && (image.RunCapacity > 1 || (LayerDeferEnabled && image.Description.IsLayered));
+
+    // Whether TryRefreshDirtyRun, given [start, end) as the image's whole stale interval, reloads exactly that run
+    // and nothing past it: sub-range transfers on, the half rule met, a covering run that does not widen, and guest
+    // bytes it reads in place. A GPU-written image left stale over a run that fails this would keep its older texels.
+    private bool CanReloadRunExactly(MetalCachedImage image, ulong start, ulong end)
+    {
+        ref readonly var description = ref image.Description;
+        var resident = image.ResidentEnd - image.ResidentStart;
+        return end > start && SubRangeTransfersEnabled && !description.HasStencil && image.FirstLevel == 0 &&
+            (end - start <= resident / 2 || NarrowRefreshPastHalf(image)) &&
+            TryCoveringRun(in description, start, end, out var runStart, out var runEnd) &&
+            runStart == start && runEnd == end &&
+            _guestMemory.TryResolveInPlace(description.Data.Address + start, end - start, out _);
     }
 
     // The run a restricted transfer may be given for a dirty range. The plan's own
@@ -2902,19 +3284,30 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     // or its first byte instead. A run that widens to the whole image is refused, and
     // the caller transfers the whole image as before: bytes a run dropped would stay
     // stale, and a texture that disagrees with guest memory never catches up.
+    // SHARPEMU_METAL_V2_DEPTH_LAYER_RUNS (on; =0 off): a depth run may begin at a layer boundary past the first.
+    private static readonly bool DepthLayerRuns =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEPTH_LAYER_RUNS") != "0";
+
     private bool TryCoveringRun(
         in ImageDescription description, ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end) =>
         TryCoveringRun(_transfer, in description, dirtyStart, dirtyEnd, out start, out end);
 
     internal static bool TryCoveringRun(
         IMetalImageTransfer transfer, in ImageDescription description,
-        ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end)
+        ulong dirtyStart, ulong dirtyEnd, out ulong start, out ulong end) =>
+        TryCoveringRun(transfer, in description, dirtyStart, dirtyEnd, DepthLayerRuns, out start, out end);
+
+    internal static bool TryCoveringRun(
+        IMetalImageTransfer transfer, in ImageDescription description,
+        ulong dirtyStart, ulong dirtyEnd, bool depthLayerRuns, out ulong start, out ulong end)
     {
         // A colour surface begins a run at the cut it is dirty from: the texel row of a
         // linear one, the block row of a tiled one - a tile row of a 4 KiB mode, a macro
-        // tile row of a 64 KiB one. The depth kernels have no device test for a run past
-        // the first byte, so a depth run still starts at the image's first byte.
-        start = description.IsDepth
+        // tile row of a 64 KiB one. A depth run begins at the layer it is dirty from: the
+        // depth kernels walk a layer at a time, and MetalImageTransferTests.CoveringRuns
+        // moves runs from layers 1-3 of D32 and D32S8 bit for bit.
+        // SHARPEMU_METAL_V2_DEPTH_LAYER_RUNS=0 starts a depth run at the first byte again.
+        start = description.IsDepth && !depthLayerRuns
             ? 0
             : transfer.AlignRunEnd(in description, 0, Math.Min(dirtyStart, dirtyEnd));
         if (transfer.AlignRunStart(in description, start) != start)
@@ -3087,9 +3480,15 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return;
         }
 
-        var (cause, start, end) = (image.DirtyCause, image.DirtyStart, image.DirtyEnd);
+        var cause = image.DirtyCause;
+        Span<(ulong Start, ulong End)> runs = stackalloc (ulong, ulong)[MetalCachedImage.MaxRuns];
+        var count = image.StaleRuns.Length;
+        image.StaleRuns.CopyTo(runs);
         RefreshFromGuest(image);
-        image.MarkCpuDirty(cause, start, end);
+        foreach (var (start, end) in runs[..count])
+        {
+            image.MarkCpuDirty(cause, start, end);
+        }
     }
 
     // Retiles a GPU-written image back into guest memory; afterwards guest memory and
@@ -3131,7 +3530,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return MetalWritebackOutcome.Complete;
         }
 
+        if (TrySkipWholeStaleWriteback(image))
+        {
+            return MetalWritebackOutcome.Complete;
+        }
+
         RefreshBeforeWriteback(image);
+        NoteRefusedRead(image, RefusedRead.Writeback, cause.ToString());
         ref readonly var description = ref image.Description;
         if (TraceBigWritebackBytes != 0 && description.Data.Size >= TraceBigWritebackBytes)
         {
@@ -3622,7 +4027,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         $"{direction} format={description.PixelFormat} type={description.Type} " +
         $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} " +
         $"levels={description.Resources.Levels} layers={description.TransferLayers} " +
-        $"tile={description.TileMode} samples={description.Samples} bytes=0x{description.Data.Size:X}";
+        $"tile={description.TileMode} samples={description.Samples} addr=0x{description.Data.Address:X} " +
+        $"bytes=0x{description.Data.Size:X}";
 
     // Linear images the GPU wrote since the last end-of-pipe write. Linear is the layout a
     // guest CPU reads in place - a readback staging surface - so these are the GPU writes

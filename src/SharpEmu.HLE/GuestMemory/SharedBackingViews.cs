@@ -54,8 +54,11 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     // in shared memory, for a process that replicates the views. Changed under _lock (SetViewLocked/RemoveViewAtLocked).
     private readonly GuestViewTable? _viewTable;
 
-    // Single-view accesses in flight; Dispose waits for them before releasing the alias.
+    // Single-view (alias) accesses in flight; Dispose waits for them before releasing the alias.
     // A copy reservation also waits for these: they touch the alias without checking it.
+    // They count on the backing's per-thread stripes (HostBackingObject.AliasStripes), which
+    // also stand in for the backing's own access count; this scalar counts them only with
+    // SHARPEMU_ACCESS_STRIPES=0, where each also takes the backing's shared access count.
     private int _activeAccesses;
     // Lifetime pins that never touch bytes outside the locked, reservation-checked paths
     // (those paths, ordinary-write receipts, unlocked copies). Dispose waits for them too;
@@ -550,10 +553,12 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
 
-    private void CopyToCanonicalAlias(ulong destination, ReadOnlySpan<byte> source)
+    // dormantEnvelope: the caller holds a dormant operation token (HostManagedWriteIntervals.IsDormant),
+    // whose registration already makes every observer refuse, so these bytes need none of their own.
+    private void CopyToCanonicalAlias(ulong destination, ReadOnlySpan<byte> source, bool dormantEnvelope = false)
     {
         _singleCopy?.BeforeWrite(destination - AliasBase, (ulong)source.Length);
-        var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)source.Length);
+        var interval = dormantEnvelope ? default : _backing!.BeginManagedWrite(destination - AliasBase, (ulong)source.Length);
         var succeeded = false;
         if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try
@@ -565,15 +570,37 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
     }
 
-    private void CopyCanonicalAliasChunk(ulong source, ulong destination, int bytes)
+    private void CopyCanonicalAliasChunk(ulong source, ulong destination, int bytes, bool dormantEnvelope = false)
     {
         _singleCopy?.BeforeRead(source - AliasBase, (ulong)bytes);
         _singleCopy?.BeforeWrite(destination - AliasBase, (ulong)bytes);
-        var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)bytes);
+        var interval = dormantEnvelope ? default : _backing!.BeginManagedWrite(destination - AliasBase, (ulong)bytes);
         var succeeded = false;
         if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
         try { Buffer.MemoryCopy((void*)source, (void*)destination, bytes, bytes); succeeded = true; }
         finally { HostBackingObject.EndManagedWrite(interval, succeeded); }
+    }
+
+    // Fault forensics (GuestBackingForensics): a copy of every view record. A fault dump may run
+    // while another thread holds the lock, so it waits a second at most and then gives up.
+    internal bool TrySnapshotViews(out ViewRecord[] records)
+    {
+        records = [];
+        if (!Monitor.TryEnter(_lock, TimeSpan.FromSeconds(1)))
+        {
+            return false;
+        }
+
+        try
+        {
+            records = new ViewRecord[_views.Count];
+            _views.Values.CopyTo(records, 0);
+            return true;
+        }
+        finally
+        {
+            Monitor.Exit(_lock);
+        }
     }
 
     // The lock-free single-view read only; false (with nothing read) for anything else.
@@ -643,7 +670,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             var succeeded = false;
             try
             {
-                CopyToCanonicalAlias(target, data);
+                CopyToCanonicalAlias(target, data, HostManagedWriteIntervals.IsDormant(interval));
                 succeeded = true;
                 return true;
             }
@@ -690,7 +717,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             var succeeded = false;
             try
             {
-                CopyCanonicalAliasChunk(from, to, (int)size);
+                CopyCanonicalAliasChunk(from, to, (int)size, HostManagedWriteIntervals.IsDormant(interval));
                 succeeded = true;
                 return true;
             }
@@ -741,8 +768,9 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             var succeeded = false;
             try
             {
-                CopyToCanonicalAlias(firstTarget, first);
-                CopyToCanonicalAlias(secondTarget, second);
+                var dormant = HostManagedWriteIntervals.IsDormant(interval);
+                CopyToCanonicalAlias(firstTarget, first, dormant);
+                CopyToCanonicalAlias(secondTarget, second, dormant);
                 succeeded = true;
                 return true;
             }
@@ -787,7 +815,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
             var succeeded = false;
             try
             {
-                filled = FillCanonicalAlias(target, length, state, fill);
+                filled = FillCanonicalAlias(target, length, state, fill, HostManagedWriteIntervals.IsDormant(interval));
                 succeeded = true;
                 return true;
             }
@@ -802,7 +830,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         }
     }
 
-    private int FillCanonicalAlias<TState>(ulong destination, int length, TState state, GuestSpanFill<TState> fill)
+    private int FillCanonicalAlias<TState>(ulong destination, int length, TState state, GuestSpanFill<TState> fill, bool dormantEnvelope = false)
     {
         // A fill may stop short (a file read at its end): released chunks it covers whole get
         // back only the bytes it did not reach, once it says how far it got.
@@ -810,7 +838,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
         var produced = 0;
         try
         {
-            var interval = _backing!.BeginManagedWrite(destination - AliasBase, (ulong)length);
+            var interval = dormantEnvelope ? default : _backing!.BeginManagedWrite(destination - AliasBase, (ulong)length);
             var succeeded = false;
             if (!HostManagedWriteIntervals.AllowsBytes(interval)) throw new InvalidOperationException("Participating write lost admission.");
             try
@@ -1471,8 +1499,10 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
                     throw new InvalidOperationException("Backing view cleanup is quarantined.", _cleanupFailure);
                 views = new List<ViewRecord>(_views.Values);
             }
+            // The flags above before the counts below: an entrant increments, then re-reads them.
+            Interlocked.MemoryBarrier();
             var start = System.Diagnostics.Stopwatch.GetTimestamp();
-            while (Volatile.Read(ref _activeAccesses) != 0 || Volatile.Read(ref _lifetimeAccesses) != 0)
+            while (ActiveAliasAccesses() != 0 || Volatile.Read(ref _lifetimeAccesses) != 0)
             {
                 if (System.Diagnostics.Stopwatch.GetElapsedTime(start) >= TimeSpan.FromSeconds(2))
                     throw new TimeoutException("Backing alias accesses did not drain; storage remains owned.");
@@ -1617,7 +1647,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
     }
 
     // Resolves an access that lies inside one view to its alias address and registers
-    // it as in flight; the caller must decrement _activeAccesses when done. Anything
+    // it as in flight; the caller must ExitAliasAccess when done. Anything
     // else (spanning views, unmapped, disposed) is left to the locked path.
     private bool TryAccessSingleView(ulong address, ulong size, out ulong target)
     {
@@ -1637,9 +1667,24 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
     // An alias access touches backing bytes without checking copy reservations, so it is
     // refused while an unlocked copy is reserved, and a reservation waits for admitted ones.
+    //
+    // With stripes, one increment of the calling thread's stripe (a full fence) registers the
+    // access for every drainer, and every flag is re-read after it: the copy reservation
+    // (_copyAccessBlocked, set by Interlocked.Exchange before it sums), Dispose (_disposeRequested
+    // and _disposed, set before it sums) and the backing's Close (re-checked inside
+    // HostBackingObject.TryEnterAliasAccess). Either the drainer sees the stripe or the entrant
+    // sees the flag and backs out.
     public bool TryEnterAliasAccess()
     {
         if (Volatile.Read(ref _copyAccessBlocked) != 0) return false;
+        if (_backing?.AliasStripes is not null)
+        {
+            if (Volatile.Read(ref _disposed) || Volatile.Read(ref _disposeRequested) || !_backing.TryEnterAliasAccess()) return false;
+            if (Volatile.Read(ref _copyAccessBlocked) == 0 && !Volatile.Read(ref _disposed) && !Volatile.Read(ref _disposeRequested)) return true;
+            _backing.ExitAliasAccess();
+            return false;
+        }
+
         Interlocked.Increment(ref _activeAccesses);
         // Register before the gate check so a reservation waits for admitted access.
         if (Volatile.Read(ref _copyAccessBlocked) == 0 && TryEnterBackingAccess()) return true;
@@ -1649,9 +1694,20 @@ public sealed unsafe partial class SharedBackingViews : IDisposable, ICpuMappedC
 
     public void ExitAliasAccess()
     {
+        if (_backing?.AliasStripes is not null)
+        {
+            _backing.ExitAliasAccess();
+            return;
+        }
+
         _backing!.ExitAccess();
         Interlocked.Decrement(ref _activeAccesses);
     }
+
+    // Alias accesses in flight, for the drainers (copy reservation, Dispose); they set their
+    // flag with a full fence first. A negative stripe sum is fatal (HostAccessStripes.Sum).
+    private long ActiveAliasAccesses() =>
+        (_backing?.AliasStripes?.Sum(HostBackingObject.AliasLane) ?? 0) + Volatile.Read(ref _activeAccesses);
 
     // Keeps the alias alive without admitting a lock-free byte access: the locked paths
     // (which wait for overlapping reservations first and never wait while pinned), receipts

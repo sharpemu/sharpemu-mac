@@ -221,7 +221,6 @@ internal static class MetalShaderPrewarm
     private const int MaxLoggedPrewarmFailures = 8;
     private const int PrewarmProgressBatch = 256;
 
-    private static readonly nint SelNewFunctionWithName = MetalNative.Selector("newFunctionWithName:");
     private static readonly nint SelNewComputePipelineState =
         MetalNative.Selector("newComputePipelineStateWithFunction:error:");
     private static readonly nint SelRelease = MetalNative.Selector("release");
@@ -817,6 +816,9 @@ internal static class MetalShaderPrewarm
             StampPart(typeof(Gen5MslTranslator)),
             compiler.GetType().FullName,
             MslMathMode.Identity(MslMathMode.Default),
+            // The switches decide the MSL as the translators do; what is stored under this stamp
+            // and not keyed by source text (the static precompile's finished units) follows them.
+            MetalRenderHost.TranslationSwitchStamp,
             MetalNative.ReadNsString(MetalNative.Send(device, SelName)),
             RuntimeInformation.OSDescription);
 
@@ -938,10 +940,14 @@ internal static class MetalShaderPrewarm
                 return;
             }
 
-            function = MetalNative.Send(library, SelNewFunctionWithName, MetalNative.NsString(metal.Shader.EntryPoint));
+            // The generic function, as the module the dispatch creates makes it (BuildModule).
+            function = MetalRenderHost.NewTranslatedFunction(library, metal.Shader, mipStatistics: false, out var functionError);
             if (function == 0)
             {
-                NoteFailure(record, $"the library has no entry point {metal.Shader.EntryPoint}");
+                NoteFailure(
+                    record,
+                    $"the library has no entry point {metal.Shader.EntryPoint}" +
+                    (functionError != 0 ? $": {MetalNative.DescribeError(functionError)}" : string.Empty));
                 return;
             }
 

@@ -292,6 +292,34 @@ public sealed unsafe partial class MetalImageAliasTests(ITestOutputHelper output
         Assert.Equal((long)(LargeSize - SmallSize), partial.UploadBytes);
     }
 
+    // A new image is stale over all of it. Its first use over bytes a GPU-written alias owns marks the run the two
+    // share stale on top of that, and the run is at most half of it: the whole image must still be uploaded, not
+    // just the run (an empty interval meaning "all of it" used to widen to [0, run end) and drop the tail).
+    [Fact]
+    public void ANewImageOverAGpuWrittenAliasUploadsAllOfItself()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var written = MetalTileOracle.Pattern((int)SmallSize, 0x5A);
+        rig.WriteGuest(ImageAddress, written);
+        var small = rig.Cache.GetImage(
+            rig.Acquire(Rig.Request(ImageAddress, LargeSide, AliasRows, ImageRole.ColorTarget)));
+        Assert.True(small.IsGpuModified);
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+        var stale = MetalTileOracle.Pattern((int)LargeSize, 0xC3);
+        rig.WriteGuest(ImageAddress, stale);
+
+        var large = rig.Cache.GetImage(rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture));
+        rig.Harness.Submit();
+        rig.Harness.Begin();
+
+        var expected = stale.ToArray();
+        written.CopyTo(expected, 0);
+        Assert.False(large.IsCpuDirty);
+        Assert.Equal(expected, ReadTexture(rig, large));
+    }
+
     // A read through an alias whose rows do not line up with the GPU-written image's
     // (here a narrower pitch over the same bytes) is served nothing: the image is not
     // retiled out to guest memory and stays GPU-modified, and the reader is not marked
@@ -566,14 +594,16 @@ public sealed unsafe partial class MetalImageAliasTests(ITestOutputHelper output
         Assert.Equal(0x2000UL + SmallSize, image.DirtyEnd);
     }
 
-    // A run past half of the GPU-written image cannot be handed over narrowly - its reload
-    // would be a whole one - so the image is written back whole and gives up ownership,
-    // as before.
+    // With run sets off, a run past half of the GPU-written image cannot be handed over
+    // narrowly - its reload would be a whole one - so the image is written back whole and
+    // gives up ownership, as before. (With them on it is reloaded alone:
+    // MetalImageAliasTests.RunSets.)
     [Fact]
     public void AnAliasRunPastHalfTheImageIsWrittenBackWhole()
     {
         if (!RequireDevice()) return;
         using var rig = new Rig(Device.Value);
+        rig.Cache.AliasRunSetsEnabled = false;
         var (image, written, _) = GpuWrittenLarge(rig);
         const uint rows = 36;
         const ulong offset = 0x1000;

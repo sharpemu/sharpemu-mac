@@ -156,7 +156,7 @@ public sealed record Gen5MslMeshInfo(
 }
 
 // Compiled source, stage interface counts, and the argument-buffer layout.
-public sealed record Gen5MslShader(
+public sealed partial record Gen5MslShader(
     string Source,
     string EntryPoint,
     Gen5MslStage Stage,
@@ -186,6 +186,45 @@ public sealed record Gen5MslShader(
     /// sites run only in a function the host specialized with the constant true, and the
     /// function must be made with a value for it (<c>newFunctionWithName:constantValues:error:</c>).</summary>
     public bool UsesMipStatisticsConstant { get; init; }
+
+    /// <summary>One buffer-word function constant a source declares (PortableBufferWord.ConstantsEnabled):
+    /// its <c>[[function_constant(n)]]</c> index and the shader-data dword it stands in for.</summary>
+    public readonly record struct BufferWordConstant(uint Index, uint Dword);
+
+    /// <summary>The buffer-word function constants the source declares, by index. A function made
+    /// with a value for one reads that value instead of the shader-data dword; one made without
+    /// reads the shader data.</summary>
+    public IReadOnlyList<BufferWordConstant> BufferWordConstants { get; init; } = [];
+
+    /// <summary>The buffer-word constants a translated source declares, recovered from its text
+    /// (a stored source carries no metadata), by index.</summary>
+    public static IReadOnlyList<BufferWordConstant> ParseBufferWordConstants(string source)
+    {
+        var found = new List<BufferWordConstant>();
+        var prefix = $"constant uint {Resources.PortableBufferWord.ConstantNamePrefix}";
+        for (var at = source.IndexOf(prefix, StringComparison.Ordinal); at >= 0;
+             at = source.IndexOf(prefix, at + prefix.Length, StringComparison.Ordinal))
+        {
+            var end = source.IndexOf('\n', at);
+            var line = end < 0 ? source[at..] : source[at..end];
+            var match = BufferWordDeclaration().Match(line);
+            if (!match.Success || match.Groups[1].Value != match.Groups[3].Value)
+            {
+                throw new FormatException($"A buffer-word constant declaration does not parse: '{line.TrimEnd()}'.");
+            }
+
+            found.Add(new BufferWordConstant(
+                uint.Parse(match.Groups[1].ValueSpan, System.Globalization.CultureInfo.InvariantCulture),
+                uint.Parse(match.Groups[2].ValueSpan, System.Globalization.CultureInfo.InvariantCulture)));
+        }
+
+        found.Sort(static (left, right) => left.Index.CompareTo(right.Index));
+        return found;
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(
+        @"^constant uint sharpemu_fc_bw(\d+)_sd(\d+) \[\[function_constant\((\d+)\)\]\];")]
+    private static partial System.Text.RegularExpressions.Regex BufferWordDeclaration();
 
     /// <summary>The vertex indices <see cref="ConstantPositions"/> covers, from zero.</summary>
     public const int ConstantPositionVertexCount = 6;

@@ -97,6 +97,10 @@ public readonly record struct DrawScopeToken(long Scope, ulong Lookups, long Met
 public interface IRenderHost
 {
     bool TryCopyImage(in ImageRequest source, in ImageRequest destination) => false;
+
+    // Diagnostics: who owns or last waited for these guest bytes on the host (ParallelProgramPrefetch census).
+    string DescribeGuestRangeForDiagnostics(ulong address, ulong size) => "unavailable";
+
     int BeginImageSnapshot(IPreparedBindings? pixelBindings) => 0;
 
     int BeginComputeImageSnapshot(IPreparedBindings bindings) => 0;

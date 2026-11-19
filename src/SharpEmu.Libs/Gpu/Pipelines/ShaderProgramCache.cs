@@ -337,6 +337,50 @@ internal sealed class ShaderProgramCache
 
     public ResourceMaterializationCache? Materializations => _materializations;
 
+    // Bumped whenever a program entry is replaced (a re-plan) or a plan refused: a lookup made before may find another
+    // entry now (ShaderPipelineCache's resolve memo).
+    private long _contentEpoch;
+
+    internal long ContentEpoch => Interlocked.Read(ref _contentEpoch);
+
+    // Lookups that linked shader calls or ran a runtime fallback, which a resolve memo hit could not repeat.
+    private long _linkedLookups;
+
+    internal long LinkedLookups => Interlocked.Read(ref _linkedLookups);
+
+    // A lookup made now logs or traces what it reads, which a resolve memo hit would skip.
+    internal bool TracesLookups =>
+        _spirvDumpEnabled || ReadLog is not null || Diagnostics.GpuReadTrace.Enabled || SharpEmu.Libs.Gpu.Images.ImageClearTrace.Enabled ||
+        RenderTrace.Enabled;
+
+    // With resolver shards (ShaderPipelineCache.ResolveShardCount above 1), the shared tier's gate: a memo hit revalidates
+    // outside it, and a snapshot of the materialization cache (not single-threaded: lookups fill and refresh its entries)
+    // is revalidated under it. Null with one shard, where every caller already holds that gate.
+    internal object? MaterializationGate { get; set; }
+
+    private static long _materializationGateTakes;
+
+    internal static long TakeMaterializationGateTakes() => Interlocked.Exchange(ref _materializationGateTakes, 0);
+
+    private bool RevalidateMaterialization(ResourceSnapshot snapshot)
+    {
+        if (Materializations is not { } materializations)
+        {
+            return false;
+        }
+
+        if (MaterializationGate is not { } gate)
+        {
+            return materializations.Revalidate(snapshot, _readResidentGuestBytes);
+        }
+
+        Interlocked.Increment(ref _materializationGateTakes);
+        lock (gate)
+        {
+            return materializations.Revalidate(snapshot, _readResidentGuestBytes);
+        }
+    }
+
     public bool Revalidate(in ShaderStageResources stage)
     {
         if (stage.Program is null)
@@ -345,13 +389,83 @@ internal sealed class ShaderProgramCache
         }
 
         var started = MaterializationTally.StartTiming();
-        var fast = ResourceMaterializer.RevalidateFast(stage.Resources);
-        var current = fast ?? (Materializations is { } materializations && materializations.Revalidate(stage.Resources, _readResidentGuestBytes));
+        bool? fast;
+        try
+        {
+            fast = ResourceMaterializer.RevalidateFast(stage.Resources);
+        }
+        catch (ResourceMaterializer.ReadProofMismatchException mismatch)
+        {
+            throw GpuFatal.VerifyFailed(DescribeMismatch(mismatch));
+        }
+
+        var current = fast ?? RevalidateMaterialization(stage.Resources);
         var outcome = current ? MaterializationTally.Outcome.KeptRevalidated
             : fast is not null && ResourceMaterializer.LastRevalidateRefused ? MaterializationTally.Outcome.RevalidateRefused
             : MaterializationTally.Outcome.KeptStale;
         MaterializationTally.Note(outcome, MaterializationTally.ElapsedTicks(started), stage.Resources);
         return current;
+    }
+
+    // A read-proof verify mismatch with what the host says of the differing word's address, printed with it.
+    private string DescribeMismatch(ResourceMaterializer.ReadProofMismatchException mismatch)
+    {
+        if (mismatch.Address is not { } address)
+        {
+            return mismatch.Message;
+        }
+
+        var host = $"[SHADER][READ_PROOF] mismatch word 0x{address:X}: {_host.DescribeCleanRead(address)}";
+        Console.Error.WriteLine(host);
+        return mismatch.Message + " " + host;
+    }
+
+    // Revalidate; and with rebuild, a fast stage whose own draw values evaluate to other descriptor words gets the stage
+    // a lookup of that draw makes now (ResourceMaterializer.RevalidateOrRebuildFast): the same program, since the
+    // specialization that picks its permutation is unchanged, and the snapshot materialized from that one evaluation.
+    // The caller has established that everything else the lookup reads is unchanged (ShaderPipelineCache's memo).
+    public ResourceMaterializer.FastRevalidation RevalidateOrRebuild(in ShaderStageResources stage, bool rebuild, out ShaderStageResources rebuilt)
+    {
+        rebuilt = stage;
+        if (!rebuild || stage.Program is null)
+        {
+            return Revalidate(stage) ? ResourceMaterializer.FastRevalidation.Current : ResourceMaterializer.FastRevalidation.Stale;
+        }
+
+        var started = MaterializationTally.StartTiming();
+        ResourceMaterializer.FastRevalidation fast;
+        ResourceSnapshot? snapshot;
+        try
+        {
+            fast = ResourceMaterializer.RevalidateOrRebuildFast(stage.Resources, out snapshot);
+        }
+        catch (ResourceMaterializer.ReadProofMismatchException mismatch)
+        {
+            throw GpuFatal.VerifyFailed(DescribeMismatch(mismatch));
+        }
+
+        if (fast == ResourceMaterializer.FastRevalidation.NotFast)
+        {
+            // A cached materialization: revalidated as before, never rebuilt here.
+            var current = RevalidateMaterialization(stage.Resources);
+            MaterializationTally.Note(current ? MaterializationTally.Outcome.KeptRevalidated : MaterializationTally.Outcome.KeptStale,
+                MaterializationTally.ElapsedTicks(started), stage.Resources);
+            return current ? ResourceMaterializer.FastRevalidation.Current : ResourceMaterializer.FastRevalidation.NotFast;
+        }
+
+        var outcome = fast switch
+        {
+            ResourceMaterializer.FastRevalidation.Current => MaterializationTally.Outcome.KeptRevalidated,
+            ResourceMaterializer.FastRevalidation.Rebuilt => ResourceMaterializer.LastFastOutcome,
+            _ => ResourceMaterializer.LastRevalidateRefused ? MaterializationTally.Outcome.RevalidateRefused : MaterializationTally.Outcome.KeptStale,
+        };
+        MaterializationTally.Note(outcome, MaterializationTally.ElapsedTicks(started), snapshot ?? stage.Resources);
+        if (fast == ResourceMaterializer.FastRevalidation.Rebuilt)
+        {
+            rebuilt = stage with { Resources = snapshot! };
+        }
+
+        return fast;
     }
 
     // Read once: the draw path asked the environment on every draw and dispatch
@@ -368,6 +482,8 @@ internal sealed class ShaderProgramCache
     private readonly ResidentGuestBytesReader _readResidentGuestBytes;
     private readonly ResidentGuestBytesReader? _prefetchResidentGuestBytes;
     private readonly ResidentGuestBytesComparer? _compareResidentGuestBytes;
+    private readonly GuestWordsComparer? _compareGuestWords;
+    private readonly Func<bool>? _readsSuperseded;
 
     // The functions the call tables name, decoded once while their code stays the same.
     private readonly ShaderFunctionCache _functions;
@@ -392,13 +508,29 @@ internal sealed class ShaderProgramCache
         _readResidentGuestBytes = ReadResidentGuestBytes;
         _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
         _compareResidentGuestBytes = ResourceMaterializationCache.InPlaceValidateEnabled ? CompareResidentGuestBytes : null;
+        _compareGuestWords = host.ComparesGuestWords ? CompareGuestWords : null;
+        _readsSuperseded = host.ComparesGuestWords ? host.ConcurrentReadsSuperseded : null;
         _dataWritePending = host.DataWritePending;
         _functions = new ShaderFunctionCache(_readResidentGuestBytes);
     }
 
     // Where the preparation running now logs what it reads of guest memory, for a dispatch
     // that may run again without preparing again (ComputeProgramRetry); null logs nothing.
-    internal GuestReadLog? ReadLog { get; set; }
+    // Bound to the thread that set it: with resolver shards, other threads read guest words through this cache's readers
+    // (a memo hit's revalidation, an unshared rebinding) while the worker logs a retry's reads, and those are not the
+    // retry's. With one thread, the log as it always was.
+    internal GuestReadLog? ReadLog
+    {
+        get => _readLog is { } log && _readLogThread == Environment.CurrentManagedThreadId ? log : null;
+        set
+        {
+            _readLogThread = value is null ? 0 : Environment.CurrentManagedThreadId;
+            _readLog = value;
+        }
+    }
+
+    private GuestReadLog? _readLog;
+    private int _readLogThread;
 
     private bool ReadGuestWord(ulong address, out uint word)
     {
@@ -426,6 +558,11 @@ internal sealed class ShaderProgramCache
     private bool CompareResidentGuestBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets,
         ReadOnlySpan<byte> recorded) =>
         ReadLog is null && _host.TryCompareResidentGuestBytes(addresses, lengths, offsets, recorded);
+
+    // A revalidation's proof of its reads (ResourceMaterializer.ReadProofs): refused while lookups log or trace what they
+    // read, since a proved evaluation reads nothing word by word.
+    private bool CompareGuestWords(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded) =>
+        !TracesLookups && _host.TryCompareGuestWords(addresses, lengths, recorded);
 
     private readonly Func<ulong, bool>? _dataWritePending;
     private ResourceRuntimeInputs? _inputs;
@@ -629,6 +766,140 @@ internal sealed class ShaderProgramCache
 
     internal static ProgramSourceEntry? LastEntry => _lastEntry;
 
+    // Why a cached entry's program for new user data had to be made under the shared tier (TryCompleteProgramUnshared).
+    internal enum UnsharedRefusal
+    {
+        DeviceData,   // a device data load since the plan was made: it is planned again (CompleteProgram)
+        Linked,       // shader calls or run-time call records: linking reads and fills the call caches
+        Traced,       // the lookup logs or traces its reads (TracesLookups)
+        NotFast,      // the plan materializes through the materialization cache, which only the shared tier uses
+        Failed,       // the fast materialization failed: the shared tier reports it
+        Permutation,  // no permutation of this specialization yet: translation
+        Recheck,      // the periodic identity recheck of a rebound program (ShaderPipelineCache.IdentityRecheckPeriod)
+        Count,
+    }
+
+    internal static readonly string[] UnsharedRefusalNames = ["device_data", "linked", "traced", "not_fast", "failed", "permutation", "recheck"];
+
+    // This thread's runtime inputs for unshared lookups, with the cache whose readers they hold. A fast snapshot keeps the
+    // inputs object and copies the draw values it was evaluated with (ResourceMaterializer.FastOrigin), as for _inputs.
+    [ThreadStatic]
+    private static ShaderProgramCache? t_unsharedInputsOwner;
+    [ThreadStatic]
+    private static ResourceRuntimeInputs? t_unsharedInputs;
+
+    // CompleteProgram for a cached entry, off the shared tier: only where it reads nothing that tier owns and fills
+    // nothing in it, that is a fast plan with no shader calls, nothing traced, no replan pending and a permutation of
+    // the specialization already made. Anything else is refused (refusal), and the caller makes the lookup under the
+    // shared tier, where CompleteProgram does all of it as before. The same inputs, readers, tally and permutation choice
+    // as CompleteProgram; the inputs object is this thread's own instead of the shared one.
+    internal bool TryCompleteProgramUnshared(ProgramSourceEntry entry, ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
+        out ShaderProgram program, out ShaderStageResources stage, out UnsharedRefusal refusal)
+    {
+        program = default;
+        stage = default;
+        refusal = UnsharedRefusal.Count;
+        if (_dataWritePending is not null && entry.DeviceDataGeneration != DeviceDataLoads.Generation)
+        {
+            refusal = UnsharedRefusal.DeviceData;
+            return false;
+        }
+
+        if ((entry.HasShaderCalls && _compiler.LinkedShaderCallsSupported) || entry.RuntimeCallRecords)
+        {
+            refusal = UnsharedRefusal.Linked;
+            return false;
+        }
+
+        if (TracesLookups)
+        {
+            refusal = UnsharedRefusal.Traced;
+            return false;
+        }
+
+        if (!ResourceMaterializer.CanMaterializeFast(entry.Plan))
+        {
+            refusal = UnsharedRefusal.NotFast;
+            return false;
+        }
+
+        if (!ReferenceEquals(t_unsharedInputsOwner, this) || t_unsharedInputs is null)
+        {
+            t_unsharedInputsOwner = this;
+            t_unsharedInputs = new ResourceRuntimeInputs
+            {
+                ReadMemory = _readGuestWord,
+                ReadCleanMemory = _readCleanGuestWord,
+                TraceImageCandidate = null,
+                ReadResidentMemory = _prefetchResidentGuestBytes,
+                CompareResidentMemory = _compareResidentGuestBytes,
+                CompareGuestWords = _compareGuestWords,
+                ReadsSuperseded = _readsSuperseded,
+                DataWritePending = _dataWritePending,
+                NullsOffClassLoopRecords = NullsOffClassLoopRecords,
+            };
+        }
+
+        var inputs = t_unsharedInputs;
+        inputs.UserData = source.UserData;
+        inputs.ShaderBase = source.Address;
+        inputs.ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
+            ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
+                Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
+                computeState.LocalDataShareDwords, computeState.ThreadIdCount)
+            : null;
+        ResourceSnapshot snapshot = null!;
+        ResourceSpecialization specialization = null!;
+        MaterializingShader.Hash = source.Hash;
+        bool materialized;
+        MaterializationTally.Outcome outcome;
+        long started;
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
+        {
+            started = MaterializationTally.StartTiming();
+            _host.BeginGuestWordReads();
+            try
+            {
+                materialized = ResourceMaterializer.MaterializeFast(entry.Plan, inputs, ref snapshot, ref specialization, out _);
+                outcome = ResourceMaterializer.LastFastOutcome;
+            }
+            finally
+            {
+                _host.EndGuestWordReads();
+                MaterializingShader.Hash = 0;
+            }
+        }
+
+        if (!materialized)
+        {
+            refusal = UnsharedRefusal.Failed;
+            return false;
+        }
+
+        snapshot = snapshot.WithUserData(source.UserData);
+        var permutation = Volatile.Read(ref entry.LastPermutation) is { } last && ReferenceEquals(last.Specialization, specialization) &&
+            last.Bindings.PushDataStartDword == PushDataStart(last.Bindings, pushDataCursor)
+            ? last
+            : FindPermutation(entry, specialization, pushDataCursor);
+        if (permutation is null)
+        {
+            refusal = UnsharedRefusal.Permutation;
+            return false;
+        }
+
+        MaterializationTally.Note(outcome, MaterializationTally.ElapsedTicks(started), snapshot);
+        _lastEntry = entry;
+        if (ReferenceEquals(permutation.Specialization, specialization))
+        {
+            Volatile.Write(ref entry.LastPermutation, permutation);
+        }
+
+        stage = CreateStageResources(permutation.Program, snapshot, source, options, [], [], null, null);
+        permutation.Bindings.AdvancePushData(ref pushDataCursor);
+        program = permutation.Handle;
+        return true;
+    }
+
     internal bool TryGetProgramForEntry(ProgramSourceEntry entry, ShaderSource source, StageCompileOptions options, bool strictShaders,
         ref uint pushDataCursor, out ShaderProgram program, out ShaderStageResources stage, out string rejection)
     {
@@ -692,6 +963,7 @@ internal sealed class ShaderProgramCache
                     {
                         BuildStaticState(source.Stage, options);
                         _rejectedPlans[BuildProgramKey(source)] = (exception.Message, deviceDataLoads);
+                        Interlocked.Increment(ref _contentEpoch);
                         throw;
                     }
 
@@ -757,6 +1029,7 @@ internal sealed class ShaderProgramCache
                     BuildStaticState(source.Stage, options);
                     key = BuildProgramKey(source);
                     _programs[key] = entry;
+                    Interlocked.Increment(ref _contentEpoch);
                     DeviceDataLoads.CountReplan();
                 }
             }
@@ -771,7 +1044,7 @@ internal sealed class ShaderProgramCache
 
         // One inputs object refilled per lookup: the materialization reads it during the call
         // and keeps nothing of it (a miss copies what its entry needs). Lookups run one at a time
-        // (ShaderPipelineCache._resolveGate).
+        // (ShaderPipelineCache._resolveGate); an unshared lookup uses its thread's own (TryCompleteProgramUnshared).
         var inputs = _inputs ??= new ResourceRuntimeInputs
         {
             ReadMemory = _readGuestWord,
@@ -782,6 +1055,8 @@ internal sealed class ShaderProgramCache
                 : null,
             ReadResidentMemory = _prefetchResidentGuestBytes,
             CompareResidentMemory = _compareResidentGuestBytes,
+            CompareGuestWords = _compareGuestWords,
+            ReadsSuperseded = _readsSuperseded,
             DataWritePending = _dataWritePending,
             NullsOffClassLoopRecords = NullsOffClassLoopRecords,
         };
@@ -796,6 +1071,10 @@ internal sealed class ShaderProgramCache
         // A backend that cannot link compiles the caller alone, as every backend did before
         // linking existed: its S_SWAPPC_B64 calls are skipped rather than the program refused.
         var hasShaderCalls = entry.HasShaderCalls && _compiler.LinkedShaderCallsSupported;
+        if (hasShaderCalls || entry.RuntimeCallRecords || runtimeFallback is not null)
+        {
+            Interlocked.Increment(ref _linkedLookups);
+        }
 
         // Both are assigned by the materialization that follows; a failed one throws.
         ResourceSnapshot snapshot = null!;

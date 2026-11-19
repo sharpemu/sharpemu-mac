@@ -198,10 +198,18 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
 
         public bool TryEnterBackingAliasAccess() => AliasAccess;
 
+        // Off unless a test sets it: guest [Start, End) moved to backing bytes Delta further on, as a remap would.
+        public (ulong Start, ulong End, ulong Delta) Remap { get; set; }
+
         public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias)
         {
             var crossesView = ViewBoundary != 0 && address < ViewBoundary && address + size > ViewBoundary;
             alias = Contains(address, size) && !crossesView ? (ulong)_block + (address - GuestBase) : 0;
+            if (alias != 0 && address >= Remap.Start && address + size <= Remap.End)
+            {
+                alias += Remap.Delta;
+            }
+
             return alias != 0;
         }
 
@@ -233,11 +241,27 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
         private readonly PageGuard _pages;
         private readonly Backing _backing = new();
 
-        public Rig(nint device)
+        // granuleMegabytes: windows of that many MiB (SHARPEMU_METAL_V2_GRANULE_MB) instead of one over the whole
+        // backing, so a range can cross a window edge; tests in this assembly do not run in parallel.
+        public Rig(nint device, int granuleMegabytes = 0)
         {
             _queue = MetalNative.Send(device, MetalNative.Selector("newCommandQueue"));
             _pages = new PageGuard(_space);
-            Host = new MetalRenderHost(device, _queue, _backing, _backing, _pages, new MetalGpuWorkerRelay(static () => { }));
+            const string granule = "SHARPEMU_METAL_V2_GRANULE_MB";
+            var configured = Environment.GetEnvironmentVariable(granule);
+            if (granuleMegabytes != 0)
+            {
+                Environment.SetEnvironmentVariable(granule, granuleMegabytes.ToString());
+            }
+
+            try
+            {
+                Host = new MetalRenderHost(device, _queue, _backing, _backing, _pages, new MetalGpuWorkerRelay(static () => { }));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(granule, configured);
+            }
         }
 
         public MetalRenderHost Host { get; }
@@ -245,6 +269,8 @@ public sealed unsafe partial class MetalClearFoldingTests(ITestOutputHelper outp
         public bool AliasAccess { set => _backing.AliasAccess = value; }
 
         public ulong ViewBoundary { set => _backing.ViewBoundary = value; }
+
+        public (ulong Start, ulong End, ulong Delta) Remap { set => _backing.Remap = value; }
 
         public static ImageRequest Request(ulong address, ImageRole role)
         {

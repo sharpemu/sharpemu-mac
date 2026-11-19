@@ -274,6 +274,10 @@ public static partial class AgcExports
         // The color target words last bound at each base address; the flip replay reads the display buffer's.
         public Dictionary<ulong, ColorTargetWords> KnownColorTargets { get; } = new();
 
+        // The banks' colour-target stamp (the target words and CB_TARGET_MASK) when KnownColorTargets last took
+        // them: under the same stamp the registers hold the same words, which are recorded already.
+        public ulong KnownColorTargetsStamp { get; set; }
+
         // A draw without targets kept for the next flip, with the banks it was issued under.
         public RetainedTargetlessDraw? RetainedTargetlessDraw { get; set; }
 

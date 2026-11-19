@@ -53,8 +53,9 @@ public static partial class AgcExports
 
         long EnqueueDeferred(DeferredWork work, bool isDraw);
 
-        // The non-draw items handed over so far up to the last that is not a dispatch: a dispatch's program may
-        // resolve once they ran, while the dispatches after them still wait (ParallelProgramPrefetch.SubmitCompute).
+        // The non-draw items handed over so far up to the last that is not a dispatch (nor a collector call the
+        // resolutions look ahead of): a dispatch's program may resolve once they ran, while the dispatches after them
+        // still wait (ParallelProgramPrefetch.SubmitCompute, LooksAheadOfCollects).
         long DispatchGate => Gate;
 
         // A dispatch whose program a job submitted just before it resolves: the item waits for the jobs before that
@@ -236,7 +237,9 @@ public static partial class AgcExports
                         _executor.Prefetch = _parallel;
                         _prefetchesDispatches = concurrentHost.PrefetchesDispatches;
                         _dispatchesCrossDispatches = concurrentHost.PrefetchedDispatchesCrossDispatches;
-                        if (_prefetchesDispatches)
+                        _drawsCrossDispatches = concurrentHost.PrefetchedDrawsCrossDispatches &&
+                            _parallel.LookaheadMode != ParallelProgramPrefetch.DrawLookaheadMode.Off;
+                        if (_prefetchesDispatches || _drawsCrossDispatches)
                         {
                             _recorder.DispatchEffect = _parallel.NoteDispatchEffect;
                         }
@@ -269,6 +272,13 @@ public static partial class AgcExports
         // The words of every bound color target, so a flip can replay a retained draw into the display buffer.
         private static void RecordKnownColorTargets(SubmittedDcbState state, RegisterBanks banks)
         {
+            var stamp = banks.Stamp(RegisterStamp.ColorTargets);
+            if (stamp == state.KnownColorTargetsStamp)
+            {
+                return;
+            }
+
+            state.KnownColorTargetsStamp = stamp;
             var context = banks.Context;
             for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
             {
@@ -359,6 +369,8 @@ public static partial class AgcExports
         // Dispatches get prefetch jobs too, and their gate may leave out the dispatches just before them.
         private readonly bool _prefetchesDispatches;
         private readonly bool _dispatchesCrossDispatches;
+        // Draws' jobs too may leave out the dispatches just before them (ParallelProgramPrefetch.SubmitDrawAhead).
+        private readonly bool _drawsCrossDispatches;
 
         // The host resolves draws and dispatches where they run (PendingDraw/PendingDispatch), not on
         // the interpreting thread into resolved records (ResolvedDrawWork/ResolvedDispatchWork).
@@ -669,6 +681,38 @@ public static partial class AgcExports
             }
         }
 
+        // SHARPEMU_DIAG_SKIP_ALL_DRAWS_AFTER_S=<seconds>: from that many seconds after this process started, every draw
+        // is dropped at translation, before its program is resolved or anything is recorded. Dispatches, labels and
+        // flips go on. It measures the frame time a draw path of no cost would leave; the picture is wrong by design.
+        private static class DrawFloorProbe
+        {
+            private static readonly long Started = Environment.TickCount64;
+            private static readonly long AfterMilliseconds =
+                double.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_SKIP_ALL_DRAWS_AFTER_S"),
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds >= 0
+                    ? (long)(seconds * 1000)
+                    : -1;
+            private static int _announced;
+
+            public static bool Active
+            {
+                get
+                {
+                    if (AfterMilliseconds < 0 || Environment.TickCount64 - Started < AfterMilliseconds)
+                    {
+                        return false;
+                    }
+
+                    if (Interlocked.Exchange(ref _announced, 1) == 0)
+                    {
+                        Console.Error.WriteLine("[GPU][DIAG] SHARPEMU_DIAG_SKIP_ALL_DRAWS_AFTER_S: every draw is dropped from now on; the picture is wrong by design.");
+                    }
+
+                    return true;
+                }
+            }
+        }
+
         private bool TryRunExecutorDraw(ulong submitId, SubmittedDcbState state, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
         {
             Diagnostics.DispatchRunTally.NoteDraw();
@@ -687,11 +731,20 @@ public static partial class AgcExports
 
             state.FrameDrawCount++;
             state.SawIndexedDraw |= indexed;
+            if (DrawFloorProbe.Active)
+            {
+                // Diagnostic floor: the draw is dropped before it is resolved or recorded (the picture is wrong).
+                state.CurrentIndexSnapshot = null;
+                state.CurrentVertexSnapshot = null;
+                return true;
+            }
+
             if (_defersWholeWork && (_parallel is not null || producing))
             {
                 var snapshot = banks.Snapshot();
                 var pending = TakePendingDraw(producing, submitId, state, snapshot, indexed, in indexedArguments, in autoArguments,
-                    _parallel?.Submit(snapshot, producing ? Sink!.Gate : 0, indexed,
+                    _parallel?.SubmitDrawAhead(snapshot, producing ? (_drawsCrossDispatches ? Sink!.DispatchGate : Sink!.Gate) : 0,
+                        producing ? Sink!.Gate : 0, indexed,
                         indexed ? indexedArguments.StartInstanceUserData : autoArguments.StartInstanceUserData));
                 if (producing)
                 {

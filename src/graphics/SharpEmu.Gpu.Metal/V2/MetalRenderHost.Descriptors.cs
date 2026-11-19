@@ -226,6 +226,9 @@ internal sealed partial class MetalRenderHost
             {
                 CommitCoalescedIfOverdue();
             }
+
+            // Inside a render pass too, like the Budget commit above, when the bars say the split pays.
+            CommitIfGpuDry();
         }
 
         _ = EnsureCommandBuffer();
@@ -267,6 +270,9 @@ internal sealed partial class MetalRenderHost
         DisarmPendingCopy();
         _pendingGraphicsPipeline = null;
         _pendingComputePipeline = null;
+        _pendingComputeState = 0;
+        NoteBufferWordStages(null, null);
+        NoteBufferWordComputeStage(null, []);
         _vertexBufferCount = 0;
         _indexBuffer = 0;
         _acquisitionSequence++;
@@ -366,11 +372,14 @@ internal sealed partial class MetalRenderHost
 
     // A sampled binding found in the memo with a stamp that still holds; otherwise notes the key for
     // the full resolution, which reads the owner-list counts over the request before its lookup.
-    private bool TryTextureMemo(MetalStageBindings prepared, ImageResource image, uint[] words, int index, MetalBindingPacket? packet = null)
+    // `found` is the entry the key maps to, whether or not its stamp holds (the stage plan keeps it).
+    private bool TryTextureMemo(MetalStageBindings prepared, ImageResource image, uint[] words, int index, MetalBindingPacket? packet,
+        out TextureMemoEntry? found)
     {
         prepared.MemoHits[index] = null;
         prepared.MemoWanted[index] = false;
-        if (!TextureMemoEnabled || image.ResourceClass == MslImageResourceClass.Storage || words.Length < 8)
+        found = null;
+        if (!TextureMemoApplies(image, words))
         {
             return false;
         }
@@ -378,7 +387,17 @@ internal sealed partial class MetalRenderHost
         var key = packet is not null && packet.HasMemoKey(index)
             ? packet.MemoKeys![index]
             : new TextureMemoKey(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], ShapeOf(image));
-        if (_textureMemo.TryGetValue(key, out var entry) && _imageCache.TextureStampMayHold(in entry.Stamp))
+        found = _textureMemo.TryGetValue(key, out var entry) ? entry : null;
+        return TextureMemoAnswer(prepared, found, in key, index);
+    }
+
+    private static bool TextureMemoApplies(ImageResource image, uint[] words) =>
+        TextureMemoEnabled && image.ResourceClass != MslImageResourceClass.Storage && words.Length >= 8;
+
+    // A hit when the key's entry is there and its stamp may hold; otherwise notes the key for the full resolution.
+    private bool TextureMemoAnswer(MetalStageBindings prepared, TextureMemoEntry? entry, in TextureMemoKey key, int index)
+    {
+        if (entry is not null && _imageCache.TextureStampMayHold(in entry.Stamp))
         {
             // The request stays the entry's (MetalStageBindings.RequestAt): a copy is a quarter-kilobyte of
             // reference-holding struct per sampled binding per draw.
@@ -395,6 +414,13 @@ internal sealed partial class MetalRenderHost
         return false;
     }
 
+    // Drops every entry; the stage plans made before it keep none of theirs (_textureMemoGeneration).
+    internal void ClearTextureMemo()
+    {
+        _textureMemo.Clear();
+        _textureMemoGeneration++;
+    }
+
     private void RememberTexture(MetalStageBindings stage, int index, ResourceSlotIdentifier identifier, in ImageRequest request,
         in MetalImageCache.TextureMemoStamp stamp)
     {
@@ -403,7 +429,7 @@ internal sealed partial class MetalRenderHost
         {
             if (_textureMemo.Count >= TextureMemoLimit)
             {
-                _textureMemo.Clear();
+                ClearTextureMemo();
             }
 
             entry = new TextureMemoEntry { Key = key };
@@ -448,6 +474,13 @@ internal sealed partial class MetalRenderHost
         var movie = FindHostMovieBindings(info, snapshot);
         prepared.MovieLuma = movie.Luma;
         prepared.MovieChroma = movie.Chroma;
+        // The stage binding plan for these arrays (MetalRenderHost.StagePlan.cs), or whether to keep this one's answers.
+        var plan = FindStagePlan(stageIndex, program, info, snapshot, movie, out var storePlan);
+        if (storePlan && _stagePlanEntries.Length < info.Images.Count)
+        {
+            _stagePlanEntries = new TextureMemoEntry?[info.Images.Count];
+        }
+
         for (var index = 0; index < info.Images.Count; index++)
         {
             if (index == movie.Luma || index == movie.Chroma)
@@ -457,9 +490,40 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
-            if (TryTextureMemo(prepared, info.Images[index], snapshot.Images[index], index, packet))
+            if (plan?.Entries[index] is { } planned)
             {
-                continue;
+                if (StagePlanVerify)
+                {
+                    VerifyPlannedImage(prepared, info.Images[index], snapshot.Images[index], index, planned);
+                }
+
+                prepared.MemoHits[index] = null;
+                prepared.MemoWanted[index] = false;
+                if (TextureMemoAnswer(prepared, planned, in planned.Key, index))
+                {
+                    continue;
+                }
+
+                _stagePlanStaleImages++;
+            }
+            else
+            {
+                var hit = TryTextureMemo(prepared, info.Images[index], snapshot.Images[index], index, packet, out var found);
+                if (storePlan)
+                {
+                    _stagePlanEntries[index] = found;
+                }
+                else if (plan is not null && TextureMemoApplies(info.Images[index], snapshot.Images[index]))
+                {
+                    // A memoisable key that had no entry when the plan was made: the plan takes the one found now.
+                    _stagePlanImageLookups++;
+                    plan.Entries[index] = found;
+                }
+
+                if (hit)
+                {
+                    continue;
+                }
             }
 
             ResolveImageBinding(prepared, info.Images[index], snapshot.Images[index], index, packet);
@@ -471,9 +535,35 @@ internal sealed partial class MetalRenderHost
             prepared.SamplerViewClasses.AsSpan(0, info.Samplers.Count));
         for (var index = 0; index < info.Samplers.Count; index++)
         {
+            var integer = prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger;
+            if (plan is not null && plan.SamplerInteger[index] == integer)
+            {
+                if (StagePlanVerify)
+                {
+                    VerifyPlannedSampler(prepared, info.Samplers[index], snapshot.Samplers[index], index, integer,
+                        plan.SamplerHandles[index], plan.SamplerIds[index]);
+                }
+
+                prepared.Samplers[index] = plan.SamplerHandles[index];
+                prepared.SamplerIds[index] = plan.SamplerIds[index];
+                continue;
+            }
+
             prepared.Samplers[index] = ResolveSampler(
-                prepared, info.Samplers[index], snapshot.Samplers[index], index,
-                prepared.SamplerViewClasses[index] == MetalSamplerViewClasses.AllInteger, out prepared.SamplerIds[index], packet);
+                prepared, info.Samplers[index], snapshot.Samplers[index], index, integer, out prepared.SamplerIds[index], packet);
+            if (plan is not null)
+            {
+                // The class moved with this draw's image requests: the plan takes the sampler for the new one.
+                _stagePlanSamplerClass++;
+                plan.SamplerInteger[index] = integer;
+                plan.SamplerHandles[index] = prepared.Samplers[index];
+                plan.SamplerIds[index] = prepared.SamplerIds[index];
+            }
+        }
+
+        if (storePlan)
+        {
+            StoreStagePlan(stageIndex, program, info, snapshot, prepared);
         }
 
         var shaderData = prepared.ShaderData;
@@ -576,6 +666,11 @@ internal sealed partial class MetalRenderHost
             ? packet.Resolutions![index]
             : ImageRequestBuilders.Texture(words, ShapeOf(image));
         var request = resolution.Request;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteImage(request.Description.Data.Address, (ulong)request.Description.Data.Size, image.Written);
+        }
+
         if (prepared.MemoWanted[index])
         {
             prepared.MemoPages[index] = _imageCache.RequestPageVersions(in request);
@@ -849,8 +944,16 @@ internal sealed partial class MetalRenderHost
         _writtenViewRanges.Clear();
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.ResourceBinding);
         var stage = (MetalStageBindings)prepared;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteOpProgram(stage.Program.Hash);
+        }
+
         var info = stage.Program.Resources!.Info;
         var snapshot = stage.StageResources.Resources;
+        NoteBindShape(stage, snapshot);
+        // A staged label read checks the stage's other bindings for writes over it (MetalRenderHost.LabelStagedReads.cs).
+        BeginLabelStagedStage(stage.Program.Stage == ShaderStageKind.Compute ? stage : null);
         for (var index = 0; index < stage.ImageCount; index++)
         {
             if (index == stage.MovieLuma || index == stage.MovieChroma)
@@ -893,6 +996,7 @@ internal sealed partial class MetalRenderHost
             var role = stage.IsStorage[index] ? ImageRole.StorageImage : ImageRole.Texture;
             if (stage.IsStorage[index])
             {
+                _storageImageBinds++;
                 request = request with { View = request.View with { LevelCount = 1 } };
                 stage.Requests[index] = request;
             }
@@ -939,6 +1043,34 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
+            var written = info.Buffers[index].Written;
+            var computeStage = stage.Program.Stage == ShaderStageKind.Compute;
+            using var overlapTag = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(
+                written ? SharpEmu.HLE.GpuMemory.OverlapTag.StorageWritten
+                : info.Buffers[index].Scalar ? SharpEmu.HLE.GpuMemory.OverlapTag.Constant
+                : SharpEmu.HLE.GpuMemory.OverlapTag.StorageRead);
+            if (written)
+            {
+                _writtenBufferBinds++;
+            }
+            else
+            {
+                _readOnlyBufferBinds++;
+                // A range bound read-only before, whose binding still stands (MetalRenderHost.ReadBindingMemo.cs):
+                // mapped whole, nothing to flush or order, the same window.
+                if (TryReadBindingMemo(descriptor.Address, requested, computeStage, out var memo))
+                {
+                    if (ReadBindingMemoVerify)
+                    {
+                        VerifyReadBinding(descriptor.Address, requested, computeStage, MetalWritebackCause.StorageDescriptor, memo);
+                    }
+
+                    stage.Buffers[index] = memo;
+                    stage.BufferLengths[index] = BoundBufferBytes(requested, memo);
+                    continue;
+                }
+            }
+
             // A range mapped whole - nearly every binding - is answered by one query; ClampMappedSize
             // asks again from its first byte only for a range that runs past its mapping.
             bool readable;
@@ -962,9 +1094,14 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = mappedWhole ? requested : ClampMappedSize(descriptor.Address, requested);
-            var written = info.Buffers[index].Written;
-            FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
-            var range = ResolveStorageBuffer(descriptor.Address, size, written, stage.Program.Stage == ShaderStageKind.Compute);
+            var memoStamp = !written && mappedWhole && ReadBindingMemoEnabled ? ReadBindingStamp() : default;
+            var flushFoundImage = _imageCache.FlushGpuWrites(descriptor.Address, size, MetalWritebackCause.StorageDescriptor, written);
+            var range = ResolveStorageBuffer(descriptor.Address, size, written, computeStage, out var inPlaceAlias, out var inPlaceWindow);
+            if (!written && mappedWhole && ReadBindingMemoEnabled)
+            {
+                StoreReadBinding(descriptor.Address, size, computeStage, memoStamp, flushFoundImage, inPlaceAlias, inPlaceWindow, range);
+            }
+
             // The text is built only when the trace is on: this runs per storage buffer per draw.
             if (_traceBufferUserAddress != 0)
             {
@@ -992,6 +1129,11 @@ internal sealed partial class MetalRenderHost
 
                 using (var noteScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.BindingWrittenNote))
                 {
+                    if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+                    {
+                        SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetWriter(stage.Program.Hash);
+                    }
+
                     NoteGuestMemoryWrite(descriptor.Address, size, MetalGpuWriteOrigin.StorageBuffer);
                 }
             }
@@ -1057,6 +1199,18 @@ internal sealed partial class MetalRenderHost
     {
         var unplanned = false;
         var declaredWrite = false;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled && (stage.Program.UsesDeviceAddresses || snapshot.DeviceAddressRanges.Length != 0))
+        {
+            // An encoder running a device-address program: its reach is evaluated only when every handle is planned.
+            var planned = true;
+            foreach (var range in snapshot.DeviceAddressRanges)
+            {
+                planned &= range.Planned;
+            }
+
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteDeviceAddressProgram(planned);
+        }
+
         BeginDeviceRangeOrdering(stage);
         if (snapshot.DeviceAddressRanges.Length != 0 && _singleCopy is { } singleCopy)
         {
@@ -1087,6 +1241,11 @@ internal sealed partial class MetalRenderHost
             }
 
             var size = ClampMappedSize(range.Base, range.Size);
+            if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+            {
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.MarkGpuRead(range.Base, size, SharpEmu.HLE.GpuMemory.OverlapRead.DeviceAddress, stage.Program.Hash);
+            }
+
             if (_traceBufferUserAddress != 0)
             {
                 TraceBufferUser(stage, $"device_address h{range.Handle}{(range.Written ? " written" : string.Empty)}", range.Base, size);
@@ -1119,6 +1278,11 @@ internal sealed partial class MetalRenderHost
             }
 
             _imageCache.InvalidateMemoryFromGpu(range.Base, size);
+            if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+            {
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetWriter(stage.Program.Hash);
+            }
+
             NoteGuestMemoryWrite(range.Base, size, MetalGpuWriteOrigin.DeviceAddress);
             _slotTrap?.NoteBinding(
                 $"device_address handle={range.Handle} hash=0x{stage.Program.Hash:X16} written",
@@ -1424,10 +1588,16 @@ internal sealed partial class MetalRenderHost
 
     public void CommitBindings(GpuBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
     {
-        _ = RequirePipelineEntry(in pipeline);
+        var committed = RequirePipelineEntry(in pipeline);
         if (bindPoint == GpuBindPoint.Graphics)
         {
             NoteJoinStages(stages);
+            NoteBufferWordStages(stages);
+        }
+        else
+        {
+            // The stage whose words BindPipeline(Compute) chooses this dispatch's state by.
+            NoteBufferWordComputeStage(committed, stages);
         }
 
         Span<uint> pushData = stackalloc uint[(int)PushData.DwordCount];
@@ -1595,7 +1765,7 @@ internal sealed partial class MetalRenderHost
                     break;
                 case MslArgumentFieldKind.StepReport:
                     BinaryPrimitives.WriteUInt64LittleEndian(
-                        span, StepReportAddress(stage.Program.Hash, StepReportStageName(stageIndex)));
+                        span, StepReportAddress(stage.Program.Hash, stageIndex));
                     break;
                 case MslArgumentFieldKind.PairLocks:
                     // One table for every program, resident with the windows, so two programs
@@ -1670,8 +1840,8 @@ internal sealed partial class MetalRenderHost
     private MetalGuestRange WriteArgumentRange(ReadOnlySpan<byte> bytes)
     {
         var range = _guestMemory.Allocate((ulong)bytes.Length, 256, out var span);
-        span.Clear();
         bytes.CopyTo(span);
+        span[bytes.Length..].Clear();
         return range;
     }
 
@@ -1738,6 +1908,7 @@ internal sealed partial class MetalRenderHost
             var dummy = TinyPassDummyTexture(texture, resource);
             if (dummy != 0)
             {
+                _tinyPassDummies++;
                 BinaryPrimitives.WriteUInt64LittleEndian(
                     span[(index * sizeof(ulong))..], MetalNative.SendGpuResourceId(dummy, SelGpuResourceId));
                 NoteUsedResource(dummy, Mtl.ResourceUsageRead);
@@ -1918,6 +2089,8 @@ internal sealed partial class MetalRenderHost
     // The program reads the table's fixed slots below minimumWords without a bounds check
     // (Gen5MslCodegenOptions.ConstantTableSlots), so a shorter table goes up zero-padded:
     // those slots read the 0 the check gave. The padded words are part of the reuse key.
+    // The padded copy is written whole (the table, then a zero tail), so its stack memory is not zeroed first.
+    [System.Runtime.CompilerServices.SkipLocalsInit]
     private ulong UploadFlattenedTable(uint[] table, uint minimumWords)
     {
         if ((uint)table.Length >= minimumWords)
@@ -1926,8 +2099,8 @@ internal sealed partial class MetalRenderHost
         }
 
         Span<uint> padded = minimumWords <= 1024 ? stackalloc uint[(int)minimumWords] : new uint[minimumWords];
-        padded.Clear();
         table.CopyTo(padded);
+        padded[table.Length..].Clear();
         return UploadDwords(padded);
     }
 
@@ -1944,8 +2117,8 @@ internal sealed partial class MetalRenderHost
         var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(
             stage.ShaderData.AsSpan(0, (int)layout.ShaderDataDwordCount));
         var range = _guestMemory.Allocate((ulong)Math.Max(bytes.Length, 16), 256, out var span);
-        span.Clear();
         bytes.CopyTo(span);
+        span[bytes.Length..].Clear();
         _threadLimitsTarget = range with
         {
             Offset = range.Offset + ((ulong)layout.DispatchThreadLimitsDword * sizeof(uint)),
@@ -1962,9 +2135,10 @@ internal sealed partial class MetalRenderHost
             return found.GpuAddress;
         }
 
+        // The range is the table's bytes and a zero tail up to the 16-byte minimum, each written once.
         var range = _guestMemory.Allocate((ulong)Math.Max(bytes.Length, 16), 256, out var span);
-        span.Clear();
         bytes.CopyTo(span);
+        span[bytes.Length..].Clear();
         if (ArgumentBufferReuse)
         {
             _uploadedTables.Add(bytes, _submissionSerial, in range);
@@ -2106,6 +2280,12 @@ internal sealed partial class MetalRenderHost
     // the draw touches. The guest windows live in the residency set instead.
     private void ApplyStageBindings(bool graphics)
     {
+        if (!graphics && _labelStagedPending.Count != 0)
+        {
+            // Every compute dispatch path fills them first (EncodeStagedLabelReads); one that does not would read the ring.
+            throw Fatal("A dispatch binds staged label reads that were never filled.");
+        }
+
         if (graphics)
         {
             // A mesh pipeline has no vertex stage: the primitive shader's resources
@@ -2164,22 +2344,30 @@ internal sealed partial class MetalRenderHost
     private nuint[] _encoderResidentUsage = new nuint[64];
     private nuint[] _encoderResidentStages = new nuint[64];
     private int _encoderResidentCount;
-    private readonly Dictionary<nint, int> _encoderResidentIndex = new();
+    // The resources' positions by hash, open addressing, at most half full: a slot is live when its stamp is the
+    // current one (moved with every encoder), so a new encoder starts empty without a clear. Looked up for every used
+    // resource of every draw.
+    private int[] _encoderResidentSlots = new int[128];
+    private long[] _encoderResidentSlotStamps = new long[128];
+    private long _encoderResidentStamp = 1;
     private long _residencyCallsSkipped;
+    // Resources an encoder was told (not skipped), and compute encoders opened: what re-declaring the submission's
+    // residents to every new compute encoder costs (the WAITS line's residency_named and compute_encoders).
+    private long _residencyCallsNamed;
+    private long _computeEncodersOpened;
 
     private void ForgetResidentResources()
     {
         _encoderEpoch++;
-        if (_encoderResidentCount != 0)
-        {
-            _encoderResidentIndex.Clear();
-        }
-
+        _encoderResidentStamp++;
         _encoderResidentCount = 0;
     }
 
     /// <summary>How many -useResource: calls the encoder cache skipped.</summary>
     public long TakeSkippedResidencyCalls() => Interlocked.Exchange(ref _residencyCallsSkipped, 0);
+
+    private string TakeResidencyNameCounters() =>
+        $" residency_named={Interlocked.Exchange(ref _residencyCallsNamed, 0)} compute_encoders={Interlocked.Exchange(ref _computeEncodersOpened, 0)}";
 
     // A device-address program can dereference any mapped guest page, so the encoder that
     // runs one names the windows the address table spans, whether or not anything resolved
@@ -2334,7 +2522,24 @@ internal sealed partial class MetalRenderHost
 
     private bool TryNoteResident(nint resource, nuint usage, nuint stages)
     {
-        if (_encoderResidentIndex.TryGetValue(resource, out var index))
+        var slots = _encoderResidentSlots;
+        var slotStamps = _encoderResidentSlotStamps;
+        var mask = slots.Length - 1;
+        var slot = UsedResourceHash(resource) & mask;
+        var index = -1;
+        while (slotStamps[slot] == _encoderResidentStamp)
+        {
+            var position = slots[slot] - 1;
+            if (_encoderResidentResources[position] == resource)
+            {
+                index = position;
+                break;
+            }
+
+            slot = (slot + 1) & mask;
+        }
+
+        if (index >= 0)
         {
             // A wider usage or a new stage has to be named again; the same one need not.
             if ((_encoderResidentUsage[index] & usage) == usage &&
@@ -2346,6 +2551,7 @@ internal sealed partial class MetalRenderHost
 
             _encoderResidentUsage[index] |= usage;
             _encoderResidentStages[index] |= stages;
+            _residencyCallsNamed++;
             return true;
         }
 
@@ -2356,12 +2562,38 @@ internal sealed partial class MetalRenderHost
             Array.Resize(ref _encoderResidentStages, _encoderResidentCount * 2);
         }
 
-        _encoderResidentIndex[resource] = _encoderResidentCount;
         _encoderResidentResources[_encoderResidentCount] = resource;
         _encoderResidentUsage[_encoderResidentCount] = usage;
         _encoderResidentStages[_encoderResidentCount] = stages;
         _encoderResidentCount++;
+        slotStamps[slot] = _encoderResidentStamp;
+        slots[slot] = _encoderResidentCount;
+        if (_encoderResidentCount * 2 > slots.Length)
+        {
+            GrowEncoderResidentIndex();
+        }
+
+        _residencyCallsNamed++;
         return true;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void GrowEncoderResidentIndex()
+    {
+        _encoderResidentSlots = new int[_encoderResidentSlots.Length * 2];
+        _encoderResidentSlotStamps = new long[_encoderResidentSlots.Length];
+        var mask = _encoderResidentSlots.Length - 1;
+        for (var position = 0; position < _encoderResidentCount; position++)
+        {
+            var slot = UsedResourceHash(_encoderResidentResources[position]) & mask;
+            while (_encoderResidentSlotStamps[slot] == _encoderResidentStamp)
+            {
+                slot = (slot + 1) & mask;
+            }
+
+            _encoderResidentSlotStamps[slot] = _encoderResidentStamp;
+            _encoderResidentSlots[slot] = position + 1;
+        }
     }
 
     private void BindStageBuffers(nint encoder, int stageIndex, nint setBufferSelector)

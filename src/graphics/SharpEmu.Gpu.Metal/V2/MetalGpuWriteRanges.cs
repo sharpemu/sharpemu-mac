@@ -59,6 +59,10 @@ internal static class MetalGpuWriteOrigins
 
     public static readonly string[] Names =
         ["storage", "binding", "device_address", "fill", "copy", "writeback", "eop_label", "unbounded"];
+
+    // The same names as GpuWriteRing kinds: each one a GPU command encoded for later.
+    public static readonly string[] RingKinds =
+        ["gpu:storage", "gpu:binding", "gpu:device_address", "gpu:fill", "gpu:copy", "gpu:writeback", "gpu:eop_label", "gpu:unbounded"];
 }
 
 /// <summary>
@@ -208,6 +212,33 @@ internal sealed class MetalGpuWriteRanges
     }
 
     /// <summary>
+    /// <see cref="LoggedWriteSince"/> off the worker: the log read between two equal even
+    /// <see cref="MutationStamp"/> values (every log write happens inside a mutation); null when the worker changed it
+    /// meanwhile.
+    /// </summary>
+    public bool? TryLoggedWriteSinceSnapshot(ulong version, ulong address, ulong size)
+    {
+        var before = Volatile.Read(ref _mutation);
+        if ((before & 1) != 0)
+        {
+            return null;
+        }
+
+        bool logged;
+        try
+        {
+            logged = LoggedWriteSince(version, address, size);
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return null;
+        }
+
+        Interlocked.MemoryBarrier();
+        return Volatile.Read(ref _mutation) == before ? logged : null;
+    }
+
+    /// <summary>
     /// Recorded work in <paramref name="serial"/> stores into this range. Returns the
     /// write's sequence (see <see cref="LatestSequence"/>), or zero when nothing was recorded.
     /// </summary>
@@ -217,6 +248,12 @@ internal sealed class MetalGpuWriteRanges
         ulong serial,
         MetalGpuWriteOrigin origin = MetalGpuWriteOrigin.StorageBuffer)
     {
+        // Every write as recorded, before any folding (SHARPEMU_DIAG_FRAME_OVERLAP=1).
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(address, size, (SharpEmu.HLE.GpuMemory.OverlapWrite)origin);
+        }
+
         BeginMutation();
         try
         {
@@ -468,6 +505,16 @@ internal sealed class MetalGpuWriteRanges
     /// </summary>
     public void NoteUnbounded(ulong serial)
     {
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(0, 0, SharpEmu.HLE.GpuMemory.OverlapWrite.Unbounded);
+        }
+
+        if (SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled)
+        {
+            SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Active?.Refuse(SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapRefusal.Unbounded);
+        }
+
         BeginMutation();
         try
         {
@@ -600,6 +647,80 @@ internal sealed class MetalGpuWriteRanges
 
         Interlocked.MemoryBarrier();
         return Volatile.Read(ref _mutation) == before;
+    }
+
+    /// <summary>
+    /// <see cref="TryPendingSerialSnapshot"/> for every 4-byte word of the 256-byte line at <paramref name="line"/>
+    /// at once: bit k of <paramref name="mask"/> is set when a write that has not completed by
+    /// <paramref name="completed"/> overlaps bytes [line + 4k, line + 4k + 4). For a 4-byte-aligned range of whole
+    /// words inside the line, <c>TryPendingSerialSnapshot(range) pending != 0</c> exactly when one of its words' bits
+    /// is set (both are byte-overlap tests over the same records and the same serial). <paramref name="stamp"/> is the
+    /// (even) <see cref="MutationStamp"/> the records were read at: while it stands, the records and so the mask are the
+    /// same. False when the worker changed the records meanwhile.
+    /// </summary>
+    public bool TryPendingWordMask(ulong line, ulong completed, out ulong mask, out int stamp)
+    {
+        const ulong LineBytes = 256;
+        mask = 0;
+        stamp = Volatile.Read(ref _mutation);
+        if ((stamp & 1) != 0 || line > ulong.MaxValue - LineBytes)
+        {
+            return false;
+        }
+
+        try
+        {
+            var end = line + LineBytes;
+            if (_unboundedSerial > completed)
+            {
+                mask = ulong.MaxValue;
+            }
+            else
+            {
+                var records = _records;
+                var count = Volatile.Read(ref _wideRecordCount) == 0 &&
+                    !HashedMayCover(_bucketHashCounts, line >> RecordBucketShift, (end - 1) >> RecordBucketShift, MaxRecordBucketLookups)
+                    ? 0
+                    : Math.Min(_count, records.Length);
+                for (var index = 0; index < count; index++)
+                {
+                    var record = records[index];
+                    if (record.Serial > completed && record.End > line && record.Start < end)
+                    {
+                        mask |= LineWordBits(line, record.Start, record.End);
+                    }
+                }
+
+                var labels = _labels;
+                var labelCount = HashedMayCover(_labelPageHashCounts, line >> LabelPageShift, (end - 1) >> LabelPageShift, MaxLabelPageLookups)
+                    ? Math.Min(_labelCount, labels.Length)
+                    : 0;
+                for (var index = 0; index < labelCount; index++)
+                {
+                    var label = labels[index];
+                    if (label.Serial > completed && label.End > line && label.Start < end)
+                    {
+                        mask |= LineWordBits(line, label.Start, label.End);
+                    }
+                }
+            }
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return false;
+        }
+
+        Interlocked.MemoryBarrier();
+        return Volatile.Read(ref _mutation) == stamp;
+    }
+
+    // The words of the 256-byte line at `line` that bytes [start, end) overlap (end > line, start < line + 256).
+    private static ulong LineWordBits(ulong line, ulong start, ulong end)
+    {
+        var first = (int)((Math.Max(start, line) - line) >> 2);
+        var last = (int)((Math.Min(end, line + 256) - 1 - line) >> 2);
+        var span = last - first + 1;
+        return (span >= 64 ? ulong.MaxValue : (1UL << span) - 1) << first;
     }
 
     /// <summary>

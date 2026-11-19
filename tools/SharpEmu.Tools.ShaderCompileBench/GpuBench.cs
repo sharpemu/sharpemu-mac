@@ -442,15 +442,8 @@ internal static unsafe class GpuBench
                     return;
                 }
 
-                nint error = 0;
-                if (item.Shader.UsesMipStatisticsConstant)
-                {
-                    built.Function = MetalRenderHost.NewMipStatisticsFunction(built.Library, item.Shader.EntryPoint, false, out error);
-                }
-                else
-                {
-                    built.Function = MetalNative.Send(built.Library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(item.Shader.EntryPoint));
-                }
+                // The generic function, as the runtime makes it (buffer-word constants without values).
+                built.Function = MetalRenderHost.NewTranslatedFunction(built.Library, item.Shader, mipStatistics: false, out var error);
 
                 if (built.Function == 0)
                 {

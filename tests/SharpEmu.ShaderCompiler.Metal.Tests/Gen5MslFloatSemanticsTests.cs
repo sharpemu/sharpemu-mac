@@ -130,9 +130,44 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         var instruction = encoding == Gen5ShaderEncoding.Vop3
             ? Vop3(opcode, V012)
             : new Gen5ShaderInstruction(28, encoding, opcode, [], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], [Gen5Operand.Vector(3)], null);
-        var shader = Compile([instruction], Factor, Factor, Addend, Addend);
+        var exact = Gen5MslCodegenOptions.FromEnvironment with { FuseLegacyMultiplyAdd = false };
+        Assert.True(TryCompile([instruction], Factor, Factor, Addend, Addend, out var shader, out var error, options: exact), error);
         if (!RequireDevice()) return;
-        Assert.Equal(expected, Execute(shader));
+        Assert.Equal(expected, Execute(shader!));
+    }
+
+    // Gen5MslCodegenOptions.FuseLegacyMultiplyAdd trades that rounding for one operation in a compute
+    // program: the same inputs keep the 2^-46 a fused multiply-add keeps. Off, it is lost.
+    [Theory]
+    [InlineData("VMadF32", Gen5ShaderEncoding.Vop3)]
+    [InlineData("VMacF32", Gen5ShaderEncoding.Vop2)]
+    public void FusedLegacyMultiplyAddKeepsTheProductUnrounded(string opcode, Gen5ShaderEncoding encoding)
+    {
+        const uint Factor = 0x3F800001u, Addend = 0xBF800002u;
+        var instruction = encoding == Gen5ShaderEncoding.Vop3
+            ? Vop3(opcode, V012)
+            : new Gen5ShaderInstruction(28, encoding, opcode, [], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], [Gen5Operand.Vector(3)], null);
+        var options = Gen5MslCodegenOptions.FromEnvironment with { FuseLegacyMultiplyAdd = true };
+        Assert.True(TryCompile([instruction], Factor, Factor, Addend, Addend, out var fused, out var error, options: options), error);
+        Assert.Contains("fma(", fused!.Source);
+        var exact = options with { FuseLegacyMultiplyAdd = false };
+        Assert.True(TryCompile([instruction], Factor, Factor, Addend, Addend, out var unfused, out error, options: exact), error);
+        if (!RequireDevice()) return;
+        Assert.Equal(0x28800000u, Execute(fused));
+        Assert.Equal(0u, Execute(unfused!));
+    }
+
+    // Fusing is the default; SHARPEMU_MSL_FUSE_MAD=0 (FuseLegacyMultiplyAdd false) restores the exact form.
+    [Fact]
+    public void LegacyMultiplyAddFusesByDefaultAndNotInExactMode()
+    {
+        Assert.True(new Gen5MslCodegenOptions().FuseLegacyMultiplyAdd);
+        var instruction = Vop3("VMadF32", V012);
+        Assert.True(TryCompile([instruction], 0u, 0u, 0u, 0u, out var byDefault, out var error, options: new Gen5MslCodegenOptions()), error);
+        Assert.Contains("fma(", byDefault!.Source);
+        var exact = new Gen5MslCodegenOptions { FuseLegacyMultiplyAdd = false };
+        Assert.True(TryCompile([instruction], 0u, 0u, 0u, 0u, out var unfused, out error, options: exact), error);
+        Assert.DoesNotContain("fma(", unfused!.Source);
     }
 
     // V_MAD_LEGACY_F32 flushes its denormal sources, so a denormal factor takes the DX9 zero
@@ -283,7 +318,8 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
     // v0 = a, v1 = b, v2 = c, v3 = old; the inserted instructions run before v3 is stored.
     private static bool TryCompile(Gen5ShaderInstruction[] inserted, uint a, uint b, uint c, uint old,
         out Gen5MslShader? shader, out string error, bool ieee = false,
-        uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true)
+        uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true,
+        Gen5MslCodegenOptions? options = null)
     {
         var fixture = new Gen5ComputeFixture("float-semantics", [
             0x7E0002FF, a, 0x7E0202FF, b, 0x7E0402FF, c, 0x7E0602FF, old,
@@ -293,7 +329,7 @@ public sealed class Gen5MslFloatSemanticsTests(ITestOutputHelper output)
         instructions.InsertRange(4, inserted);
         var request = Gen5ComputeFixtures.RequestOrThrow(program with { Instructions = instructions }, ShaderStage.Compute, ieeeMode: ieee,
             floatMode: floatMode, dx10Clamp: dx10Clamp);
-        var compiled = Gen5MslTranslator.TryCompileProgram(request, out var result, out error);
+        var compiled = Gen5MslTranslator.TryCompileProgram(request, out var result, out error, options);
         shader = compiled ? result : null;
         return compiled;
     }

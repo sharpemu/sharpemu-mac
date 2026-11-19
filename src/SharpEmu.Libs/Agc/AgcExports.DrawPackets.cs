@@ -215,20 +215,8 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        var modifierBits = (uint)drawModifier;
-        var shaderStage = modifierBits >> 29;
-        var scalarRegisterBase = shaderStage is 3 or 5 ? 0x10Cu : 0x8Cu;
-        var firstVertexRegister = (modifierBits & 1u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu)
-            : 0x280u;
-        var firstInstanceRegister = (modifierBits & 4u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu)
-            : 0x280u;
-        var drawInitiator = (drawModifier & (1UL << 32)) != 0
-            ? 2u
-            : ((modifierBits >> 3) & 0x20u) | 2u;
-
-        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var drawCommand, Pm4(5, ItDrawIndirect, 0), dataOffset, firstVertexRegister, firstInstanceRegister, drawInitiator))
+        var registerLocations = DrawIndirectRegisterLocations(drawModifier);
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var drawCommand, Pm4(5, ItDrawIndirect, 0), dataOffset, (uint)registerLocations, (uint)(registerLocations >> 32), IndirectDrawInitiator(drawModifier)))
         {
             var rejects = Interlocked.Increment(ref _indirectDrawEmitRejectCount);
             if (rejects <= 8 || rejects % 250 == 0)
@@ -289,28 +277,12 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var dataOffset = (uint)ctx[CpuRegister.Rsi];
         var modifier = ctx[CpuRegister.Rdx];
-        var modifierBits = (uint)modifier;
-        var shaderStage = modifierBits >> 29;
-        var scalarRegisterBase = shaderStage is 3 or 5 ? 0x10Cu : 0x8Cu;
-        ulong registerLocations = (modifierBits & 1u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu) : 0x280u;
-        var firstInstanceRegister = (modifierBits & 4u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu) : 0x280u;
-        registerLocations |= (ulong)firstInstanceRegister << 32;
-        if ((modifierBits & 2u) != 0)
-        {
-            registerLocations |= ((ulong)(scalarRegisterBase + ((modifierBits >> 14) & 0x1Fu)) << 16) | (1UL << 59);
-        }
-
-        // The API modifier selects register locations; it is not a packet initiator.
-        var drawInitiator = (modifier & (1UL << 32)) != 0
-            ? 2u : ((modifierBits >> 3) & 0x20u) | 2u;
+        var registerLocations = IndexIndirectRegisterLocations(modifier);
+        // The API modifier selects register locations; it is not a packet initiator. The packet and
+        // the cursor are one guest write (AgcPacketStubTests runs the native stub against this).
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(5, ItDrawIndexIndirect, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
-            !ctx.TryWriteUInt64(commandAddress + 8, registerLocations) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, drawInitiator))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress,
+                Pm4(5, ItDrawIndexIndirect, 0), dataOffset, (uint)registerLocations, (uint)(registerLocations >> 32), IndirectDrawInitiator(modifier)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -337,18 +309,8 @@ public static partial class AgcExports
             !TryReadUInt64(ctx, ctx[CpuRegister.Rsp] + sizeof(ulong), out var modifier))
             return ReturnPointer(ctx, 0);
 
-        var modifierBits = (uint)modifier;
-        var shaderStage = modifierBits >> 29;
-        var scalarRegisterBase = shaderStage is 3 or 5 ? 0x10Cu : 0x8Cu;
-        ulong registerLocations = (modifierBits & 1u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu) : 0x280u;
-        var firstInstanceRegister = (modifierBits & 4u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu) : 0x280u;
-        registerLocations |= (ulong)firstInstanceRegister << 32;
-        if ((modifierBits & 2u) != 0)
-            registerLocations |= ((ulong)(scalarRegisterBase + ((modifierBits >> 14) & 0x1Fu)) << 16) | (1UL << 59);
-        var drawInitiator = (modifier & (1UL << 32)) != 0
-            ? 2u : ((modifierBits >> 3) & 0x20u) | 2u;
+        var registerLocations = IndexIndirectRegisterLocations(modifier);
+        var drawInitiator = IndirectDrawInitiator(modifier);
 
         if (commandBufferAddress == 0 ||
             !TryAllocateCommandDwords(ctx, commandBufferAddress, 10, out var commandAddress) ||
@@ -461,6 +423,39 @@ public static partial class AgcExports
             (uint)ctx[CpuRegister.Rcx]);
     }
     #pragma warning restore SHEM006
+
+    /// <summary>
+    /// The user-SGPR locations an indexed indirect draw's modifier selects, as the packet's two
+    /// location dwords (low dword first). Low 32 bits of the modifier only: bit 0 selects the
+    /// base-vertex register (field 9..13, else 0x280), bit 1 the draw-index register (field 14..18,
+    /// in bits 16..31) and the bit-59 flag, bit 2 the first-instance register (field 19..23, else
+    /// 0x280), each relative to 0x10C for stages 3 and 5 (bits 29..31) and to 0x8C otherwise. The
+    /// native stubs encode the same slots (AgcPacketStubWordKind.ModifierSgprSlots).
+    /// </summary>
+    public static ulong IndexIndirectRegisterLocations(ulong modifier)
+    {
+        var modifierBits = (uint)modifier;
+        var scalarRegisterBase = (modifierBits >> 29) is 3 or 5 ? 0x10Cu : 0x8Cu;
+        ulong registerLocations = (modifierBits & 1u) != 0
+            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu) : 0x280u;
+        var firstInstanceRegister = (modifierBits & 4u) != 0
+            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu) : 0x280u;
+        registerLocations |= (ulong)firstInstanceRegister << 32;
+        if ((modifierBits & 2u) != 0)
+        {
+            registerLocations |= ((ulong)(scalarRegisterBase + ((modifierBits >> 14) & 0x1Fu)) << 16) | (1UL << 59);
+        }
+
+        return registerLocations;
+    }
+
+    /// <summary>The first-vertex and first-instance locations of a non-indexed indirect draw (no draw-index slot).</summary>
+    public static ulong DrawIndirectRegisterLocations(ulong modifier) =>
+        IndexIndirectRegisterLocations(modifier & ~2UL);
+
+    /// <summary>An indirect draw's initiator: 2, plus bit 5 from modifier bit 8 unless bit 32 is set.</summary>
+    public static uint IndirectDrawInitiator(ulong modifier) =>
+        (modifier & (1UL << 32)) != 0 ? 2u : (((uint)modifier >> 3) & 0x20u) | 2u;
 
     private static long _indirectDrawEmitRejectCount;
 }

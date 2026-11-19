@@ -107,6 +107,35 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
         return true;
     }
 
+    /// <summary>
+    /// SHARPEMU_DIAG_FRAME_OVERLAP=1 only: a read fault on a page the GPU process's diagnostic
+    /// read-watched. Same call as a write fault, from the signal handler: allocation-free, lock-free.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public bool MarkCpuRead(ulong address)
+    {
+        FaultRequest request;
+        request.Kind = (uint)FaultKind.Read;
+        request.Reserved = 0;
+        request.Address = address;
+        request.Size = 8;
+        HandledResponse response;
+        response.Handled = 0;
+        response.Reserved = 0;
+        response.RestorationVersion = 0;
+        var result = _calls.Call(
+            (uint)GpuRemoteSyncOpcode.Fault,
+            (byte*)&request,
+            sizeof(FaultRequest),
+            (byte*)&response,
+            sizeof(HandledResponse),
+            out var length,
+            out var status,
+            FaultTimeoutNanoseconds);
+        return result == SyncCallStatus.Completed && status == GpuSplitStatus.Ok &&
+            length >= sizeof(HandledResponse) && response.Handled != 0;
+    }
+
     public bool MarkPreciseCpuWrite(ulong address, ulong size)
     {
         if (!_state.MayInterest(address, size))
@@ -187,6 +216,11 @@ internal sealed unsafe class RemoteImageStore : IGuestImageStore, IGuestSpanObse
         RuntimeHelpers.PrepareMethod(typeof(RemoteImageStore).GetMethod(nameof(MarkCpuWrite))!.MethodHandle);
         // An address no store holds: the GPU process answers "not handled".
         _ = ((IGuestImageStore)this).MarkCpuWrite(0, 8);
+        if (FrameOverlapDiagnostic.Enabled)
+        {
+            RuntimeHelpers.PrepareMethod(typeof(RemoteImageStore).GetMethod(nameof(MarkCpuRead))!.MethodHandle);
+            _ = MarkCpuRead(0);
+        }
     }
 
     private bool SendLanded(ulong address, ulong size) =>

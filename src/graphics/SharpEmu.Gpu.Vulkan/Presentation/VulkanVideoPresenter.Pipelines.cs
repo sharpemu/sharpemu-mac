@@ -499,6 +499,9 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
+        // It answers peeks, posts kernel writes and shadows known GPU contents.
+        public bool ConsumesKernelPredictions => true;
+
         public bool TryPeekResidentGuestBytes(ulong address, Span<byte> destination)
         {
             if (HasPendingMemoryPublication(address, (ulong)destination.Length))

@@ -22,6 +22,16 @@ internal static partial class CorpusCommand
             return 2;
         }
 
+        // SHARPEMU_CORPUS_PORTABLE=1: translate as the Metal host does by default, with portable
+        // buffers (each buffer's stride and format word read at run time) and, unless
+        // SHARPEMU_METAL_V2_BUFFER_WORD_CONSTANTS=0, those words as optional function constants.
+        if (Environment.GetEnvironmentVariable("SHARPEMU_CORPUS_PORTABLE") == "1")
+        {
+            SharpEmu.ShaderCompiler.Resources.PortableBufferWord.Enabled = true;
+            SharpEmu.ShaderCompiler.Resources.PortableBufferWord.ConstantsEnabled =
+                Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BUFFER_WORD_CONSTANTS") != "0";
+        }
+
         var files = Directory.EnumerateFiles(directories[0], "*" + ShaderCorpus.FileExtension).Order(StringComparer.Ordinal).ToArray();
         var failures = new List<Failure>();
         var succeeded = 0;

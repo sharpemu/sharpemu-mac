@@ -248,6 +248,10 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public DrawScopeToken DrawScope => Scope;
 
+    public bool WideTargetReuse { get; set; }
+
+    public bool ReusesTargetsAcrossPrograms => WideTargetReuse;
+
     public void KeepDepthAttachment(in DepthAttachmentState depth) => Calls.Add($"keep_depth {depth.Image.Index}");
 
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)
@@ -582,6 +586,9 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     internal Action<VertexStageRegisters>? BeforeGraphicsResolve { get; set; }
     public GraphicsPrograms Graphics { get; set; } = RenderExecutorFixtures.Programs();
 
+    // What the program cache's stamp reads (IShaderPipelineProvider.ProgramState); a test moves it as a re-plan does.
+    public ProgramStateStamp ProgramState { get; set; }
+
     // What a resolution with the pixel stage off returns, when it differs from Graphics.
     public GraphicsPrograms? GraphicsWithoutPixel { get; set; }
 
@@ -646,6 +653,13 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
 
     public List<ColorComponentMap[]> ExportMappings { get; } = new();
 
+    // Resolver shards (IShaderPipelineProvider.ResolveShardCount); ShardOf routes a job (shard 0 without it).
+    public int ResolveShardCount { get; set; } = 1;
+
+    internal Func<RegisterBanks, bool, int>? ShardOf { get; set; }
+
+    public int ResolveShardOf(RegisterBanks banks, bool compute) => ShardOf?.Invoke(banks, compute) ?? 0;
+
     public GraphicsPrograms GetGraphicsPrograms(
         RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
@@ -657,8 +671,13 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         int startInstanceUserData)
     {
         BeforeGraphicsResolve?.Invoke(banks.Shader.Vertex);
-        Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
-        ExportMappings.Add(targetExportMapping.ToArray());
+        // Resolver shards call in from several threads at once.
+        lock (Calls)
+        {
+            Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
+            ExportMappings.Add(targetExportMapping.ToArray());
+        }
+
         return !pixelActive && GraphicsWithoutPixel is { } withoutPixel ? withoutPixel : Graphics;
     }
 

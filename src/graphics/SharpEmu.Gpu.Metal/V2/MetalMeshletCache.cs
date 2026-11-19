@@ -209,7 +209,8 @@ public static class MeshletBuilder
 /// <summary>
 /// Meshlets of the indexed triangle-list draws a non-GS mesh pipeline runs, built once per
 /// index range and validated against the guest bytes on every use: an index buffer the guest
-/// rewrites in place hashes differently and is rebuilt. Entries live in shared Metal buffers
+/// rewrites in place hashes differently and is rebuilt, unless one of the few versions the
+/// range kept has that full-range hash. Entries live in shared Metal buffers
 /// the residency set names, under a byte budget with least-recently-used eviction of entries
 /// no in-flight submission can still read.
 /// </summary>
@@ -228,13 +229,24 @@ internal sealed class MetalMeshletCache
         OverBudget,
     }
 
+    /// <summary>Why a build ran: the key was never seen (or its history was cleared), the bytes hash
+    /// to a value the key has not had in its last <see cref="HashHistoryDepth"/> builds, or to one it has.</summary>
+    public enum BuildReason
+    {
+        New,
+        Changed,
+        Recurring,
+    }
+
     public readonly record struct Meshlets(nint Buffer, uint Count, uint VertexBase, uint PrimitiveBase);
 
     private readonly record struct Key(
         ulong Address, uint IndexCount, bool Index32, uint MaxVertices, uint MaxPrimitives);
 
+    // One built version of a key's index range.
     private sealed class Entry
     {
+        public required Key Key;
         public required nint Buffer;
         public required nint Contents;
         public required ulong Bytes;
@@ -247,17 +259,90 @@ internal sealed class MetalMeshletCache
         public ulong LastUsedTick;
     }
 
+    // The versions a key holds: content that cycles through a few index patterns at one range
+    // (meshes taking turns in a transient slot) finds its earlier meshlets again by full-range
+    // hash instead of rebuilding them. Validated is the version the last hash matched or built,
+    // the one the same-submission skip hands back.
+    private sealed class Slot
+    {
+        public readonly List<Entry> Versions = new(MaxVersionsPerKey);
+        public Entry? Validated;
+    }
+
+    private const int MaxVersionsPerKey = 4;
+
+    // The hashes each key was built from, newest last, kept past the entry's removal so a rebuild
+    // can tell content the key had before from content it never had. Diagnostic only.
+    private sealed class HashRing
+    {
+        private readonly ulong[] _hashes = new ulong[HashHistoryDepth];
+        private int _count;
+        private int _next;
+
+        public bool Contains(ulong hash)
+        {
+            for (var i = 0; i < _count; i++)
+            {
+                if (_hashes[i] == hash)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public void Add(ulong hash)
+        {
+            _hashes[_next] = hash;
+            _next = (_next + 1) % HashHistoryDepth;
+            _count = Math.Min(_count + 1, HashHistoryDepth);
+        }
+    }
+
+    private const int HashHistoryDepth = 8;
+    private const int HashHistoryKeyLimit = 4096;
+    private const int TraceLineLimit = 200;
+
     private static readonly bool Disabled =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESHLETS") == "0";
 
+    // SHARPEMU_METAL_MESHLET_TRACE=1 prints one [METAL-V2][MESHLET] build line per build, the first
+    // TraceLineLimit of them: address, index count and width, reason, old and new hash, serial.
+    private static readonly bool TraceBuilds =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_MESHLET_TRACE") == "1";
+
+    // SHARPEMU_METAL_MESHLET_VERSIONS=0 keeps one version per key, replaced on every change.
+    // SHARPEMU_METAL_MESHLET_POOL=0 creates a buffer per build and releases it when its entry goes,
+    // each a change of the resident list, as before.
+    private static readonly bool DefaultPool =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_MESHLET_POOL");
+
+    // Pooled buffers come in quarter steps of a power of two, from MinPooledBytes, so a rebuild
+    // of about the same size finds a free buffer of its class; free buffers past PoolBudgetBytes
+    // are released.
+    private const ulong MinPooledBytes = 4 * 1024;
+    private const ulong PoolBudgetBytes = 32UL * 1024 * 1024;
+
+    private static readonly int DefaultMaxVersions =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_METAL_MESHLET_VERSIONS") ? MaxVersionsPerKey : 1;
+
     private readonly MetalGuestMemory _guestMemory;
     private readonly ICpuMemory _memory;
-    private readonly Dictionary<Key, Entry> _entries = [];
+    private readonly Dictionary<Key, Slot> _slots = [];
+    private readonly int _maxVersions;
+    private int _versionCount;
     private readonly byte[] _chunk = new byte[HashChunkBytes];
     private readonly MeshletBuilder.Scratch _scratch = new();
     private readonly System.IO.Hashing.XxHash3 _hasher = new();
     private uint[] _indices = [];
-    private readonly List<(nint Buffer, ulong Serial)> _retired = [];
+    private readonly List<(nint Buffer, nint Contents, ulong Bytes, ulong Serial)> _retired = [];
+    private readonly bool _pool;
+    // Free buffers by capacity: their last use completed, they stay resident, nothing reads them.
+    private readonly Dictionary<ulong, Stack<(nint Buffer, nint Contents)>> _free = [];
+    private ulong _freeBytes;
+    private readonly Dictionary<Key, HashRing> _history = [];
+    private int _traceLines;
     private ulong _bytes;
     private ulong _tick;
 
@@ -267,11 +352,25 @@ internal sealed class MetalMeshletCache
     private long _hashTicks;
     private long _builds;
     private long _validationsSkipped;
+    private readonly long[] _buildsBy = new long[Enum.GetValues<BuildReason>().Length];
+    private long _hashBytes;
+    private long _buildBytes;
+    private long _readTicks;
+    private long _builderTicks;
+    private long _allocTicks;
+    private long _evictions;
+    private long _versionHits;
+    private long _poolHits;
+    private long _residentChurn;
 
-    public MetalMeshletCache(MetalGuestMemory guestMemory, ICpuMemory memory)
+    /// <param name="maxVersions">Versions kept per key, 1 to 4; the env setting when null.</param>
+    /// <param name="pool">Whether buffers are pooled; the env setting when null.</param>
+    public MetalMeshletCache(MetalGuestMemory guestMemory, ICpuMemory memory, int? maxVersions = null, bool? pool = null)
     {
+        _pool = pool ?? DefaultPool;
         _guestMemory = guestMemory;
         _memory = memory;
+        _maxVersions = Math.Clamp(maxVersions ?? DefaultMaxVersions, 1, MaxVersionsPerKey);
     }
 
     public static bool IsDisabled => Disabled;
@@ -301,7 +400,8 @@ internal sealed class MetalMeshletCache
         // does not rewrite an index range between the draws one command buffer records, and
         // hashing the bytes on every use was the cost that mattered (tens of milliseconds a
         // frame on the worker). Ranges the GPU writes never get here.
-        if (_entries.TryGetValue(key, out var validated) && validated.ValidatedSerial == submissionSerial)
+        _slots.TryGetValue(key, out var slot);
+        if (slot?.Validated is { } validated && validated.ValidatedSerial == submissionSerial)
         {
             Touch(validated, submissionSerial);
             meshlets = new Meshlets(validated.Buffer, validated.Count, validated.VertexBase, validated.PrimitiveBase);
@@ -318,19 +418,48 @@ internal sealed class MetalMeshletCache
         }
 
         _hashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - hashStarted;
+        _hashBytes += (long)rangeBytes;
 
-        if (_entries.TryGetValue(key, out var entry))
+        // Only a version built from bytes with this full-range hash is handed back.
+        var oldHash = 0UL;
+        if (slot is not null)
         {
-            if (entry.Hash == hash)
+            foreach (var version in slot.Versions)
             {
-                entry.ValidatedSerial = submissionSerial;
-                Touch(entry, submissionSerial);
-                meshlets = new Meshlets(entry.Buffer, entry.Count, entry.VertexBase, entry.PrimitiveBase);
+                if (version.Hash != hash)
+                {
+                    continue;
+                }
+
+                if (version != slot.Validated)
+                {
+                    // A hit one version per key would have rebuilt.
+                    _versionHits++;
+                }
+
+                slot.Validated = version;
+                version.ValidatedSerial = submissionSerial;
+                Touch(version, submissionSerial);
+                meshlets = new Meshlets(version.Buffer, version.Count, version.VertexBase, version.PrimitiveBase);
                 _draws++;
                 return true;
             }
 
-            Remove(key, entry);
+            oldHash = slot.Validated?.Hash ?? 0;
+            if (slot.Versions.Count >= _maxVersions)
+            {
+                // The least recently used version makes way; it is released once its last use completes.
+                var oldest = slot.Versions[0];
+                foreach (var version in slot.Versions)
+                {
+                    if (version.LastUsedTick < oldest.LastUsedTick)
+                    {
+                        oldest = version;
+                    }
+                }
+
+                Remove(oldest);
+            }
         }
 
         var buildStarted = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -367,10 +496,12 @@ internal sealed class MetalMeshletCache
             }
         }
 
+        var readDone = System.Diagnostics.Stopwatch.GetTimestamp();
         var built = _scratch;
         MeshletBuilder.BuildInto(indices, maxVertices, maxPrimitives, built);
+        var builderDone = System.Diagnostics.Stopwatch.GetTimestamp();
         var wordCount = built.WordCount;
-        var size = (ulong)wordCount * sizeof(uint);
+        var size = _pool ? SizeClass((ulong)wordCount * sizeof(uint)) : (ulong)wordCount * sizeof(uint);
         if (!MakeRoom(size, completedSerial))
         {
             ReleaseRetired(completedSerial);
@@ -378,14 +509,21 @@ internal sealed class MetalMeshletCache
             return false;
         }
 
-        var buffer = _guestMemory.CreateMeshletBuffer(size, out var contents);
+        if (_pool)
+        {
+            // Entries evicted for room whose last use completed are free for this build.
+            ReleaseRetired(completedSerial);
+        }
+
+        var buffer = TakeBuffer(size, out var contents);
         unsafe
         {
             built.CopyTo(new Span<uint>((void*)contents, wordCount));
         }
 
-        entry = new Entry
+        var entry = new Entry
         {
+            Key = key,
             Buffer = buffer,
             Contents = contents,
             Bytes = size,
@@ -395,14 +533,116 @@ internal sealed class MetalMeshletCache
             PrimitiveBase = built.PrimitiveBase,
             ValidatedSerial = submissionSerial,
         };
-        _entries[key] = entry;
+        // MakeRoom may have evicted the key's last version, so the slot is looked up again.
+        if (!_slots.TryGetValue(key, out slot))
+        {
+            slot = new Slot();
+            _slots[key] = slot;
+        }
+
+        slot.Versions.Add(entry);
+        slot.Validated = entry;
+        _versionCount++;
         _bytes += size;
         Touch(entry, submissionSerial);
-        _buildTicks += System.Diagnostics.Stopwatch.GetTimestamp() - buildStarted;
+        var buildDone = System.Diagnostics.Stopwatch.GetTimestamp();
+        _buildTicks += buildDone - buildStarted;
+        _readTicks += readDone - buildStarted;
+        _builderTicks += builderDone - readDone;
+        _allocTicks += buildDone - builderDone;
+        _buildBytes += (long)rangeBytes;
+        NoteBuild(key, hash, oldHash, submissionSerial);
         _builds++;
         _draws++;
         meshlets = new Meshlets(buffer, entry.Count, entry.VertexBase, entry.PrimitiveBase);
         return true;
+    }
+
+    // Counts the build by reason (and traces it) against the key's hash history.
+    private void NoteBuild(Key key, ulong hash, ulong oldHash, ulong serial)
+    {
+        BuildReason reason;
+        if (!_history.TryGetValue(key, out var ring))
+        {
+            if (_history.Count >= HashHistoryKeyLimit)
+            {
+                _history.Clear();
+            }
+
+            ring = new HashRing();
+            _history[key] = ring;
+            reason = BuildReason.New;
+        }
+        else
+        {
+            reason = ring.Contains(hash) ? BuildReason.Recurring : BuildReason.Changed;
+        }
+
+        if (reason != BuildReason.Recurring)
+        {
+            ring.Add(hash);
+        }
+
+        _buildsBy[(int)reason]++;
+        if (TraceBuilds && _traceLines < TraceLineLimit)
+        {
+            _traceLines++;
+            Console.Error.WriteLine(
+                $"[METAL-V2][MESHLET] build address=0x{key.Address:X} count={key.IndexCount} bits={(key.Index32 ? 32 : 16)} " +
+                $"reason={reason.ToString().ToLowerInvariant()} old_hash=0x{oldHash:X16} new_hash=0x{hash:X16} serial={serial}");
+        }
+    }
+
+    /// <summary>Builds counted in this window for <paramref name="reason"/>.</summary>
+    internal long Builds(BuildReason reason) => _buildsBy[(int)reason];
+
+    /// <summary>Entries evicted for room in this window.</summary>
+    internal long Evictions => _evictions;
+
+    /// <summary>Keys with at least one live version.</summary>
+    internal int EntryCount => _slots.Count;
+
+    /// <summary>Live versions over all keys.</summary>
+    internal int VersionCount => _versionCount;
+
+    /// <summary>Hits in this window on a version other than the key's last validated one.</summary>
+    internal long VersionHits => _versionHits;
+
+    /// <summary>Buffers removed from the cache and waiting for their last use to complete.</summary>
+    internal int RetiredCount => _retired.Count;
+
+    /// <summary>Builds in this window that reused a pooled buffer.</summary>
+    internal long PoolHits => _poolHits;
+
+    /// <summary>Meshlet buffers created or released in this window: each changes the resident list.</summary>
+    internal long ResidentChurn => _residentChurn;
+
+    /// <summary>The capacity a pooled buffer for <paramref name="bytes"/> has: the next quarter step
+    /// of the power of two at or below it, at least <see cref="MinPooledBytes"/>.</summary>
+    internal static ulong SizeClass(ulong bytes)
+    {
+        if (bytes <= MinPooledBytes)
+        {
+            return MinPooledBytes;
+        }
+
+        var step = (1UL << (63 - System.Numerics.BitOperations.LeadingZeroCount(bytes))) / 4;
+        return (bytes + step - 1) / step * step;
+    }
+
+    // A free pooled buffer of exactly this capacity, else a new one.
+    private nint TakeBuffer(ulong bytes, out nint contents)
+    {
+        if (_pool && _free.TryGetValue(bytes, out var free) && free.TryPop(out var pooled))
+        {
+            _freeBytes -= bytes;
+            _poolHits++;
+            contents = pooled.Contents;
+            return pooled.Buffer;
+        }
+
+        _residentChurn++;
+        return _guestMemory.CreateMeshletBuffer(bytes, out contents);
     }
 
     private void Touch(Entry entry, ulong serial)
@@ -444,14 +684,15 @@ internal sealed class MetalMeshletCache
 
         while (_bytes + size > BudgetBytes)
         {
-            Key? victimKey = null;
             Entry? victim = null;
-            foreach (var (key, entry) in _entries)
+            foreach (var slot in _slots.Values)
             {
-                if (entry.LastUsedSerial <= completedSerial && (victim is null || entry.LastUsedTick < victim.LastUsedTick))
+                foreach (var entry in slot.Versions)
                 {
-                    victimKey = key;
-                    victim = entry;
+                    if (entry.LastUsedSerial <= completedSerial && (victim is null || entry.LastUsedTick < victim.LastUsedTick))
+                    {
+                        victim = entry;
+                    }
                 }
             }
 
@@ -460,7 +701,8 @@ internal sealed class MetalMeshletCache
                 return false;
             }
 
-            Remove(victimKey!.Value, victim);
+            Remove(victim);
+            _evictions++;
         }
 
         return true;
@@ -468,22 +710,53 @@ internal sealed class MetalMeshletCache
 
     // The buffer may still be bound by recorded work, so it is released only once the
     // serial it was last used under has completed.
-    private void Remove(Key key, Entry entry)
+    private void Remove(Entry entry)
     {
-        _entries.Remove(key);
+        var slot = _slots[entry.Key];
+        slot.Versions.Remove(entry);
+        if (slot.Validated == entry)
+        {
+            slot.Validated = null;
+        }
+
+        if (slot.Versions.Count == 0)
+        {
+            _slots.Remove(entry.Key);
+        }
+
+        _versionCount--;
         _bytes -= entry.Bytes;
-        _retired.Add((entry.Buffer, entry.LastUsedSerial));
+        _retired.Add((entry.Buffer, entry.Contents, entry.Bytes, entry.LastUsedSerial));
     }
 
+    // With the pool, a buffer whose last use completed goes back to it, still resident, so the
+    // resident list does not change; it is released only when the pool is full.
     private void ReleaseRetired(ulong completedSerial)
     {
         for (var i = _retired.Count - 1; i >= 0; i--)
         {
-            if (_retired[i].Serial <= completedSerial)
+            var retired = _retired[i];
+            if (retired.Serial > completedSerial)
             {
-                _guestMemory.ReleaseMeshletBuffer(_retired[i].Buffer);
-                _retired.RemoveAt(i);
+                continue;
             }
+
+            _retired.RemoveAt(i);
+            if (_pool && _freeBytes + retired.Bytes <= PoolBudgetBytes)
+            {
+                if (!_free.TryGetValue(retired.Bytes, out var free))
+                {
+                    free = new Stack<(nint Buffer, nint Contents)>();
+                    _free[retired.Bytes] = free;
+                }
+
+                free.Push((retired.Buffer, retired.Contents));
+                _freeBytes += retired.Bytes;
+                continue;
+            }
+
+            _guestMemory.ReleaseMeshletBuffer(retired.Buffer);
+            _residentChurn++;
         }
     }
 
@@ -496,13 +769,32 @@ internal sealed class MetalMeshletCache
             $"meshlet_draws={_draws} meshlet_validations_skipped={_validationsSkipped} meshlet_builds={_builds} meshlet_mb={_bytes / (1024 * 1024)} " +
             $"meshlet_build_ms={(_buildTicks * 1000.0 / frequency).ToString("F1", culture)} " +
             $"meshlet_hash_ms={(_hashTicks * 1000.0 / frequency).ToString("F1", culture)} " +
-            $"meshlet_fallbacks={string.Join('/', _fallbacks)}";
+            $"meshlet_fallbacks={string.Join('/', _fallbacks)} " +
+            $"meshlet_builds_by=[new={_buildsBy[(int)BuildReason.New]} changed={_buildsBy[(int)BuildReason.Changed]} " +
+            $"recurring={_buildsBy[(int)BuildReason.Recurring]}] " +
+            $"meshlet_hash_kb={_hashBytes / 1024} meshlet_build_kb={_buildBytes / 1024} " +
+            $"meshlet_build_split_ms=[read={Ms(_readTicks)} build={Ms(_builderTicks)} alloc={Ms(_allocTicks)}] " +
+            $"meshlet_entries={_slots.Count} meshlet_evictions={_evictions} " +
+            $"meshlet_version_hits={_versionHits} meshlet_versions={_versionCount} " +
+            $"meshlet_pool_hits={_poolHits} meshlet_pool_mb={_freeBytes / (1024 * 1024)} meshlet_resident_churn={_residentChurn}";
         _draws = 0;
         _builds = 0;
         _validationsSkipped = 0;
         _buildTicks = 0;
         _hashTicks = 0;
         Array.Clear(_fallbacks);
+        Array.Clear(_buildsBy);
+        _hashBytes = 0;
+        _buildBytes = 0;
+        _readTicks = 0;
+        _builderTicks = 0;
+        _allocTicks = 0;
+        _evictions = 0;
+        _versionHits = 0;
+        _poolHits = 0;
+        _residentChurn = 0;
         return text;
+
+        string Ms(long ticks) => (ticks * 1000.0 / frequency).ToString("F2", culture);
     }
 }

@@ -25,12 +25,31 @@ public enum AgcPacketStubWordKind : byte
 
     /// <summary>
     /// The draw initiator of a modifier in the first part's register: 0 when bit 32 is set, else
-    /// <c>((uint)modifier &gt;&gt; 3) &amp; 0x20</c>.
+    /// <c>((uint)modifier &gt;&gt; 3) &amp; 0x20</c>; the constant is ORed in either way.
     /// </summary>
     DrawInitiator,
+
+    /// <summary>
+    /// The OR of the word's <see cref="AgcPacketStubWord.Slots"/> and the constant: the user-SGPR
+    /// locations an indirect draw's modifier selects (see <c>AgcExports.IndexIndirectRegisterLocations</c>).
+    /// </summary>
+    ModifierSgprSlots,
 }
 
-public sealed record AgcPacketStubWord(uint Constant, AgcPacketStubPart[] Parts, AgcPacketStubWordKind Kind = AgcPacketStubWordKind.Parts);
+/// <summary>
+/// One register location an indirect draw's modifier (the low 32 bits of <paramref name="Register"/>)
+/// selects, shifted left by <paramref name="ShiftLeft"/>: when <c>modifier &amp; EnableMask</c> is
+/// clear, <paramref name="Disabled"/>; else, for <paramref name="FieldShift"/> -1, the flag 1;
+/// else the stage's user-SGPR base (0x10C for stages 3 and 5 in bits 29..31, 0x8C otherwise) plus
+/// <c>(modifier &gt;&gt; FieldShift) &amp; 0x1F</c>.
+/// </summary>
+public readonly record struct AgcModifierSgprSlot(AgcStubRegister Register, uint EnableMask, int FieldShift, uint Disabled, int ShiftLeft);
+
+public sealed record AgcPacketStubWord(uint Constant, AgcPacketStubPart[] Parts, AgcPacketStubWordKind Kind = AgcPacketStubWordKind.Parts)
+{
+    /// <summary>The slots of a <see cref="AgcPacketStubWordKind.ModifierSgprSlots"/> word.</summary>
+    public AgcModifierSgprSlot[] Slots { get; init; } = [];
+}
 
 /// <summary>
 /// A command builder whose whole effect is "append these dwords at the command buffer's cursor and
@@ -65,6 +84,20 @@ public static partial class AgcExports
 
     private static AgcPacketStubWord DrawInitiatorOfRcx() =>
         new(0, [new AgcPacketStubPart(AgcStubRegister.Rcx, 0, 0xFFFF_FFFFu, 0)], AgcPacketStubWordKind.DrawInitiator);
+
+    private static AgcPacketStubWord Slots(params AgcModifierSgprSlot[] slots) =>
+        new(0, [], AgcPacketStubWordKind.ModifierSgprSlots) { Slots = slots };
+
+    // The modifier slots of IndexIndirectRegisterLocations (rdx = modifier): base vertex (bit 0),
+    // draw index (bit 1, high half of the low dword), first instance (bit 2) and the bit-59 flag.
+    private static readonly AgcModifierSgprSlot BaseVertexSlot = new(AgcStubRegister.Rdx, 1, 9, 0x280, 0);
+    private static readonly AgcModifierSgprSlot DrawIndexSlot = new(AgcStubRegister.Rdx, 2, 14, 0, 16);
+    private static readonly AgcModifierSgprSlot FirstInstanceSlot = new(AgcStubRegister.Rdx, 4, 19, 0x280, 0);
+    private static readonly AgcModifierSgprSlot DrawIndexFlagSlot = new(AgcStubRegister.Rdx, 2, -1, 0, 59 - 32);
+
+    // IndirectDrawInitiator of rdx.
+    private static AgcPacketStubWord IndirectDrawInitiatorOfRdx() =>
+        new(2, [new AgcPacketStubPart(AgcStubRegister.Rdx, 0, 0xFFFF_FFFFu, 0)], AgcPacketStubWordKind.DrawInitiator);
 
     // The leaf builders that append one fixed-shape packet, by NID. Each entry mirrors its export's
     // TryEmitCommandDwords call word for word (AgcPacketStubTests runs each stub against its export).
@@ -104,6 +137,16 @@ public static partial class AgcExports
             Const(Pm4(6, ItDrawIndex2, 0)), Arg(AgcStubRegister.Rsi), Arg(AgcStubRegister.Rdx), Arg(AgcStubRegister.Rdx, 32), Arg(AgcStubRegister.Rsi),
             DrawInitiatorOfRcx(),
         ]),
+        ["t1vNu082-jM"] = new(5, 0,                                                                  // sceAgcDcbDrawIndexIndirect
+        [
+            Const(Pm4(5, ItDrawIndexIndirect, 0)), Arg(AgcStubRegister.Rsi),
+            Slots(BaseVertexSlot, DrawIndexSlot), Slots(FirstInstanceSlot, DrawIndexFlagSlot), IndirectDrawInitiatorOfRdx(),
+        ]),
+        ["1q1titRBL6o"] = new(5, 0,                                                                  // sceAgcDcbDrawIndirect
+        [
+            Const(Pm4(5, ItDrawIndirect, 0)), Arg(AgcStubRegister.Rsi),
+            Slots(BaseVertexSlot), Slots(FirstInstanceSlot), IndirectDrawInitiatorOfRdx(),
+        ]),
         ["k3GhuSNmBLU"] = new(5, 0,                                                                  // sceAgcCbDispatch
         [
             Const(Pm4(5, ItDispatchDirect, 0)), Arg(AgcStubRegister.Rsi), Arg(AgcStubRegister.Rdx), Arg(AgcStubRegister.Rcx),
@@ -125,6 +168,12 @@ public static partial class AgcExports
 
     /// <summary>The most values a variable-length packet stub copies; a larger packet is the export's.</summary>
     public const int RangeStubMaxValues = 64;
+
+    /// <summary>
+    /// The most values sceAgcCbSetShRegisterRangeDirect reserves for a null source (the packet's
+    /// count field limit, <c>TryGetCbSetShRegisterRangeDirectLayout</c>); the stub copies nothing then.
+    /// </summary>
+    public const int RangeStubMaxReservedValues = 0x3FFF;
 
     public const int RegistersStubMaxRegisters = 32;
 
@@ -161,6 +210,17 @@ public static partial class AgcExports
     /// <summary>The native stub for a register-indirect patcher import, when it has one.</summary>
     public static bool TryGetRegIndirectPatchStub(string nid, out AgcRegIndirectPatchStubSpec spec) =>
         RegIndirectPatchStubSpecs.TryGetValue(nid, out spec);
+
+    private const string GetDataPacketPayloadAddressNid = "V++UgBtQhn0";
+
+    /// <summary>The header bits sceAgcGetDataPacketPayloadAddress tests for a type-0 packet (its count field).</summary>
+    public const uint PayloadAddressCountMask = 0x3FFF_0000u;
+
+    /// <summary>
+    /// Whether <paramref name="nid"/> is sceAgcGetDataPacketPayloadAddress, whose native stub
+    /// (EmitGuestAgcPayloadAddressStub) answers the export's success path.
+    /// </summary>
+    public static bool TryGetPayloadAddressStub(string nid) => nid == GetDataPacketPayloadAddressNid;
 
     /// <summary>The variable-length packet stub for a builder import, when it has one.</summary>
     public static bool TryGetVariablePacketStub(string nid, out AgcVariablePacketStub kind)

@@ -140,7 +140,7 @@ public sealed class CommandStreamQueue
     {
         _host = host;
         _boundariesInFlight = Math.Max(0, boundariesInFlight);
-        if (GpuStreamDiagnostics.DcbHashEnabled || GpuClobberDiagnostics.Enabled)
+        if (GpuStreamDiagnostics.DcbHashEnabled || GpuClobberDiagnostics.Enabled || CommandProcessorWriteHistory.Reuse)
         {
             _beforeFatal = ReportBeforeFatal;
         }
@@ -382,6 +382,14 @@ public sealed class CommandStreamQueue
         {
             _fatalProcessor?.ReportClobber(submission, DescribeQueuesForClobber());
         }
+
+        if (CommandProcessorWriteHistory.Reuse)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][REUSE] fatal queue={submission.QueueId} submission={submission.SubmissionId} " +
+                $"walk=0x{_fatalProcessor?.ReuseWalkPosition() ?? 0:X} {DescribeQueuesForClobber()}");
+            CommandProcessorWriteHistory.DumpForReuse(submission.Address, submission.DwordCount, 800);
+        }
     }
 
     private string DescribeQueuesForClobber()
@@ -462,6 +470,36 @@ public sealed class CommandStreamQueue
         return $"packets={packets} end={index}/{words.Length} ops=[{string.Join(' ', counts.Select(pair => $"{pair.Key:X2}x{pair.Value}"))}]{writes}";
     }
 
+    // SHARPEMU_DIAG_FRAME_OVERLAP=1: the guest's submissions per frame, and at its boundary how
+    // many submissions of the frame are still to walk (queued, or the one running) and how many wait.
+    private void NoteAdmissionForOverlapDiagnostic(CommandSubmission submission)
+    {
+        if (submission.Kind == CommandSubmissionKind.FrameBoundary)
+        {
+            var unfinished = _processing ? 1 : 0;
+            var blocked = 0;
+            foreach (var queue in _queues)
+            {
+                foreach (var pending in queue)
+                {
+                    if (pending.Kind is CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary)
+                    {
+                        continue;
+                    }
+
+                    unfinished++;
+                    blocked += pending.Blocked ? 1 : 0;
+                }
+            }
+
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnBoundaryAdmitted(unfinished, blocked);
+        }
+        else if (submission.Kind != CommandSubmissionKind.FlipPreparation)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnAdmission(submission.Address, (ulong)submission.DwordCount * sizeof(uint));
+        }
+    }
+
     private void EnqueueLocked(CommandSubmission submission)
     {
         if (!_accepting)
@@ -475,6 +513,11 @@ public sealed class CommandStreamQueue
         }
 
         submission.AdmissionOrdinal = ++_admissionOrdinal;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            NoteAdmissionForOverlapDiagnostic(submission);
+        }
+
         if (submission.QueueId == TraceQueueId)
             Console.Error.WriteLine(
                 $"[GPU][QTRACE] admit q={submission.QueueId} sub={submission.SubmissionId} kind={submission.Kind} " +
@@ -497,6 +540,12 @@ public sealed class CommandStreamQueue
         if (submission.Kind is not (CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary))
             SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.Enqueued, submission.QueueId,
                 submission.SubmissionId, submission.Address, submission.DwordCount, _submissionCount);
+        if (CommandProcessorWriteHistory.Reuse)
+        {
+            CommandProcessorWriteHistory.RecordStream("enq", submission.QueueId, submission.Address, submission.DwordCount,
+                submission.SubmissionId, (ulong)submission.Kind);
+        }
+
         if (DsTrace.Gpu && DsTrace.Armed)
         {
             DsTrace.Emit(DsEv.QENQ, (ulong)submission.QueueId, submission.SubmissionId,
@@ -1137,6 +1186,88 @@ public sealed class CommandStreamQueue
         return count;
     }
 
+    /// <summary>How many pending labels the queue holds (SHARPEMU_FRAME_OVERLAP_PROBE's leak check).</summary>
+    public int PendingLabelCount
+    {
+        get
+        {
+            lock (_labelGate)
+            {
+                return _pendingLabels.Count;
+            }
+        }
+    }
+
+    /// <summary>
+    /// SHARPEMU_FRAME_OVERLAP_PROBE=1: a host that notes pending labels with no completion tick lands them
+    /// here once its publication wrote the bytes. An entry overlapping the range whose value memory now
+    /// holds is dropped; one a newer write replaced (memory holds something else) stays.
+    /// </summary>
+    public void LandPendingLabels(ulong address, ulong size, SharpEmu.HLE.ICpuMemory memory)
+    {
+        if (size == 0 || address > ulong.MaxValue - size)
+        {
+            return;
+        }
+
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        var end = address + size;
+        lock (_labelGate)
+        {
+            if (_pendingLabels.Count == 0)
+            {
+                return;
+            }
+
+            if (size <= 256)
+            {
+                for (var at = address >= sizeof(uint) ? (address - sizeof(uint)) & ~3UL : 0; at < end; at += sizeof(uint))
+                {
+                    if (_pendingLabels.TryGetValue(at, out var label) && Written(memory, bytes, at, label.Value, label.Size))
+                    {
+                        _landedLabels.Add(at);
+                    }
+                }
+            }
+            else
+            {
+                foreach (var (at, label) in _pendingLabels)
+                {
+                    if (Written(memory, bytes, at, label.Value, label.Size))
+                    {
+                        _landedLabels.Add(at);
+                    }
+                }
+            }
+
+            foreach (var at in _landedLabels)
+            {
+                _pendingLabels.Remove(at);
+            }
+
+            _landedLabels.Clear();
+        }
+
+        bool Written(SharpEmu.HLE.ICpuMemory source, Span<byte> scratch, ulong at, ulong value, int labelSize)
+        {
+            if (at >= end || at + (ulong)labelSize <= address)
+            {
+                return false;
+            }
+
+            var span = scratch[..labelSize];
+            if (!source.TryRead(at, span))
+            {
+                return false;
+            }
+
+            var held = labelSize == sizeof(ulong)
+                ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(span)
+                : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span);
+            return held == value;
+        }
+    }
+
     private bool TryGetPendingLabel(ulong address, bool is64Bit, out ulong value)
     {
         lock (_labelGate)
@@ -1144,6 +1275,7 @@ public sealed class CommandStreamQueue
             if (_pendingLabels.TryGetValue(address, out var label) && label.Size >= (is64Bit ? 8 : 4))
             {
                 value = is64Bit ? label.Value : (uint)label.Value;
+                GpuCommandInterpreter.NotePendingAnswer(address, is64Bit ? 8 : 4);
                 return true;
             }
 
@@ -1151,6 +1283,7 @@ public sealed class CommandStreamQueue
             if (!is64Bit && address >= 4 && _pendingLabels.TryGetValue(address - 4, out label) && label.Size == 8)
             {
                 value = (uint)(label.Value >> 32);
+                GpuCommandInterpreter.NotePendingAnswer(address, 4);
                 return true;
             }
 
@@ -1539,6 +1672,11 @@ public sealed class CommandStreamQueue
         }
 
         var dsPacketsStarted = 0UL;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.SetQueue((int)submission!.QueueId);
+        }
+
         if (dsSlice)
         {
             DsCurrentSubmissionId = submission!.SubmissionId;
@@ -1639,6 +1777,11 @@ public sealed class CommandStreamQueue
 
                 submission.BlockedPacketAddress = packetAddress;
                 submission.Wait = submission.Commands.SuspendCondition;
+                if (FrameOverlapProbe.Enabled && !raced)
+                {
+                    // SHARPEMU_FRAME_OVERLAP_PROBE=1: a park on bytes only a completion writes refuses the frame.
+                    FrameOverlapProbe.Active?.NoteSuspendedWalk(submission.Wait);
+                }
                 if (submission.Wait.Watched)
                 {
                     // What the packet saw, not what memory holds now: a store that landed
@@ -1678,6 +1821,12 @@ public sealed class CommandStreamQueue
                 $"[GPU][QTRACE] end q={submission.QueueId} sub={submission.SubmissionId} result={result} " +
                 $"packet=0x{submission.Commands.CurrentPacketAddress:X16} wait={submission.Wait.Kind}@0x{submission.Wait.Address:X} " +
                 DescribePackets(submission.Address, submission.DwordCount));
+
+        if (result == SliceResult.Completed && SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled &&
+            submission!.Kind != CommandSubmissionKind.FlipPreparation)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnSubmissionWalked(submission.Address, (ulong)submission.DwordCount * sizeof(uint));
+        }
 
         if (dsSlice)
         {
@@ -1814,6 +1963,11 @@ public sealed class CommandStreamQueue
         if (submission.Kind == CommandSubmissionKind.FrameBoundary)
         {
             SlicesRun++;
+            if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+            {
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.OnBoundaryWalked();
+            }
+
             _host.FlushFrame();
             return true;
         }
@@ -1856,10 +2010,33 @@ public sealed class CommandStreamQueue
             GpuFatal.BeforeFatal = _beforeFatal;
         }
 
+        if (CommandProcessorWriteHistory.Reuse)
+        {
+            CommandProcessorWriteHistory.RecordStream(firstSlice ? "slice-first" : "slice-resume", submission.QueueId,
+                submission.Address, submission.DwordCount, submission.SubmissionId, processor.ReuseWalkPosition());
+            if (!firstSlice && GpuStreamDiagnostics.ChangedSinceSubmit(_host, submission))
+            {
+                CommandProcessorWriteHistory.RecordStream("rewritten-by-slice-start", submission.QueueId, submission.Address,
+                    submission.DwordCount, submission.SubmissionId, 0);
+            }
+        }
+
         try
         {
             complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount,
                 submission.CommandBytes, submission.RegisterTables) == SubmissionProgress.Complete;
+            if (CommandProcessorWriteHistory.Reuse && GpuStreamDiagnostics.ChangedSinceSubmit(_host, submission))
+            {
+                CommandProcessorWriteHistory.RecordStream("rewritten-by-slice-end", submission.QueueId, submission.Address,
+                    submission.DwordCount, submission.SubmissionId, 0);
+            }
+
+            if (CommandProcessorWriteHistory.Reuse)
+            {
+                CommandProcessorWriteHistory.RecordStream(
+                    complete ? "slice-done" : $"slice-stop:{submission.Commands.SuspendCondition.Kind}@0x{submission.Commands.SuspendCondition.Address:X}",
+                    submission.QueueId, submission.Address, submission.DwordCount, submission.SubmissionId, processor.ReuseWalkPosition());
+            }
         }
         finally
         {

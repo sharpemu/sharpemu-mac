@@ -143,10 +143,13 @@ public sealed partial class RenderExecutor
             }
         }
 
+        Prefetch?.NoteDispatchProgram(computeProgram);
         if (computeProgram.Consumed || computeProgram.ImageCopy is not null || computeProgram.KnownWrite is not null)
         {
             // What this dispatch does may not show in the ownership answers of a dispatch resolved ahead of it.
-            Prefetch?.NoteDispatchEffect();
+            Prefetch?.NoteDispatchEffect(computeProgram.Consumed ? DispatchEffectKind.Consumed
+                : computeProgram.ImageCopy is not null ? DispatchEffectKind.ImageCopy
+                : DispatchEffectKind.KnownWrite);
         }
 
         var retried = retry?.Reused == true;

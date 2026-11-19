@@ -20,6 +20,8 @@ public sealed class MaterializationReadOrderTests
     {
         var random = new System.Random(seed);
         var order = new MaterializationProgram.ReadOrder();
+        var remembered = new int[]?[3];
+        remembered[2] = Enumerable.Range(0, count).Reverse().ToArray();
         for (var trial = 0; trial < 50; trial++)
         {
             var addresses = new ulong[count];
@@ -49,12 +51,50 @@ public sealed class MaterializationReadOrderTests
             {
                 var (sortedAddresses, sortedTargets, sortedBases, sortedAbsolute) =
                     ((ulong[])addresses.Clone(), (int[])targets.Clone(), (ulong[])bases.Clone(), (bool[])absolute.Clone());
-                order.Sort(sortedAddresses, sortedTargets, sortedBases, sortedAbsolute, count, level);
+                if (level < 0)
+                    order.Sort(sortedAddresses, sortedTargets, sortedBases, sortedAbsolute, count);
+                else
+                    order.Sort(sortedAddresses, sortedTargets, sortedBases, sortedAbsolute, count, ref remembered[level]);
                 Assert.Equal(expectedAddresses, sortedAddresses);
                 Assert.Equal(expectedTargets, sortedTargets);
                 Assert.Equal(expectedBases, sortedBases);
                 Assert.Equal(expectedAbsolute, sortedAbsolute);
             }
+        }
+    }
+
+    // Two programs' levels evaluated in turn on one thread (a draw's pixel and vertex plans) each keep their own order:
+    // after the first sort neither sorts again, and each still comes out in address order.
+    [Fact]
+    public void LevelsEvaluatedInTurnKeepTheirOwnOrders()
+    {
+        var order = new MaterializationProgram.ReadOrder();
+        ulong[] pixel = [0x2_0000_1010, 0x2_0000_1000, 0x2_0000_1014, 0x2_0000_1004];
+        ulong[] vertex = [0x3_0000_0040, 0x3_0000_0000, 0x3_0000_0044, 0x3_0000_0004, 0x3_0000_0048];
+        int[]? pixelOrder = null, vertexOrder = null;
+        int[]? firstPixelOrder = null, firstVertexOrder = null;
+        for (var draw = 0; draw < 4; draw++)
+        {
+            // Each draw its own table base, the same layout.
+            var shift = (ulong)draw * 0x100;
+            foreach (var (reads, isPixel) in new[] { (pixel, true), (vertex, false) })
+            {
+                var addresses = reads.Select(address => address + shift).ToArray();
+                var targets = Enumerable.Range(0, addresses.Length).ToArray();
+                var bases = new ulong[addresses.Length];
+                var absolute = new bool[addresses.Length];
+                if (isPixel)
+                    order.Sort(addresses, targets, bases, absolute, addresses.Length, ref pixelOrder);
+                else
+                    order.Sort(addresses, targets, bases, absolute, addresses.Length, ref vertexOrder);
+                Assert.Equal(addresses.Order().ToArray(), addresses);
+                Assert.Equal(reads.Select((address, index) => (address, index)).OrderBy(pair => pair.address).Select(pair => pair.index), targets);
+            }
+
+            firstPixelOrder ??= pixelOrder;
+            firstVertexOrder ??= vertexOrder;
+            Assert.Same(firstPixelOrder, pixelOrder);
+            Assert.Same(firstVertexOrder, vertexOrder);
         }
     }
 }

@@ -569,7 +569,9 @@ internal static class MetalStaticPrecompile
     /// it returns. The file's bytes, or -1 (with the reason, or none when skipped).
     /// </summary>
     internal static long Store(MetalBinaryArchive archive, nint device, Gen5MslShader shader, UInt128 key, out string? error) =>
-        Store(archive, device, shader.Source, shader.EntryPoint, shader.UsesPerVertexInputs, shader.UsesMipStatisticsConstant, key, out error);
+        Store(
+            archive, device, shader.Source, shader.EntryPoint, shader.UsesPerVertexInputs, shader.UsesMipStatisticsConstant,
+            shader.BufferWordConstants, key, out error);
 
     /// <summary>As <see cref="Store(MetalBinaryArchive, nint, Gen5MslShader, UInt128, out string?)"/>, from the shader's parts.</summary>
     internal static long Store(
@@ -579,6 +581,7 @@ internal static class MetalStaticPrecompile
         string entry,
         bool usesPerVertexInputs,
         bool usesMipStatisticsConstant,
+        IReadOnlyList<Gen5MslShader.BufferWordConstant> bufferWordConstants,
         UInt128 key,
         out string? error)
     {
@@ -622,10 +625,9 @@ internal static class MetalStaticPrecompile
                 return -1;
             }
 
-            nint functionError = 0;
-            function = usesMipStatisticsConstant
-                ? MetalRenderHost.NewMipStatisticsFunction(library, entry, enabled: false, out functionError)
-                : MetalNative.Send(library, SelNewFunctionWithName, MetalNative.NsString(entry));
+            // The generic function: no buffer-word values (MetalRenderHost.NewTranslatedFunction).
+            function = MetalRenderHost.NewTranslatedFunction(
+                library, entry, usesMipStatisticsConstant ? false : null, [.. bufferWordConstants], [], out var functionError);
             if (function == 0)
             {
                 error = $"the library has no entry point {entry}" +

@@ -335,7 +335,9 @@ internal sealed partial class MetalRenderHost
             };
         }
 
-        var encoder = MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(EnsureCommandBuffer(), MetalProfiledEncoder.HostCompute, "indirect-launch")
+            : MetalNative.Send(EnsureCommandBuffer(), SelComputeEncoder);
         MetalMemoryTelemetry.ComputeEncoders.Add();
         if (encoder == 0)
         {

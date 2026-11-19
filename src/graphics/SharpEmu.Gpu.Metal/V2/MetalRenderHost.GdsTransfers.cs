@@ -38,7 +38,9 @@ internal sealed partial class MetalRenderHost
         }
 
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestFill);
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(context.CommandBuffer, MetalProfiledEncoder.Blit, "gds-fill")
+            : MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
@@ -103,7 +105,7 @@ internal sealed partial class MetalRenderHost
             }
 
             FlushGpuWrites(source, size, MetalWritebackCause.GuestCopy);
-            OrderAfterDeferredCopies(source, size);
+            OrderAfterDeferredCopies(source, size, LabelLandCause.Transfer);
             (sourceBuffer, sourceOffset, destinationBuffer, destinationOffset) = (origin.Buffer, origin.Offset, gds, destination);
         }
         else
@@ -114,7 +116,7 @@ internal sealed partial class MetalRenderHost
                 return false;
             }
 
-            OrderAfterDeferredCopies(destination, size);
+            OrderAfterDeferredCopies(destination, size, LabelLandCause.Transfer);
             (sourceBuffer, sourceOffset, destinationBuffer, destinationOffset) = (gds, source, target.Buffer, target.Offset);
         }
 
@@ -137,7 +139,9 @@ internal sealed partial class MetalRenderHost
         }
 
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(context.CommandBuffer, MetalProfiledEncoder.Blit, "gds-copy")
+            : MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {

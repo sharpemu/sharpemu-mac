@@ -69,7 +69,8 @@ internal static class ConformanceRunner
             return "decode: " + exception.Message;
         }
 
-        if (!Gen5MslTranslator.TryCompileProgram(request, out var compiled, out var error))
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var compiled, out var error,
+                Gen5MslCodegenOptions.FromEnvironment with { FuseLegacyMultiplyAdd = false }))
         {
             return "translate: " + error;
         }

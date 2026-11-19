@@ -91,6 +91,8 @@ public static class KernelPthreadCompatExports
         public int QueuedWaiterCount => Volatile.Read(ref _queuedWaiterCount);
         public int Type { get; set; } = MutexTypeErrorCheck;
         public int Protocol { get; set; }
+        // Made by the first lock or unlock of a zero or statically initialised slot, not by an init call.
+        public bool Implicit { get; init; }
         public LinkedList<PthreadMutexWaiter> Waiters { get; } = new();
         // SHARPEMU_PERF_MUTEX only: the thread that last took the mutex.
         public string? ProfileOwner;
@@ -1133,7 +1135,14 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (!TryResolveMutexState(ctx, mutexAddress, createIfZero: true, out var resolvedAddress, out var state))
+        var resolved = TryResolveMutexState(ctx, mutexAddress, createIfZero: true, out var resolvedAddress, out var state, out var resolve);
+        var profileOp = tryOnly ? SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexOp.Trylock : SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexOp.Lock;
+        if (SharpEmu.Libs.Diagnostics.HleCallShapeProfile.Enabled)
+        {
+            SharpEmu.Libs.Diagnostics.HleCallShapeProfile.RecordMutexResolve(profileOp, resolved ? resolve : SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.Missing);
+        }
+
+        if (!resolved)
         {
             TracePthreadFastPathBusy(tryOnly ? "trylock_missing" : "lock_missing", mutexAddress, resolvedAddress, null, KernelPthreadState.GetCurrentThreadHandle(), (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
             TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, null, KernelPthreadState.GetCurrentThreadHandle(), (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
@@ -1143,6 +1152,7 @@ public static class KernelPthreadCompatExports
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
         if (state.TryAcquireUncontended(currentThreadId, allowWaiterBarge: tryOnly || !state.FifoHandoff))
         {
+            if (SharpEmu.Libs.Diagnostics.HleCallShapeProfile.Enabled) SharpEmu.Libs.Diagnostics.HleCallShapeProfile.RecordMutexUncontended(profileOp);
             if (MutexContentionProfile.Enabled) state.ProfileOwner = MutexContentionProfile.CurrentThreadName();
             TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1287,7 +1297,13 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (!TryResolveMutexState(ctx, mutexAddress, createIfZero: true, out var resolvedAddress, out var state))
+        var resolved = TryResolveMutexState(ctx, mutexAddress, createIfZero: true, out var resolvedAddress, out var state, out var resolve);
+        if (SharpEmu.Libs.Diagnostics.HleCallShapeProfile.Enabled)
+        {
+            SharpEmu.Libs.Diagnostics.HleCallShapeProfile.RecordMutexResolve(SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexOp.Unlock, resolved ? resolve : SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.Missing);
+        }
+
+        if (!resolved)
         {
             TracePthreadMutex(ctx, "unlock", mutexAddress, resolvedAddress, null, KernelPthreadState.GetCurrentThreadHandle(), (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
@@ -1309,6 +1325,10 @@ public static class KernelPthreadCompatExports
                 if (state.QueuedWaiterCount != 0)
                 {
                     WakeFirstMutexWaiter(state, mutexAddress, currentThreadId);
+                }
+                else if (SharpEmu.Libs.Diagnostics.HleCallShapeProfile.Enabled)
+                {
+                    SharpEmu.Libs.Diagnostics.HleCallShapeProfile.RecordMutexUncontended(SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexOp.Unlock);
                 }
 
                 TracePthreadMutex(ctx, "unlock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -1742,8 +1762,13 @@ public static class KernelPthreadCompatExports
         return resolvedAddress;
     }
 
-    private static bool TryResolveMutexState(CpuContext ctx, ulong mutexAddress, bool createIfZero, out ulong resolvedAddress, [NotNullWhen(true)] out PthreadMutexState? state)
+    private static bool TryResolveMutexState(CpuContext ctx, ulong mutexAddress, bool createIfZero, out ulong resolvedAddress, [NotNullWhen(true)] out PthreadMutexState? state) =>
+        TryResolveMutexState(ctx, mutexAddress, createIfZero, out resolvedAddress, out state, out _);
+
+    // `resolve` says which path answered, for the SHARPEMU_PERF_HLE mutex counters.
+    private static bool TryResolveMutexState(CpuContext ctx, ulong mutexAddress, bool createIfZero, out ulong resolvedAddress, [NotNullWhen(true)] out PthreadMutexState? state, out SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve resolve)
     {
+        resolve = SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.Missing;
         resolvedAddress = 0;
         state = null;
         if (mutexAddress == 0)
@@ -1773,6 +1798,7 @@ public static class KernelPthreadCompatExports
                 _mutexStates[mutexAddress] = pointedState;
                 resolvedAddress = pointedHandle;
                 state = pointedState;
+                resolve = SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.Aliased;
                 return true;
             }
 
@@ -1793,12 +1819,14 @@ public static class KernelPthreadCompatExports
                         goto retry;
                     case StaleAliasCheck.Kept:
                         resolvedAddress = mutexAddress;
+                        resolve = state.Implicit ? SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.ImplicitSlot : SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.ExplicitSlot;
                         return true;
                 }
             }
             else
             {
                 resolvedAddress = mutexAddress;
+                resolve = state.Implicit ? SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.ImplicitSlot : SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.ExplicitSlot;
                 return true;
             }
 
@@ -1813,6 +1841,7 @@ public static class KernelPthreadCompatExports
 
         if (pointedHandle == StaticAdaptiveMutexInitializer)
         {
+            resolve = SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.CreatedStatic;
             return CreateImplicitMutexState(ctx, mutexAddress, MutexTypeAdaptiveNp, out resolvedAddress, out state);
         }
 
@@ -1820,6 +1849,7 @@ public static class KernelPthreadCompatExports
         {
             _mutexStates[mutexAddress] = state;
             resolvedAddress = pointedHandle;
+            resolve = SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.Aliased;
             return true;
         }
 
@@ -1835,6 +1865,7 @@ public static class KernelPthreadCompatExports
             return false;
         }
 
+        resolve = SharpEmu.Libs.Diagnostics.HleCallShapeProfile.MutexResolve.CreatedZero;
         return CreateImplicitMutexState(ctx, mutexAddress, MutexTypeErrorCheck, out resolvedAddress, out state);
     }
 
@@ -3288,6 +3319,7 @@ public static class KernelPthreadCompatExports
         PthreadMutexState? createdState = new PthreadMutexState
         {
             Type = type,
+            Implicit = true,
         };
 
         if (!TryAllocateOpaqueObject(ctx, MutexObjectSize, out var handle))

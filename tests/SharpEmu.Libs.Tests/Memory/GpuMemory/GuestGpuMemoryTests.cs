@@ -260,6 +260,28 @@ public sealed class GuestGpuMemoryTests
         _memory.Dispose();
     }
 
+    // A pair write lands as its two writes would: a range only a lazy registration covers is
+    // announced after it lands too, as the single-write overload and the pre-write mark do.
+    [Fact]
+    public void PairWriteLandedReachesTheStoresForALazilyCoveredRangeAsTwoWritesDo()
+    {
+        _memory.RegisterLazyRange(0x100000, 0x10000);
+        _memory.MarkCpuWriteLanded(0x104000, 0x8);
+        _memory.MarkCpuWriteLanded(0x105000, 0x20);
+        var singles = _stores.Calls.ToArray();
+        Assert.NotEmpty(singles);
+
+        _stores.Calls.Clear();
+        _memory.MarkCpuWriteLanded(0x104000, 0x8, 0x105000, 0x20);
+        Assert.Equal(singles, _stores.Calls);
+
+        _stores.Calls.Clear();
+        _memory.UnregisterLazyRange(0x100000, 0x10000);
+        _memory.MarkCpuWriteLanded(0x104000, 0x8, 0x105000, 0x20);
+        Assert.Empty(_stores.Calls);
+        _memory.Dispose();
+    }
+
     [Fact]
     public void Register_MarksTheMappedContentWrittenOnTheGpuQueue()
     {

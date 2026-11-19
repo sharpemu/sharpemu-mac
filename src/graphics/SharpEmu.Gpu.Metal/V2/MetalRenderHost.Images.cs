@@ -31,6 +31,11 @@ internal sealed partial class MetalRenderHost
     ColorAttachmentAcquisition IRenderHost.AcquireColorAttachment(in ColorTargetState target)
     {
         var request = target.Resolution.Request;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteImage(request.Description.Data.Address, (ulong)request.Description.Data.Size, written: true);
+        }
+
         var imageIdentifier = target.Image;
         if (!_imageCache.TryGetImage(imageIdentifier, out _))
         {
@@ -119,6 +124,11 @@ internal sealed partial class MetalRenderHost
     {
         var resolution = depth.Target.Target;
         var request = resolution.Request;
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+        {
+            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteImage(request.Description.Data.Address, (ulong)request.Description.Data.Size, written: true);
+        }
+
         var imageIdentifier = depth.Image;
         if (!_imageCache.TryGetImage(imageIdentifier, out _))
         {
@@ -374,7 +384,7 @@ internal sealed partial class MetalRenderHost
         GpuImageAspect aspects)
     {
         _ = aspects;
-        _imageCache.RefreshImage(source);
+        _imageCache.RefreshImage(source, readRole: "copy-source");
         _imageCache.RefreshImage(destination);
         if (!_imageCache.TryGetImage(source, out var sourceImage) ||
             !_imageCache.TryGetImage(destination, out var destinationImage) ||
@@ -399,7 +409,9 @@ internal sealed partial class MetalRenderHost
             MetalTransferCause.ImageCopy, source.Texture, destination.Texture);
         // A copy rewrites the destination whether or not its caller marks it written.
         destination.NoteContentChanged();
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        var encoder = PassProfileEnabled
+            ? PassProfileOpenEncoder(context.CommandBuffer, MetalProfiledEncoder.Blit, "ImageCopy")
+            : MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {

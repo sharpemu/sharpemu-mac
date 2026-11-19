@@ -508,38 +508,43 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
 
     // ---- The tick: arm, empty, unwatch ------------------------------------------------
 
-    /// <summary>From the image cache's Collect, on the GPU worker, with the image lock held.</summary>
-    public void Tick(MetalImageCache cache, long now)
+    /// <summary>From the image cache's Collect, on the GPU worker, with the image lock held. Returns whether it
+    /// unwatched, took a punch, emptied or tried to arm anything: what guest memory backs may have changed
+    /// (MetalImageCache.Collect counts it as an effect).</summary>
+    public bool Tick(MetalImageCache cache, long now)
     {
         if (_disposed)
         {
-            return;
+            return false;
         }
 
-        DrainUnwatches();
+        var changed = DrainUnwatches();
         if (_stopped)
         {
-            return;
+            return changed;
         }
 
-        TakePunched(now);
+        changed |= TakePunched(now);
         if (DeviceAddressSeen)
         {
             // Nothing new is armed; what was armed was given back when the program ran.
-            return;
+            return changed;
         }
 
-        EmptyDue(cache, now);
+        changed |= EmptyDue(cache, now);
         if (!ArmingPaused && now - _lastScan >= Ticks(_settings.ScanInterval))
         {
             _lastScan = now;
-            ArmCandidates(cache, now);
+            changed |= ArmCandidates(cache, now);
         }
+
+        return changed;
     }
 
     private static long Ticks(TimeSpan span) => (long)(span.TotalSeconds * Stopwatch.Frequency);
 
-    private void ArmCandidates(MetalImageCache cache, long now)
+    // Whether it found a candidate to arm.
+    private bool ArmCandidates(MetalImageCache cache, long now)
     {
         var budget = _settings.ArmBytesPerScan;
         var idle = Ticks(_settings.Idle);
@@ -562,7 +567,7 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
 
         if (candidates is null)
         {
-            return;
+            return false;
         }
 
         foreach (var image in candidates)
@@ -574,6 +579,8 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
 
             budget -= Math.Min(budget, TryArm(cache, image, now));
         }
+
+        return true;
     }
 
     // The image-level rules; the chunk-level ones are in TryArm.
@@ -762,10 +769,13 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
         return cache.IsSoleSingleCopyOwnerLocked(image, address, _chunkBytes);
     }
 
-    private void TakePunched(long now)
+    // Whether it took any.
+    private bool TakePunched(long now)
     {
+        var took = false;
         while (_memory.TryTakeSingleCopyPunched(out var punched))
         {
+            took = true;
             lock (_m)
             {
                 if (_chunks.TryGetValue(punched.Chunk, out var chunk) && chunk.State == ChunkState.Pending &&
@@ -775,10 +785,12 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
                 }
             }
         }
+
+        return took;
     }
 
-    // Empties every pending chunk whose punch has settled, a record at a time.
-    private void EmptyDue(MetalImageCache cache, long now)
+    // Empties every pending chunk whose punch has settled, a record at a time; whether any was due.
+    private bool EmptyDue(MetalImageCache cache, long now)
     {
         var completed = _completedSerial();
         var grace = Ticks(_settings.Grace);
@@ -827,6 +839,8 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
                 ReEmpty(chunk, now);
             }
         }
+
+        return due is not null || reEmpty is not null;
     }
 
     private void EmptyRecord(Record record, long now, long grace)
@@ -1023,15 +1037,20 @@ internal sealed unsafe class MetalSingleCopy : IGuestSingleCopyHandler, IDisposa
         }
     }
 
-    private void DrainUnwatches()
+    // Whether it dequeued any.
+    private bool DrainUnwatches()
     {
+        var any = false;
         while (_unwatch.TryDequeue(out var address))
         {
+            any = true;
             lock (_w)
             {
                 TryUnwatchLocked(address);
             }
         }
+
+        return any;
     }
 
     // Caller holds W. Removes the watch at a chunk address once no released chunk is there.

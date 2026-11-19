@@ -118,6 +118,8 @@ internal sealed partial class MetalImageCache
             image.NoteUse(_owner.CurrentSerial);
         }
 
+        NoteRefusedEnded(image, released: true);
+
         if (image.Description.HasMetadata)
         {
             var metadataAddress = image.Description.Metadata.Range.Address;
@@ -359,7 +361,11 @@ internal sealed partial class MetalImageCache
     bool IGuestImageStore.MarkCpuWrite(ulong address, ulong size) => MarkCpuWrite(address, size, publish: true);
 
     // The write is in guest memory already, so no GPU bytes may be put under it.
-    bool IGuestImageStore.MarkCpuWriteLanded(ulong address, ulong size) => MarkCpuWrite(address, size, publish: false);
+    bool IGuestImageStore.MarkCpuWriteLanded(ulong address, ulong size)
+    {
+        NoteStoreSample(address, size, "gpu:store-landed");
+        return MarkCpuWrite(address, size, publish: false);
+    }
 
     private bool MarkCpuWrite(ulong address, ulong size, bool publish)
     {
@@ -410,6 +416,8 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        NoteStoreSample(address, size, "gpu:store-enter");
+
         // A writeback still in flight over these bytes lands first, as it does under a
         // faulting store; this write lands as soon as it returns, not on a retry.
         if (Volatile.Read(ref _fencedWritebackCount) != 0)
@@ -417,6 +425,27 @@ internal sealed partial class MetalImageCache
             WaitForFencedWritebacksUnder(address, size);
         }
 
+        var hit = MarkPreciseCpuWriteUnfenced(address, size);
+
+        // Asked again once the cache has been read. A writeback is fenced inside the hold of the
+        // cache lock that records it, and before its image leaves the page owners; one recorded
+        // for another store after the question above - while this write waited for that lock, or
+        // just before it found the pages unowned - is still in flight, and by then its image was
+        // no longer GPU-written, so nothing so far has made this write wait for it. Demon's Souls
+        // read an animation file into a reused render target's memory that way and Havok loaded
+        // the target's texels. (A faulting store needs no second question: the fence keeps its
+        // page watched, so its retry faults again and asks then.)
+        if (Volatile.Read(ref _fencedWritebackCount) != 0)
+        {
+            WaitForFencedWritebacksUnder(address, size);
+        }
+
+        NoteStoreSample(address, size, "gpu:store-return");
+        return hit;
+    }
+
+    private bool MarkPreciseCpuWriteUnfenced(ulong address, ulong size)
+    {
         var stagedHit = false;
         if (StagedRanges is { } staged && staged.MayCover(address, size))
         {
@@ -450,6 +479,31 @@ internal sealed partial class MetalImageCache
 
         ReportStoreFallback(fallback);
         return hit | stagedHit;
+    }
+
+    [ThreadStatic]
+    private static ulong t_storeWaitedSerial;
+
+    // SHARPEMU_GPU_WRITE_RING=1: what guest memory holds under a managed write as this cache
+    // takes it and as it lets it land, with the submission the write last waited for.
+    private void NoteStoreSample(ulong address, ulong size, string kind)
+    {
+        if (!SharpEmu.HLE.GpuWriteRing.Enabled ||
+            size < SharpEmu.HLE.GpuWriteRing.SampleOffset + SharpEmu.HLE.GpuWriteRing.SampleLength)
+        {
+            return;
+        }
+
+        Span<byte> sample = stackalloc byte[SharpEmu.HLE.GpuWriteRing.SampleLength];
+        if (!_guestMemory.TryPeek(address + SharpEmu.HLE.GpuWriteRing.SampleOffset, sample))
+        {
+            sample.Clear();
+        }
+
+        SharpEmu.HLE.GpuWriteRing.RecordSample(
+            address, size, _owner.CompletedSerial, kind, sample,
+            $"waited={t_storeWaitedSerial} fenced={Volatile.Read(ref _fencedWritebackCount)}");
+        t_storeWaitedSerial = 0;
     }
 
     /// <summary>The host wrote exactly <c>[address, address + size)</c> of guest memory.</summary>
@@ -609,12 +663,36 @@ internal sealed partial class MetalImageCache
 
     /// <summary>
     /// Advances the collection tick, re-reads the budget when it is due, retires images past
-    /// the retirement age and evicts stale images over the budget.
+    /// the retirement age and evicts stale images over the budget. Returns whether it did anything a program
+    /// resolution running on another thread may have read (ParallelProgramPrefetch.NoteCollect).
     /// </summary>
-    public void Collect()
+    /// <remarks>
+    /// A resolution reads guest bytes, the ownership answers (registered GPU-modified images, pending GPU writes, the
+    /// overlays, queued writes) and pending copies. What each step can change, and whether it counts:
+    /// - the collection tick and the access clock, the idle clock sample, the budget evaluation and the expiry of
+    ///   recently dropped images: least-recently-used and budget bookkeeping the worker reads when it creates, evicts
+    ///   or overlaps images, never a resolution; not an effect;
+    /// - pruning completed fenced writebacks: the fences only hold guest CPU stores until a writeback's submission
+    ///   completes, and none is consulted by a resolution's reads or ownership tests; not an effect;
+    /// - an image released (housekeeping's retirement or staleness, budget eviction): it changes the image set and
+    ///   ownership, may write the image back into guest memory and may restore single-copy chunks, which a re-check of
+    ///   the answers alone can miss (owned and released again since the read); an effect, seen as a moved ImageSetVersion;
+    /// - retired images disposed: only the Metal views and texture of an image already unregistered (its release
+    ///   moved ImageSetVersion then, and its slot is gone), which no resolution reads; not an effect;
+    /// - single-copy arming, emptying, punch bookkeeping and unwatching (MetalSingleCopy.Tick): they change what guest
+    ///   memory backs and how a resolution's compares answer; an effect.
+    /// </remarks>
+    public bool Collect()
     {
         using var held = _lock.Hold();
+        var imageSet = ImageSetVersion;
+        var gpuModified = Epochs.GpuModified;
         _collectionTick++;
+        if (SharpEmu.Logging.MemoryTelemetry.Enabled)
+        {
+            Volatile.Write(ref MetalCachedImage.AccessClock, System.Diagnostics.Stopwatch.GetTimestamp());
+        }
+
         DrainRetiredImages();
         PruneFencedWritebacks();
         var now = _clock();
@@ -622,7 +700,8 @@ internal sealed partial class MetalImageCache
         MaybeEvaluateBudgetLocked(now);
         HousekeepLocked(now);
         CollectIfOverBudget(now);
-        SingleCopy?.Tick(this, now);
+        var singleCopyWork = SingleCopy?.Tick(this, now) == true;
+        return singleCopyWork || ImageSetVersion != imageSet || Epochs.GpuModified != gpuModified;
     }
 
     private void CollectIfOverBudget() => CollectIfOverBudget(_clock());
@@ -2465,6 +2544,7 @@ internal sealed partial class MetalImageCache
         var width = Math.Max(image.Description.Extent.Width >> (int)range.BaseLevel, 1);
         var height = Math.Max(image.Description.Extent.Height >> (int)range.BaseLevel, 1);
         _owner.ClearTextureColor(texture, image.Shape.PixelFormat, in clearRange, width, height, in clear);
+        NoteRefusedRewrite(image, fullImage);
         image.RefreshComplete();
         image.MarkGpuModified();
         NoteLinearGpuWrite(image);
@@ -2548,6 +2628,8 @@ internal sealed partial class MetalImageCache
                 in color);
         }
 
+        // Every level and layer (the range above).
+        NoteRefusedRewrite(image, whole: true);
         image.RefreshComplete();
         image.MarkGpuModified();
         NoteLinearGpuWrite(image);

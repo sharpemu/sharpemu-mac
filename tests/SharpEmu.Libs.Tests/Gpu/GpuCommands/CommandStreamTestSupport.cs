@@ -277,10 +277,25 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         Calls.Add($"cp_write {kind} {address:X} {source.Length}");
     }
 
+    // Whether each command-processor write the interpreter recorded was causal, in record order.
+    public List<(ulong Address, bool Causal)> CommandProcessorWriteCausal { get; } = new();
+
+    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal)
+    {
+        CommandProcessorWriteCausal.Add((address, causal));
+        RecordCommandProcessorWrite(address, source, kind);
+    }
+
     // A host that takes a run of identical qword stores as one call, as the Metal host does.
     public bool RecordsQwordRuns { get; set; }
 
     public bool PublishesSyntheticOcclusionDumps { get; set; }
+
+    public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind, bool causal)
+    {
+        CommandProcessorWriteCausal.Add((address, causal));
+        RecordCommandProcessorQwords(address, count, strideBytes, value, kind);
+    }
 
     public void RecordCommandProcessorQwords(ulong address, int count, ulong strideBytes, ulong value, string kind)
     {
@@ -393,6 +408,13 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         Calls.Add($"commit_operand {address:X} {size}");
         return true;
     }
+
+    /// <summary>Whether an owed operand a COND_EXEC may take as zero is taken (off: the read parks).</summary>
+    public bool TakesOwedOperandsAsZero { get; set; }
+
+    public bool TryTakeOwedOperandAsZero(ulong address, ulong size) =>
+        TakesOwedOperandsAsZero &&
+        OwedOperandWrites.Exists(range => address < range.Address + range.Size && range.Address < address + size);
 
     public List<ulong> IndirectCpuReads { get; } = [];
 

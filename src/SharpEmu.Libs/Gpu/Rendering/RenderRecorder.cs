@@ -44,12 +44,61 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
     public static string TakeInPlaceReport() =>
         FormattableString.Invariant($"in_place={_inPlaceDraws.Take()} in_place_refused={_inPlaceRefused.Take()} ") +
+        TakeInPlaceMissReport() + RenderExecutor.TakeTargetValueReport() +
         FormattableString.Invariant($"pipe_kept={_pipelineKept.Take()} ") +
         FormattableString.Invariant($"pipe_missed={_pipelineMissed.Take()} pipe_same={_pipelineSame.Take()}");
+
+    // Why a draw did not get the previous draw's targets (RepeatsPreviousTargets): the previous draw left none
+    // kept (dropped_by, what dropped them), no pass open or refreshes owed now (inactive), another pass (scope),
+    // the image cache's binding epoch or image set moved (binding, image_set), other target registers
+    // (target_version), or the same registers with another shape (pixel stage, counts) or programs.
+    private enum InPlaceMiss { Dropped, Inactive, Scope, Binding, ImageSet, TargetVersion, Shape, Programs, Trace, Count }
+
+    private enum InPlaceDrop { None, Kind, Refound, Compiling, Stores, FragmentStores, Tessellation, Clear, NoPass, Count }
+
+    private static readonly string[] InPlaceMissNames = ["dropped", "inactive", "scope", "binding", "image_set", "target_version", "shape", "programs", "trace"];
+    private static readonly string[] InPlaceDropNames = ["none", "kind", "refound", "compiling", "stores", "fragment_stores", "tessellation", "clear", "no_pass"];
+    private static readonly ThreadCounter[] _inPlaceMisses = Enumerable.Range(0, (int)InPlaceMiss.Count).Select(static _ => new ThreadCounter()).ToArray();
+    private static readonly ThreadCounter[] _inPlaceDrops = Enumerable.Range(0, (int)InPlaceDrop.Count).Select(static _ => new ThreadCounter()).ToArray();
+
+    private static string TakeInPlaceMissReport()
+    {
+        var builder = new System.Text.StringBuilder("in_place_miss_by=(");
+        for (var index = 0; index < (int)InPlaceMiss.Count; index++)
+        {
+            builder.Append(index == 0 ? "" : ",").Append(InPlaceMissNames[index]).Append('=').Append(_inPlaceMisses[index].Take());
+        }
+
+        builder.Append(") in_place_dropped_by=(");
+        for (var index = 0; index < (int)InPlaceDrop.Count; index++)
+        {
+            builder.Append(index == 0 ? "" : ",").Append(InPlaceDropNames[index]).Append('=').Append(_inPlaceDrops[index].Take());
+        }
+
+        return builder.Append(") ").ToString();
+    }
+
+    private bool NoteInPlaceMiss(InPlaceMiss miss)
+    {
+        _inPlaceMisses[(int)miss].Increment();
+        if (miss == InPlaceMiss.Dropped)
+        {
+            _inPlaceDrops[(int)_inPlace.DroppedBy].Increment();
+        }
+
+        return false;
+    }
+
+    private void DropInPlace(InPlaceDrop reason)
+    {
+        _inPlace.Valid = false;
+        _inPlace.DroppedBy = reason;
+    }
 
     private sealed class InPlaceDraw
     {
         public bool Valid;
+        public InPlaceDrop DroppedBy;
         public DrawScopeToken Token;
         public ulong ContextStamp;
         public ulong DynamicStamp;
@@ -79,12 +128,20 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         if (!kept.Valid || !token.IsActive || token != kept.Token || ImageClearTrace.Enabled || record.TargetVersion != kept.TargetVersion ||
             state.PixelActive != kept.PixelActive || state.ColorCount != kept.FoundCount || state.DepthResolved != kept.DepthResolved)
         {
-            return false;
+            return NoteInPlaceMiss(
+                !kept.Valid ? InPlaceMiss.Dropped :
+                !token.IsActive ? InPlaceMiss.Inactive :
+                token.Scope != kept.Token.Scope ? InPlaceMiss.Scope :
+                token.Lookups != kept.Token.Lookups ? InPlaceMiss.Binding :
+                token.Metadata != kept.Token.Metadata ? InPlaceMiss.ImageSet :
+                ImageClearTrace.Enabled ? InPlaceMiss.Trace :
+                record.TargetVersion != kept.TargetVersion ? InPlaceMiss.TargetVersion : InPlaceMiss.Shape);
         }
 
         return (RenderExecutor.WideTargetReuse && _host.ReusesTargetsAcrossPrograms) ||
             (record.ContextStamp == kept.ContextStamp && record.DynamicStamp == kept.DynamicStamp &&
-             state.Programs.Vertex.Id == kept.VertexProgram && state.Programs.Pixel.Id == kept.PixelProgram);
+             state.Programs.Vertex.Id == kept.VertexProgram && state.Programs.Pixel.Id == kept.PixelProgram) ||
+            NoteInPlaceMiss(InPlaceMiss.Programs);
     }
 
     private void RestoreFoundTargets(ref DrawState state)
@@ -157,6 +214,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         // and the next draw acquiring the same targets finds it consumed. Handing that draw the clear
         // again restarted the pass with it (Metal: GTA V's render passes doubled).
         kept.Valid = kept.Token.IsActive && !CarriesClear(in state.Rendering);
+        kept.DroppedBy = kept.Valid ? InPlaceDrop.None : kept.Token.IsActive ? InPlaceDrop.Clear : InPlaceDrop.NoPass;
         kept.ContextStamp = record.ContextStamp;
         kept.DynamicStamp = record.DynamicStamp;
         kept.TargetVersion = record.TargetVersion;
@@ -262,7 +320,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         ref var state = ref record.State;
         if (record.Kind != ResolvedDrawKind.Draw)
         {
-            _inPlace.Valid = false;
+            DropInPlace(InPlaceDrop.Kind);
         }
 
         switch (record.Kind)
@@ -283,7 +341,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             case ResolvedDrawKind.Tessellation:
                 FindTargets(ref state);
                 RecordTessellation(record, ref state);
-                _inPlace.Valid = false;
+                DropInPlace(InPlaceDrop.Tessellation);
                 break;
             case ResolvedDrawKind.ClearColorTargets:
                 FindTargets(ref state);
@@ -298,7 +356,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                 }
                 else
                 {
-                    _inPlace.Valid = false;
+                    DropInPlace(InPlaceDrop.Refound);
                     FindTargets(ref state);
                     NoteFoundTargets(ref state);
                 }
@@ -411,9 +469,18 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         {
             if (program.Images[index].Class == ImageResourceClass.Sampled)
             {
-                MipStatistics.Shared.NoteSampled(
-                    new TextureDescriptorWords(descriptors[index]),
-                    statistics is not null && index < statistics.Length ? statistics[index] : ShaderCompiler.Resources.ResourceSnapshot.NoMipStatistics);
+                var sampled = statistics is not null && index < statistics.Length ? statistics[index] : ShaderCompiler.Resources.ResourceSnapshot.NoMipStatistics;
+                // A binding without a statistics counter notes nothing (MipStatistics.NoteSampled): its descriptor
+                // is not copied. The counter bit is the snapshot's, or the descriptor's word 5 bit 25 without one.
+                var words = descriptors[index];
+                if (sampled == ShaderCompiler.Resources.ResourceSnapshot.NoMipStatistics
+                        ? words.Length <= 5 || (words[5] & ShaderCompiler.Resources.ResourceSnapshot.MipStatisticsEnableWordMask) == 0
+                        : (sampled & ShaderCompiler.Resources.ResourceSnapshot.MipStatisticsEnabled) == 0)
+                {
+                    continue;
+                }
+
+                MipStatistics.Shared.NoteSampled(new TextureDescriptorWords(words), sampled);
             }
         }
     }
@@ -584,12 +651,26 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             _host.BindResources(pixelBindings);
         }
 
-        var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : default;
-        var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
-        var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
-            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress,
-                emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
-            : default;
+        ReadOnlySpan<BufferBinding> vertexBuffers;
+        PreparedIndexBuffer indexBuffer;
+        BufferBinding indirectArguments;
+        using (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Vertex))
+        {
+            vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : default;
+        }
+
+        using (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Index))
+        {
+            indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
+        }
+
+        using (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Indirect))
+        {
+            indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
+                ? _host.ObtainBuffer(emission.IndirectArgumentsAddress,
+                    emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
+                : default;
+        }
         RenderExecutor.DropUnwrittenColorTargets(context, ref state, pixelProgram);
         if (inPlace && TryRestoreAttachments(ref state))
         {
@@ -611,7 +692,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         if (!ResolvePipeline(record, ref state, vertexInput, state.PixelActive ? pixelInput : null,
                 pixelBindings is not null ? pixelInput.Stage : null, indirectMesh is not null, out var pipeline))
         {
-            _inPlace.Valid = false;
+            DropInPlace(InPlaceDrop.Compiling);
             IndexedDrawTrace.Write(record.IndexedTrace, "pipeline-compiling", submitId, record.PacketAddress);
             return;
         }
@@ -735,7 +816,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         if (writeStages != GpuPipelineStage.None)
         {
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("write-barrier", $"sourceStages={writeStages}");
-            _inPlace.Valid = false;
+            DropInPlace(InPlaceDrop.Stores);
             // Vertex-stage stores can be ordered inside the pass by a host that supports it;
             // ending the pass would store and reload every attachment for each such draw.
             if ((writeStages & GpuPipelineStage.FragmentShaderBit) != 0 || !_host.OrdersVertexWritesInsidePass)
@@ -748,7 +829,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         else if (record.WriteStages != GpuPipelineStage.None)
         {
             // Only deferred fragment stores: the pass stays open, but its targets are not kept.
-            _inPlace.Valid = false;
+            DropInPlace(InPlaceDrop.FragmentStores);
         }
         else
         {

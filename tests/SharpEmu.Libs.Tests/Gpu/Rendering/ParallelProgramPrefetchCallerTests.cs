@@ -119,8 +119,7 @@ public sealed partial class ParallelProgramPrefetchCallerTests
         var job = f.Prefetch.Submit(banks, gate: 1);
         var follower = Banks();
         var next = f.Prefetch.Submit(follower, gate: 1);
-        var claim = typeof(ParallelProgramPrefetch).GetField("_workerClaimed", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Assert.True(SpinWait.SpinUntil(() => { lock (f.QueueLock) return (bool)claim.GetValue(f.Prefetch)!; }, TimeSpan.FromSeconds(10)));
+        Assert.True(SpinWait.SpinUntil(() => f.Prefetch.IsWorkerClaimed(0), TimeSpan.FromSeconds(10)));
         lock (f.QueueLock)
         {
             // Closed gate: still nobody's to resolve.
@@ -308,5 +307,42 @@ public sealed partial class ParallelProgramPrefetchCallerTests
 
         Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)) && waiter.Result);
         Assert.True(f.Prefetch.TakeCounters().WaitMilliseconds > 0);
+    }
+
+    // An unresolved take of the newest job counts at the frontier (nothing further submitted for the resolving thread
+    // to run ahead on); one with later jobs already queued counts behind.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnUnresolvedTakeCountsAtTheFrontierOrBehindByTheJobsSubmittedAfterIt(bool later)
+    {
+        using var f = new Fixture(false);
+        var banks = Banks();
+        _ = f.Prefetch.TakeResolverReport();
+        Task<bool> waiter;
+        ParallelProgramPrefetch.Job? next = null;
+        Monitor.Enter(f.QueueLock);
+        try
+        {
+            // The resolving thread cannot start a job while this thread holds the queue lock.
+            var job = f.Prefetch.Submit(banks);
+            if (later)
+            {
+                next = f.Prefetch.Submit(banks);
+            }
+
+            waiter = Task.Run(() => f.Take(banks, job));
+            Assert.False(waiter.Wait(50));
+        }
+        finally { Monitor.Exit(f.QueueLock); }
+
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(10)) && waiter.Result);
+        var report = f.Prefetch.TakeResolverReport();
+        Assert.Contains(later ? "frontier=0,behind=1," : "frontier=1,behind=0,", report);
+        if (next is not null)
+        {
+            f.Idle();
+            Assert.True(f.Take(banks, next));
+        }
     }
 }

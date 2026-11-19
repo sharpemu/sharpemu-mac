@@ -433,6 +433,7 @@ internal sealed partial class MetalImageCache
     // needs nothing from the CPU to complete.
     private void WaitForStoreWriteback(ulong serial)
     {
+        t_storeWaitedSerial = serial;
         var stalled = false;
         while (!_owner.WaitForSubmissionOffWorker(serial, StoreCompletionReportMilliseconds))
         {

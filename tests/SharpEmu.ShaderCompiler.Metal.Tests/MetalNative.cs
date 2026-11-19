@@ -235,7 +235,8 @@ internal static partial class MetalNative
         uint threadgroupCount = 1,
         IReadOnlyList<DeviceTable>? tables = null,
         IReadOnlyList<DeviceTable>? bindlessTables = null,
-        Func<DescriptorBindingKind, nint>? textureOfClass = null)
+        Func<DescriptorBindingKind, nint>? textureOfClass = null,
+        IReadOnlyList<(uint Index, uint Value)>? constants = null)
     {
         result = [];
         stepCapHits = 0;
@@ -340,7 +341,8 @@ internal static partial class MetalNative
                 bufferContents.Length,
                 out result,
                 out error,
-                threadgroupCount))
+                threadgroupCount,
+                constants))
         {
             return false;
         }
@@ -706,6 +708,44 @@ internal static partial class MetalNative
         }
     }
 
+    private const nuint MetalDataTypeUInt = 33;
+
+    /// <summary>A library function: plain (<c>newFunctionWithName:</c>) when
+    /// <paramref name="constants"/> is null, otherwise specialized with those uint function
+    /// constants (<c>newFunctionWithName:constantValues:error:</c>), an empty list giving none.</summary>
+    public static unsafe nint NewFunction(
+        nint library, string entryPoint, IReadOnlyList<(uint Index, uint Value)>? constants, out string error)
+    {
+        error = string.Empty;
+        if (constants is null)
+        {
+            var plain = Send(library, Selector("newFunctionWithName:"), NsString(entryPoint));
+            if (plain == 0)
+            {
+                error = $"entry point '{entryPoint}' not found in the compiled library";
+            }
+
+            return plain;
+        }
+
+        var values = Send(Send(objc_getClass("MTLFunctionConstantValues"), Selector("alloc")), Selector("init"));
+        foreach (var (index, value) in constants)
+        {
+            var word = value;
+            SendSetBuffer(values, Selector("setConstantValue:type:atIndex:"), (nint)(&word), MetalDataTypeUInt, index);
+        }
+
+        nint nsError = 0;
+        var function = Send(library, Selector("newFunctionWithName:constantValues:error:"), NsString(entryPoint), values, ref nsError);
+        SendVoid(values, Selector("release"));
+        if (function == 0)
+        {
+            error = $"specializing '{entryPoint}' failed: {DescribeError(nsError)}";
+        }
+
+        return function;
+    }
+
     private static bool RunKernel(
         nint library,
         string entryPoint,
@@ -716,15 +756,15 @@ internal static partial class MetalNative
         int resultLength,
         out byte[] result,
         out string error,
-        uint threadgroupCount = 1)
+        uint threadgroupCount = 1,
+        IReadOnlyList<(uint Index, uint Value)>? constants = null)
     {
         result = [];
         error = string.Empty;
 
-        var function = Send(library, Selector("newFunctionWithName:"), NsString(entryPoint));
+        var function = NewFunction(library, entryPoint, constants, out error);
         if (function == 0)
         {
-            error = $"entry point '{entryPoint}' not found in the compiled library";
             return false;
         }
 

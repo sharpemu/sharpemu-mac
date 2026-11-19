@@ -360,6 +360,13 @@ public sealed partial class DirectExecutionBackend
 				Console.Error.WriteLine("[LOADER][WARNING]   Could not walk RBP frame chain.");
 			}
 
+			DumpFaultExpressions(new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase)
+			{
+				["rax"] = rax, ["rbx"] = rbx, ["rcx"] = rcx, ["rdx"] = rdx, ["rsi"] = rsi, ["rdi"] = rdi,
+				["rbp"] = rbp, ["rsp"] = rsp, ["rip"] = rip, ["r8"] = r8, ["r9"] = r9, ["r10"] = r10,
+				["r11"] = r11, ["r12"] = r12, ["r13"] = r13, ["r14"] = r14, ["r15"] = r15,
+			});
+
 			switch (exceptionCode)
 			{
 				case 3221225477u:
@@ -1250,6 +1257,227 @@ public sealed partial class DirectExecutionBackend
 
 			Console.Error.WriteLine($"[LOADER][INFO]     +0x{offset:X2}: {FormatPointerWithNearestSymbol(value)}");
 		}
+	}
+
+	// SHARPEMU_FAULT_DUMP=label=expr:len[,label=expr:len...] dumps guest memory the
+	// fixed register windows cannot reach, such as a caller's locals or a structure
+	// two pointers away. expr: register | hex | [expr] (qword load) joined by + or -,
+	// for example elem=[[rbp]-0x360]:0x60. SHARPEMU_FAULT_DUMP_REPEAT_MS=<n> dumps the
+	// same windows again after n ms, so bytes another thread is still writing show up
+	// as a difference between the two passes.
+	//
+	// A label starting with "find" searches instead of dumping: the len bytes at expr are
+	// looked for in every mapped backing byte, and each other guest address holding them is
+	// printed (SHARPEMU_FAULT_FIND_ALL=1 also reads pages the host reports as not resident).
+	// A label starting with "save" writes the bytes to a file (SHARPEMU_FAULT_SAVE_DIR, up to
+	// 64 MiB) instead of printing them.
+	// SHARPEMU_FAULT_ALIASES=1 prints, for each dumped window, the backing bytes it maps and
+	// every other guest range mapping the same bytes.
+	private void DumpFaultExpressions(Dictionary<string, ulong> registers)
+	{
+		var spec = Environment.GetEnvironmentVariable("SHARPEMU_FAULT_DUMP");
+		if (string.IsNullOrWhiteSpace(spec))
+		{
+			return;
+		}
+
+		var entries = spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		var ranges = new List<(ulong Start, ulong Size, string Label)>();
+		DumpFaultExpressionPass("now", entries, registers, ranges);
+		// SHARPEMU_GPU_WRITE_RING=1: which recorded host/GPU writes covered the dumped bytes, by
+		// guest address and by the backing bytes those addresses map now (a write recorded for an
+		// address the guest has since moved lands in the backing, under whatever maps it next).
+		var backingRanges = new List<(ulong Start, ulong Size, string Label)>();
+		foreach (var (start, size, label) in ranges)
+		{
+			foreach (var (backingStart, backingSize) in SharpEmu.HLE.GuestMemory.GuestBackingForensics.BackingSpansOf(start, size))
+			{
+				backingRanges.Add((backingStart, backingSize, label));
+			}
+		}
+
+		SharpEmu.HLE.GpuWriteRing.ReportFaultRanges(ranges, backingRanges);
+		if (Environment.GetEnvironmentVariable("SHARPEMU_FAULT_ALIASES") == "1")
+		{
+			foreach (var (start, size, label) in ranges)
+			{
+				Console.Error.WriteLine($"[LOADER][INFO]   fault-aliases {label} [0x{start:X16}, 0x{start + size:X16}):");
+				foreach (var line in SharpEmu.HLE.GuestMemory.GuestBackingForensics.DescribeAliases(start, size))
+				{
+					Console.Error.WriteLine($"[LOADER][INFO]     {line}");
+				}
+			}
+
+			Console.Error.Flush();
+		}
+
+		if (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FAULT_DUMP_REPEAT_MS"), out var repeatMs) &&
+			repeatMs > 0)
+		{
+			Thread.Sleep(Math.Min(repeatMs, 5000));
+			DumpFaultExpressionPass($"after {repeatMs} ms", entries, registers, ranges: null);
+		}
+	}
+
+	private void DumpFaultExpressionPass(
+		string pass, string[] entries, Dictionary<string, ulong> registers,
+		List<(ulong Start, ulong Size, string Label)>? ranges)
+	{
+		foreach (var entry in entries)
+		{
+			var equals = entry.IndexOf('=');
+			var colon = entry.LastIndexOf(':');
+			// A label starting with "save" is written to a file whole, so it may be large.
+			var saves = entry.StartsWith("save", StringComparison.OrdinalIgnoreCase);
+			if (equals <= 0 || colon <= equals ||
+				!TryParseFaultHex(entry[(colon + 1)..], out var length) || length == 0 ||
+				length > (saves ? 0x4000000UL : 0x1000UL))
+			{
+				Console.Error.WriteLine($"[LOADER][WARN]   fault-dump: malformed entry '{entry}'");
+				continue;
+			}
+
+			var label = entry[..equals];
+			var expression = entry[(equals + 1)..colon];
+			var position = 0;
+			if (!TryEvaluateFaultExpression(expression, ref position, registers, out var address) ||
+				position != expression.Length)
+			{
+				Console.Error.WriteLine($"[LOADER][INFO]   fault-dump[{pass}] {label}: '{expression}' unresolved");
+				continue;
+			}
+
+			if (label.StartsWith("find", StringComparison.OrdinalIgnoreCase))
+			{
+				if (ranges is not null)
+				{
+					FindFaultBytes($"fault-find {label}={expression}", address, (int)length, ranges);
+				}
+
+				continue;
+			}
+
+			if (saves)
+			{
+				if (ranges is not null)
+				{
+					SaveFaultBytes(label, expression, address, (int)length);
+					ranges.Add((address, length, $"{label}={expression}"));
+				}
+
+				continue;
+			}
+
+			DumpPointerWindow($"fault-dump[{pass}] {label}={expression}", address, (int)length);
+			ranges?.Add((address, length, $"{label}={expression}"));
+		}
+		Console.Error.Flush();
+	}
+
+	// SHARPEMU_FAULT_SAVE_DIR (default: the temporary directory) receives fault-<label>-<address>.bin.
+	private void SaveFaultBytes(string label, string expression, ulong address, int length)
+	{
+		var bytes = new byte[length];
+		if (!_cpuContext.Memory.TryRead(address, bytes))
+		{
+			Console.Error.WriteLine($"[LOADER][INFO]   fault-save {label}={expression} @0x{address:X16} len=0x{length:X}: <unreadable>");
+			return;
+		}
+
+		try
+		{
+			var directory = Environment.GetEnvironmentVariable("SHARPEMU_FAULT_SAVE_DIR");
+			var path = Path.Combine(
+				string.IsNullOrWhiteSpace(directory) ? Path.GetTempPath() : directory, $"fault-{label}-{address:X}.bin");
+			File.WriteAllBytes(path, bytes);
+			Console.Error.WriteLine($"[LOADER][INFO]   fault-save {label}={expression} @0x{address:X16} len=0x{length:X} -> {path}");
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			Console.Error.WriteLine($"[LOADER][WARN]   fault-save {label}: {exception.Message}");
+		}
+	}
+
+	// Each other guest address holding the bytes joins the ranges, so the write ring says who wrote them there.
+	private void FindFaultBytes(string name, ulong address, int length, List<(ulong Start, ulong Size, string Label)> ranges)
+	{
+		var needle = new byte[length];
+		if (!_cpuContext.Memory.TryRead(address, needle))
+		{
+			Console.Error.WriteLine($"[LOADER][INFO]   {name} @0x{address:X16}: <unreadable>");
+			return;
+		}
+
+		Console.Error.WriteLine(
+			$"[LOADER][INFO]   {name} @0x{address:X16} len=0x{length:X} bytes={Convert.ToHexString(needle, 0, Math.Min(length, 64))}:");
+		var scanAll = Environment.GetEnvironmentVariable("SHARPEMU_FAULT_FIND_ALL") == "1";
+		var others = 0;
+		foreach (var line in SharpEmu.HLE.GuestMemory.GuestBackingForensics.FindBytes(needle, scanAll: scanAll))
+		{
+			Console.Error.WriteLine($"[LOADER][INFO]     {line}");
+			var at = line.IndexOf("= guest 0x", StringComparison.Ordinal);
+			if (at >= 0 && others < 4 && line.Length >= at + 26 &&
+				ulong.TryParse(line.AsSpan(at + 10, 16), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var hit) &&
+				hit != address)
+			{
+				others++;
+				ranges.Add((hit, (ulong)length, $"{name} other holder"));
+			}
+		}
+
+		Console.Error.Flush();
+	}
+
+	internal static bool TryEvaluateFaultExpression(
+		string text, ref int position, Dictionary<string, ulong> registers, out ulong value)
+	{
+		value = 0;
+		var sign = 1;
+		var first = true;
+		while (position < text.Length && text[position] != ']')
+		{
+			if (!first)
+			{
+				if (text[position] == '+') sign = 1;
+				else if (text[position] == '-') sign = -1;
+				else return false;
+				position++;
+			}
+			first = false;
+
+			ulong term;
+			if (position < text.Length && text[position] == '[')
+			{
+				position++;
+				if (!TryEvaluateFaultExpression(text, ref position, registers, out var inner) ||
+					position >= text.Length || text[position] != ']' ||
+					!TryReadDiagnosticHostQword(inner, out term))
+				{
+					return false;
+				}
+				position++;
+			}
+			else
+			{
+				var start = position;
+				while (position < text.Length && char.IsLetterOrDigit(text[position])) position++;
+				var token = text[start..position];
+				if (!registers.TryGetValue(token, out term) && !TryParseFaultHex(token, out term))
+				{
+					return false;
+				}
+			}
+
+			value = sign > 0 ? value + term : value - term;
+		}
+
+		return !first;
+	}
+
+	private static bool TryParseFaultHex(string text, out ulong value)
+	{
+		var digits = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text;
+		return ulong.TryParse(digits, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
 	}
 
 	private unsafe bool TryReadQword(ulong address, out ulong value)

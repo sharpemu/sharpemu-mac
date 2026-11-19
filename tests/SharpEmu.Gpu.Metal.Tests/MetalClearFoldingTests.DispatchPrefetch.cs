@@ -52,7 +52,8 @@ public sealed unsafe partial class MetalClearFoldingTests
         host.NoteGuestMemoryWrite(KernelSource + 0x10, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
         // The store landed and its record retired: the page is unowned again.
         ((MetalGpuWriteRanges)GpuWritesOfHost.GetValue(host)!).Clear(ulong.MaxValue);
-        Assert.True(concurrent.IsStillCurrent(assumptions));
+        // Every take tests the log: a write the worker recorded after the resolution began is ahead of its draw too.
+        Assert.False(concurrent.IsStillCurrent(assumptions));
         Assert.False(concurrent.IsStillCurrentAcrossDispatches(assumptions));
         concurrent.ReleaseAssumptions(assumptions);
     }
@@ -70,6 +71,86 @@ public sealed unsafe partial class MetalClearFoldingTests
         // Another page entirely: neither the answers nor the log cover what the resolution read.
         host.NoteGuestMemoryWrite(KernelSource + 0x4000, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
         Assert.True(concurrent.IsStillCurrentAcrossDispatches(assumptions));
+        concurrent.ReleaseAssumptions(assumptions);
+    }
+
+    // A kernel copy consumed because its destination already holds the result writes nothing, so a resolution that read
+    // the destination before it stands across it (KernelFillWritesLogged: the take leaves a consumed kernel fill or copy
+    // to this check); a store logged over the destination, as an intercepted fill or copy logs, refuses it.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AResolutionStandsAcrossAnIdenticalKernelCopyOfWhatItReadButNotAcrossALoggedFill(bool fill)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.HostKernelCopyMode = MetalHostKernelCopyMode.Identical;
+        WriteKernelSource(rig);
+        WriteKernelResult(rig);
+        var concurrent = (IConcurrentResolveHost)host;
+        Assert.True(concurrent.KernelFillWritesLogged);
+        var assumptions = ResolveWordConcurrently(host, KernelDestination + 5 * sizeof(uint));
+
+        if (fill)
+        {
+            // What TryInterceptKernelFill notes for the bytes it clears.
+            host.NoteGuestMemoryWrite(KernelDestination, KernelBytes, MetalGpuWriteOrigin.Fill);
+        }
+        else
+        {
+            Assert.True(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
+            Assert.Equal(1, host.KernelCopiesElided);
+        }
+
+        Assert.Equal(!fill, concurrent.IsStillCurrentAcrossDispatches(assumptions));
+        concurrent.ReleaseAssumptions(assumptions);
+    }
+
+    // A resolution (a draw's resolved ahead of dispatches, ParallelProgramPrefetch.SubmitDrawAhead, or a dispatch's) read
+    // a destination word as the source of the pending copy that writes it, dropping the copy's owned answer. A dispatch
+    // it was resolved ahead of then stores: over the word read (that store, not the copy, is now the word's latest
+    // write), over the copy's source (the word would be copied from other bytes), or elsewhere. The first two refuse
+    // the resolution, pending or retired; the last leaves it standing.
+    [Theory]
+    [InlineData(0x0UL, true, false, false)]
+    [InlineData(0x0UL, true, true, false)]
+    [InlineData(0x4UL, false, false, false)]
+    [InlineData(0x4UL, false, true, false)]
+    [InlineData(0x4000UL, false, false, true)]
+    public void AWordReadThroughAPendingCopyIsRefusedWhenADispatchAheadStoresOverItOrItsSource(
+        ulong offset, bool overDestination, bool retired, bool stands)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.ConcurrentCopyReads = true;
+        WriteKernelSource(rig);
+        Assert.False(host.TryCopyWordsOnHost(KernelDestination, KernelSource, KernelPeriod, KernelWords));
+        host.NoteGuestMemoryWrite(KernelDestination, KernelWords * sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
+        host.ResetBindings();
+        var concurrent = (IConcurrentResolveHost)host;
+        concurrent.BeginConcurrentResolve();
+        object assumptions;
+        try
+        {
+            Assert.True(host.TryReadGuestWord(KernelDestination + 4, out var word));
+            Assert.Equal(rig.ReadBacking32(KernelSource + 4), word);
+        }
+        finally
+        {
+            assumptions = concurrent.EndConcurrentResolve();
+        }
+
+        // The dispatch ahead runs: a 4-byte store over the destination word read, the copy's source word, or another page.
+        var stored = overDestination ? KernelDestination + 4 + offset : KernelSource + offset;
+        host.NoteGuestMemoryWrite(stored, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
+        if (retired)
+        {
+            ((MetalGpuWriteRanges)GpuWritesOfHost.GetValue(host)!).Clear(ulong.MaxValue);
+        }
+
+        Assert.Equal(stands, concurrent.IsStillCurrentAcrossDispatches(assumptions));
         concurrent.ReleaseAssumptions(assumptions);
     }
 }

@@ -1,0 +1,64 @@
+// BUFFER_LOAD_FORMAT_* at a site whose descriptor word 3 is a function constant
+// (PortableBufferWord.ConstantsEnabled), called only where the host made the function with a
+// value for it. Every value below derives from word3 and count alone, so once Metal substitutes
+// the constant the table reads, selectors and conversions fold, and what is left is the literal
+// packed form (BeginLiteralPackedFormatLoad, TryEmitLiteralDwordFormatLoad): one test that the
+// dwords the selected components lie in are inside the binding, those dwords loaded as one run,
+// and each component taken from its dword. An element whose run does not fit (a short final
+// element, an access past the end) takes sharpemu_format_fetch, whose results these equal.
+static inline uint4 sharpemu_load_words_n(device uint* b, uint bytes, uint addr, uint n)
+{
+    uint4 result = uint4(0u);
+    if ((addr & 3u) == 0u)
+    {
+        uint index = addr >> 2;
+        result.x = b[index];
+        if (n > 1u) result.y = b[index + 1u];
+        if (n > 2u) result.z = b[index + 2u];
+        if (n > 3u) result.w = b[index + 3u];
+    }
+    else
+    {
+        result.x = sharpemu_load_word(b, bytes, addr);
+        if (n > 1u) result.y = sharpemu_load_word(b, bytes, addr + 4u);
+        if (n > 2u) result.z = sharpemu_load_word(b, bytes, addr + 8u);
+        if (n > 3u) result.w = sharpemu_load_word(b, bytes, addr + 12u);
+    }
+    return result;
+}
+
+static inline uint4 sharpemu_format_fetch_constant(device uint* b, uint bytes, uint addr, uint word3, uint count)
+{
+    uint entry = sharpemu_gfx10_formats[(word3 >> 12) & 0x7Fu];
+    uint dfmt = entry & 0xFFu;
+    uint nfmt = (entry >> 8) & 0xFFu;
+    uint one = sharpemu_format_one(nfmt);
+    uint byteOff[4];
+    uint bitOff[4];
+    uint bits[4];
+    uint run = 0u;
+    for (uint destination = 0u; destination < 4u; destination++)
+    {
+        uint selector = (word3 >> (destination * 3u)) & 7u;
+        sharpemu_format_layout(dfmt, (selector - 4u) & 3u, byteOff[destination], bitOff[destination], bits[destination]);
+        bool memory = destination < count && selector >= 4u && bits[destination] != 0u;
+        run = memory ? max(run, (byteOff[destination] >> 2) + 1u) : run;
+    }
+    if (run != 0u && !(run * 4u <= bytes && addr <= bytes - run * 4u))
+    {
+        return sharpemu_format_fetch(b, bytes, addr, word3, count);
+    }
+    uint4 words = run == 0u ? uint4(0u) : sharpemu_load_words_n(b, bytes, addr, run);
+    uint4 result = uint4(0u);
+    for (uint destination = 0u; destination < 4u; destination++)
+    {
+        uint selector = (word3 >> (destination * 3u)) & 7u;
+        uint component = (selector - 4u) & 3u;
+        uint raw = bits[destination] == 0u ? 0u :
+            extract_bits(words[(byteOff[destination] >> 2u) & 3u], ((byteOff[destination] & 3u) << 3u) + bitOff[destination], bits[destination]);
+        uint value = bits[destination] == 0u ? (component == 3u ? one : 0u) :
+            sharpemu_format_convert(raw, bits[destination], nfmt, dfmt);
+        result[destination] = destination >= count ? 0u : selector < 4u ? (selector == 1u ? one : 0u) : value;
+    }
+    return result;
+}

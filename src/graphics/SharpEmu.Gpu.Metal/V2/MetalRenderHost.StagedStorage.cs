@@ -13,6 +13,22 @@ internal sealed partial class MetalRenderHost
 
     private MetalStagedStorage StagedStorage => _stagedStorageCopies ??= new MetalStagedStorage(_guestMemory, _stagedRanges);
 
+    /// <summary>
+    /// Tests: a staged copy of these bytes, written by a recorded dispatch, to be written back at the encoder end; not
+    /// armed (<paramref name="armed"/> false), a copy whose dispatch is still being bound, which TryShare answers with.
+    /// </summary>
+    internal MetalGuestRange StageRecordedStoresForTest(ulong address, ulong size, bool armed = true)
+    {
+        var staging = _guestMemory.Stage(address, size);
+        StagedStorage.Add(address, size, staging, _guestMemory.Stage(address, size), written: true);
+        if (armed)
+        {
+            StagedStorage.Arm();
+        }
+
+        return staging;
+    }
+
     private bool _encodingStagedStores;
 
     /// <summary>
@@ -20,10 +36,30 @@ internal sealed partial class MetalRenderHost
     /// range, otherwise a staged copy that sees the GPU's earlier writes and whose stores
     /// reach guest memory (<see cref="MetalStagedStorage"/>).
     /// </summary>
-    internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage = false)
+    internal MetalGuestRange ResolveStorageBuffer(ulong address, ulong size, bool written, bool computeStage = false) =>
+        ResolveStorageBuffer(address, size, written, computeStage, out _, out _);
+
+    // inPlaceAlias: the backing alias MetalGuestMemory.TryResolveInPlace placed the range by when the range is its
+    // window, else 0; inPlaceWindow: that window, else null (MetalReadBindingMemo, MetalReadBindingMemoV2).
+    private MetalGuestRange ResolveStorageBuffer(
+        ulong address, ulong size, bool written, bool computeStage, out ulong inPlaceAlias,
+        out MetalWindowPartition.Window? inPlaceWindow)
     {
+        inPlaceAlias = 0;
+        inPlaceWindow = null;
         using var phaseScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageDeferredLabels);
-        OrderAfterDeferredCopies(address, size);
+        // A read of held label copies gets a view the dispatch fills with them, the copies left held
+        // (MetalRenderHost.LabelStagedReads.cs); not in place, so no read-binding memo keeps it.
+        var untouched = false;
+        if (!written && TryStageLabelRead(address, size, computeStage, out var labelView, out untouched))
+        {
+            return labelView;
+        }
+
+        if (!untouched)
+        {
+            OrderAfterDeferredCopies(address, size, written ? LabelLandCause.BindWritten : LabelLandCause.BindRead);
+        }
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageSharedLookup);
         var staged = StagedStorage;
         if (staged.TryShare(address, size, written, out var shared))
@@ -34,8 +70,10 @@ internal sealed partial class MetalRenderHost
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageStoreOrder);
         OrderAfterStagedStores(address, size);
         phaseScope.SwitchPhase(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.StorageBufferResolve);
-        if (_guestMemory.TryResolveInPlace(address, size, out var window))
+        if (_guestMemory.TryResolveInPlace(address, size, out var window, out var alias, out var placedIn))
         {
+            inPlaceAlias = alias;
+            inPlaceWindow = placedIn;
             return window;
         }
 
@@ -87,7 +125,7 @@ internal sealed partial class MetalRenderHost
         if (gathered)
         {
             pristine = _guestMemory.Allocate(staging.Size, 256, out _);
-            OrderAfterDeferredCopies(address, staging.Size);
+            OrderAfterDeferredCopies(address, staging.Size, LabelLandCause.Gather);
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
             staged.EncodeGather(context.CommandBuffer, address, staging, pristine, context);
             if (context.WantsEncodedLabels)
@@ -120,7 +158,7 @@ internal sealed partial class MetalRenderHost
     // (MetalImageCache.ResolveUploadSource): the GPU copies them in from the windows, behind that work.
     void IMetalImageCacheOwner.GatherStagedRange(ulong address, in MetalGuestRange staging)
     {
-        OrderAfterDeferredCopies(address, staging.Size);
+        OrderAfterDeferredCopies(address, staging.Size, LabelLandCause.Gather);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
         StagedStorage.EncodeGather(context.CommandBuffer, address, staging, default, context);
         if (context.WantsEncodedLabels)
@@ -154,7 +192,7 @@ internal sealed partial class MetalRenderHost
         }
 
         var pristine = _guestMemory.Allocate(staging.Size, 256, out _);
-        OrderAfterDeferredCopies(address, staging.Size);
+        OrderAfterDeferredCopies(address, staging.Size, LabelLandCause.Gather);
         var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
         if (StagedStorage.TryEncodeWholeGather(context.CommandBuffer, address, staging, pristine, context))
         {
@@ -322,7 +360,7 @@ internal sealed partial class MetalRenderHost
             // The CPU staged what guest memory holds now. Bytes the GPU has yet to write
             // there are copied in by the GPU, behind that work.
             entry.Gathered = true;
-            OrderAfterDeferredCopies(entry.Address, size);
+            OrderAfterDeferredCopies(entry.Address, size, LabelLandCause.Gather);
             var context = ((IMetalImageCacheOwner)this).BeginTransfer(MetalTransferCause.GuestCopy);
             _stagedRanges!.Touch(entry, context.SubmissionSerial);
             staged.EncodeGather(context.CommandBuffer, entry.Address, entry.Staging, entry.Pristine, context);

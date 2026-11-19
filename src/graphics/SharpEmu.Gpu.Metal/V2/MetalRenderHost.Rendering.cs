@@ -259,6 +259,9 @@ internal sealed partial class MetalRenderHost
     // pays it again. Counted as the descriptor is built, from the real pixel size.
     private long _loadBytes;
     private long _storeBytes;
+
+    // The open pass's attachment bytes (NoteAttachmentTraffic), 0 with none open: the commit-when-dry bar.
+    private long _openPassAttachmentBytes;
     private long _clearedBytes;
     private long _passesEmpty;
     private long _discardedBytes;
@@ -314,8 +317,10 @@ internal sealed partial class MetalRenderHost
     private static long AttachmentBytes(in RenderingState state, uint texelBytes) =>
         MetalPassStores.AttachmentBytes(state.Width, state.Height, state.Samples, texelBytes);
 
-    private void NoteAttachmentTraffic(in RenderingState state)
+    // Returns the pass's attachment bytes: what ending it early stores, and resuming it loads, once more.
+    private long NoteAttachmentTraffic(in RenderingState state)
     {
+        long attached = 0;
         for (var index = 0; index < state.ColorAttachmentCount; index++)
         {
             var bytes = AttachmentBytes(
@@ -336,6 +341,7 @@ internal sealed partial class MetalRenderHost
             }
 
             _storeBytes += bytes;
+            attached += bytes;
         }
 
         ref readonly var depthStencil = ref state.DepthStencilAttachment;
@@ -352,6 +358,7 @@ internal sealed partial class MetalRenderHost
             }
 
             _storeBytes += bytes;
+            attached += bytes;
         }
 
         if (depthStencil.HasStencil && depthStencil.View.Handle != 0)
@@ -369,7 +376,9 @@ internal sealed partial class MetalRenderHost
             }
 
             _storeBytes += bytes;
+            attached += bytes;
         }
+        return attached;
     }
 
     internal (long Clear, long Target, long Transfer, long Compute, long Flush, long Present, long Other,
@@ -1112,6 +1121,13 @@ internal sealed partial class MetalRenderHost
                     NoteColorTargetRebuilt(index);
                 }
 
+                if (index < _attachmentCount)
+                {
+                    _imageCache.NoteRefusedAttachmentOpened(
+                        _attachmentTextures[index], _attachmentRealLevels[index], _attachmentRealLayers[index],
+                        loads: !clears && !elided, depth: false);
+                }
+
                 if (index < ownAttachments)
                 {
                     NoteColorTargetDrawn(index);
@@ -1142,6 +1158,9 @@ internal sealed partial class MetalRenderHost
 
             if (depthStencil.HasDepth && depthStencil.View.Handle != 0)
             {
+                _imageCache.NoteRefusedAttachmentOpened(
+                    _depthAttachmentTexture, _depthAttachmentRealLevel, _depthAttachmentRealLayer,
+                    loads: !depthStencil.DepthClear, depth: true);
                 attached = true;
                 var depth = MetalNative.Send(descriptor, SelDepthAttachment);
                 MetalNative.SendVoid(depth, SelSetTexture, depthTexture);
@@ -1245,7 +1264,7 @@ internal sealed partial class MetalRenderHost
         _renderPasses++;
         var loadBefore = _loadBytes;
         var storeBefore = _storeBytes;
-        NoteAttachmentTraffic(in opening);
+        _openPassAttachmentBytes = NoteAttachmentTraffic(in opening);
         if (PassProfileEnabled)
         {
             PassProfileDescribe(in opening, _loadBytes - loadBefore, _storeBytes - storeBefore);
@@ -1368,6 +1387,7 @@ internal sealed partial class MetalRenderHost
             OcclusionAuditClose();
             EndAndReleaseEncoder(_renderEncoder, render: true);
             _renderEncoder = 0;
+            _openPassAttachmentBytes = 0;
             _passScratchMask = 0;
             // The fills the pass held land right behind it (MetalRenderHost.DeferredFills.cs).
             EncodeDeferredFills();
@@ -1444,6 +1464,7 @@ internal sealed partial class MetalRenderHost
     private nint EnsureComputeEncoder(bool materializeClears)
     {
         NoteRecordedWork();
+        var foldAtOpen = false;
         if (_computeEncoder == 0)
         {
             if (_renderingActive)
@@ -1454,7 +1475,17 @@ internal sealed partial class MetalRenderHost
 
             EndRendering();
             EncodeStagedStores();
-            EncodeDeferredLabelCopies();
+            // Copies that land here and need no shared event land in the encoder this opens, after its fence wait
+            // (MetalRenderHost.LabelScatter.cs), instead of in a copy encoder of their own ahead of it. A clear this
+            // dispatch sees cannot land after them: MaterializePendingClearsForCompute below encodes it through
+            // BeginTransfer, whose EndEncoders lands these copies first (EncodeDeferredLabelCopies), so the fold then
+            // finds none.
+            foldAtOpen = _deferredLabelCopies.Count != 0 && (!LabelsAtCommit || _landDeferredLabels) &&
+                !_encodingDeferredLabels && MayFoldHeldCopies(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_deferredLabelCopies));
+            if (!foldAtOpen)
+            {
+                EncodeDeferredLabelCopies(LabelLandCause.EnsureCompute);
+            }
         }
 
         // Only the clears this dispatch can see are encoded ahead of it; the rest keep
@@ -1496,17 +1527,39 @@ internal sealed partial class MetalRenderHost
 
         // A new encoder has none of the residency the last one was given.
         ForgetResidentResources();
+        _computeEncodersOpened++;
+        if (foldAtOpen && _deferredLabelCopies.Count != 0 && (!LabelsAtCommit || _landDeferredLabels))
+        {
+            if (_labelLandCause == LabelLandCause.None)
+            {
+                _labelLandCause = LabelLandCause.EnsureCompute;
+            }
+
+            if (!TryLandHeldCopiesInComputeEncoder())
+            {
+                // The scatter declined the batch: it lands as before, ahead of an encoder of its own.
+                EndComputeEncoder();
+                EncodeDeferredLabelCopies(LabelLandCause.EnsureCompute);
+                return EnsureComputeEncoder(materializeClears);
+            }
+        }
+
         return _computeEncoder;
     }
 
-    // An encoder opened again after the pipeline was bound has no pipeline state.
+    // An encoder opened again after the pipeline was bound has no pipeline state. The bound
+    // dispatch's pipeline binds the state BindPipeline chose for its buffer words (the
+    // variant, once built; MetalRenderHost.BufferWordVariants), any other its generic state.
     private void EnsureComputePipelineState(nint encoder, MetalPipelineEntry entry)
     {
         UsePipelineState(entry);
-        if (_boundComputePipeline != entry.State)
+        var state = _pendingComputeState != 0 && ReferenceEquals(entry, _pendingComputePipeline)
+            ? _pendingComputeState
+            : entry.State;
+        if (_boundComputePipeline != state)
         {
-            MetalNative.SendVoid(encoder, SelSetComputePipelineState, entry.State);
-            _boundComputePipeline = entry.State;
+            MetalNative.SendVoid(encoder, SelSetComputePipelineState, state);
+            _boundComputePipeline = state;
             SignpostPipeline(encoder, entry);
         }
     }
@@ -1565,8 +1618,12 @@ internal sealed partial class MetalRenderHost
             return;
         }
 
-        EnsureComputePipelineState(EnsureComputeEncoder(), entry);
+        var encoder = EnsureComputeEncoder();
+        // Once per dispatch: the variant made for the words the committed stage holds, once
+        // built, else the generic state (zero), with the reason counted.
         _pendingComputePipeline = entry;
+        _pendingComputeState = ComputeStateOf(entry);
+        EnsureComputePipelineState(encoder, entry);
     }
 
     private MetalPipelineEntry? _pendingComputePipeline;
@@ -1582,13 +1639,20 @@ internal sealed partial class MetalRenderHost
 
         var entry = _pendingGraphicsPipeline ??
             throw Fatal("A draw has no bound Metal render pipeline state.");
-        if (!ReferenceEquals(_boundGraphicsPipeline, entry))
+        var entryChanged = !ReferenceEquals(_boundGraphicsPipeline, entry);
+        if (entryChanged)
         {
             // Every later draw of this encoder with the entry (its rectangle states too) is
             // in the same command buffer.
             UsePipelineState(entry);
-            MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, entry.State);
-            _boundRenderState = entry.State;
+        }
+
+        // The variant made for this draw's buffer words, once built (MetalRenderHost.BufferWordVariants).
+        var renderState = GraphicsStateOf(entry);
+        if (entryChanged)
+        {
+            MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, renderState);
+            _boundRenderState = renderState;
             SignpostPipeline(_renderEncoder, entry);
             MetalV2Native.SendVoidValue(
                 _renderEncoder, SelSetCullMode, (nuint)(MetalV2Diagnostics.IgnoreCulling ? Mtl.CullModeNone : entry.CullMode));
@@ -1596,6 +1660,12 @@ internal sealed partial class MetalRenderHost
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetDepthClipMode, (nuint)entry.DepthClipMode);
             MetalV2Native.SendVoidValue(_renderEncoder, SelSetTriangleFillMode, (nuint)entry.FillMode);
             _boundGraphicsPipeline = entry;
+        }
+        else if (entry.BufferWordVariants is not null && _boundRenderState != renderState)
+        {
+            // The same entry, another layout: its variant (or the generic state) in place of the last.
+            MetalNative.SendVoid(_renderEncoder, SelSetRenderPipelineState, renderState);
+            _boundRenderState = renderState;
         }
 
         // Encoder state survives between draws, so only what changed is sent. A draw
@@ -1850,6 +1920,9 @@ internal sealed partial class MetalRenderHost
 
     public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
+        _overlapProbe?.NoteDraw();
+        _drawsInBuffer++;
         var started = DrawTimingStart();
         ApplyGraphicsState();
         var entry = _boundGraphicsPipeline!;
@@ -1902,6 +1975,9 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
+        _overlapProbe?.NoteDraw();
+        _drawsInBuffer++;
         var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
@@ -1964,6 +2040,9 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndirect(BufferBinding arguments)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
+        _overlapProbe?.NoteDraw();
+        _drawsInBuffer++;
         var started = DrawTimingStart();
         // The guest's argument layout is (vertexCount, instanceCount, firstVertex,
         // firstInstance), which is exactly MTLDrawPrimitivesIndirectArguments.
@@ -2029,6 +2108,9 @@ internal sealed partial class MetalRenderHost
 
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
+        _overlapProbe?.NoteDraw();
+        _drawsInBuffer++;
         var started = DrawTimingStart();
         if (_indexBuffer == 0)
         {
@@ -2102,6 +2184,7 @@ internal sealed partial class MetalRenderHost
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: true);
         var started = DrawTimingStart();
         // A persistent-thread kernel spins on memory other work publishes, which can be what a
         // label copy held for the commit writes: the copy would land only after the kernel had
@@ -2109,10 +2192,10 @@ internal sealed partial class MetalRenderHost
         // Everything held lands ahead of such a dispatch instead.
         if (LabelsAtCommit && _deferredLabelCopies.Count != 0 && _pendingComputePipeline is { PersistentThreads: true })
         {
-            OrderAfterDeferredCopies(0, ulong.MaxValue);
+            OrderAfterDeferredCopies(0, ulong.MaxValue, LabelLandCause.Persistent);
         }
 
-        var encoder = EnsureComputeEncoder();
+        var encoder = EncodeStagedLabelReads(EnsureComputeEncoder());
         var entry = _pendingComputePipeline ?? throw Fatal("A dispatch has no bound Metal compute pipeline state.");
         if (entry.PersistentThreads && PersistentThreadGroups != 0 && groupsY <= 1 && groupsZ <= 1 &&
             groupsX > PersistentThreadGroups)
@@ -2206,6 +2289,7 @@ internal sealed partial class MetalRenderHost
     // indirect counts are dispatched as the guest wrote them, as before; the order is not used.
     public bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical)
     {
+        using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: true);
         var range = _guestMemory.Resolve(argumentsAddress, 3 * sizeof(uint));
         if (!range.IsValid)
         {
@@ -2213,10 +2297,10 @@ internal sealed partial class MetalRenderHost
         }
 
         // The GPU reads the group counts where the dispatch sits in the stream.
-        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint));
+        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint), LabelLandCause.Indirect);
         TraceIndirectDispatch(argumentsAddress);
         var started = DrawTimingStart();
-        var encoder = EnsureComputeEncoder();
+        var encoder = EncodeStagedLabelReads(EnsureComputeEncoder());
         var entry = _pendingComputePipeline ??
             throw Fatal("An indirect dispatch has no bound Metal compute pipeline state.");
         EnsureComputePipelineState(encoder, entry);

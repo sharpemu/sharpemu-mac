@@ -123,6 +123,12 @@ public static class GpuHostMain
                 }
                 finally
                 {
+                    if (client.ParentExited)
+                    {
+                        // SHARPEMU_GPU_WRITE_RING=1: answer the fault ranges the guest process left behind.
+                        SharpEmu.HLE.GpuWriteRing.ReportFaultRangesOf(parent);
+                    }
+
                     // Ends the pump below, after asking the window to close.
                     HostMainThread.Shutdown();
                 }

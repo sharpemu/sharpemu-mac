@@ -164,6 +164,22 @@ public interface IShaderPipelineProvider
     // executor then stops skipping culling primitive-shader draws; see IGuestGpuBackend.
     bool SupportsPrimitiveShaderMeshPipelines => false;
 
+    // The cache-wide state a draw's resolution depends on beyond its registers and guest reads (program cache epoch,
+    // learned device loads, header registrations...), for the look-ahead verify's fatal (ParallelProgramPrefetch).
+    string DescribeProgramState() => string.Empty;
+
+    // The part of that state that decides which program entry a lookup finds: it moves when an entry is replaced
+    // (a re-plan) or refused, when a device data load is learned and when the vertex tables change. A resolution made
+    // under another stamp may hold the entry a lookup made now would not find (ParallelProgramPrefetch refuses it).
+    ProgramStateStamp ProgramState => default;
+
+    // How many resolver shards the provider's resolution state is split into (ResolveShards): ParallelProgramPrefetch
+    // runs one resolving thread per shard. 1 resolves everything under one lock, as before.
+    int ResolveShardCount => 1;
+
+    // The shard a draw's (or a dispatch's) resolution runs under: a stable function of the provider's per-shard key.
+    int ResolveShardOf(RegisterBanks banks, bool compute) => 0;
+
     // Optional capture of rejected stage inputs; it never admits or executes the draw.
     void RecordUnsupportedGraphics(VertexStageRegisters vertex, ContextRegisters context) { }
 
@@ -333,3 +349,6 @@ public interface IShaderPipelineProvider
         return null;
     }
 }
+
+/// <summary>See <see cref="IShaderPipelineProvider.ProgramState"/>.</summary>
+public readonly record struct ProgramStateStamp(long ContentEpoch, long DeviceData, long Tables, long Registrations = 0);

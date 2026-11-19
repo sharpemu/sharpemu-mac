@@ -109,6 +109,54 @@ public sealed class AgcSubmissionPreparationTests
         Assert.Equal(shadowedRegisters, AgcExports.GetGeometryCaptureRegistersForTests(memory).Count);
     }
 
+    // The split backend's host reads the stream from guest memory: a copy made at submit was
+    // dropped unread on every submit.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SubmitCopiesTheCommandBufferOnlyForAHostThatReadsTheCopy(bool consumesCopy)
+    {
+        var memory = Memory();
+        SubmissionBackend backend = consumesCopy ? new SubmissionBackend() : new StreamReadingBackend();
+        using var scope = new BackendScope(backend);
+        Assert.Equal(0, Submit(memory, "dcb"));
+        Assert.Equal(1, backend.Admissions);
+        Assert.Equal(consumesCopy, backend.LastSnapshots is SubmittedCommandBuffer);
+        if (!consumesCopy) Assert.Null(backend.LastSnapshots);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SubmitOfAnUnmappedCommandBufferIsAMemoryFaultWhetherOrNotTheHostReadsTheCopy(bool consumesCopy)
+    {
+        var memory = Memory();
+        Write(memory, Packet, Base + 0x100000); // Outside the 0x1000 bytes that are mapped.
+        SubmissionBackend backend = consumesCopy ? new SubmissionBackend() : new StreamReadingBackend();
+        using var scope = new BackendScope(backend);
+        Assert.Equal(unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT), Submit(memory, "dcb"));
+        Assert.Equal(0, backend.Admissions);
+    }
+
+    // CanRead answers for one mapping; the copy read a buffer that spans mappings in pieces.
+    [Fact]
+    public void SubmitWithoutACopyStillTakesABufferThatOnlyAReadCanAnswerFor()
+    {
+        var memory = new ReadOnlyAnswers(Memory());
+        var backend = new StreamReadingBackend();
+        using var scope = new BackendScope(backend);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = Packet;
+        Assert.Equal(0, AgcExports.DriverSubmitDcb(context));
+        Assert.Equal(1, backend.Admissions);
+    }
+
+    private sealed class ReadOnlyAnswers(FakeCpuMemory inner) : ICpuMemory
+    {
+        public bool TryRead(ulong virtualAddress, Span<byte> destination) => inner.TryRead(virtualAddress, destination);
+        public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source) => inner.TryWrite(virtualAddress, source);
+    }
+
     private static FakeCpuMemory Memory()
     {
         var memory = new FakeCpuMemory(Base, 0x1000);
@@ -149,11 +197,11 @@ public sealed class AgcSubmissionPreparationTests
     }
     private class SubmissionBackend : IGuestGpuBackend
     {
-        public int Admissions; public uint LastQueue;
+        public int Admissions; public uint LastQueue; public object? LastSnapshots;
         public Action? OnAdmission;
         public string BackendName => "managed preparation control";
         public void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
-        { OnAdmission?.Invoke(); LastQueue = queue; Admissions++; }
+        { OnAdmission?.Invoke(); LastQueue = queue; LastSnapshots = geometrySnapshots; Admissions++; }
         public void EnsureStarted(uint width, uint height) => throw new NotSupportedException();
         public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error) => throw new NotSupportedException();
         public IGuestCompiledShader GetDepthOnlyFragmentShader() => throw new NotSupportedException();
@@ -171,6 +219,10 @@ public sealed class AgcSubmissionPreparationTests
     private sealed class SnapshotConsumingBackend : SubmissionBackend, IGuestGpuBackend
     {
         public bool ConsumesSubmittedGeometrySnapshots => true;
+    }
+    private sealed class StreamReadingBackend : SubmissionBackend, IGuestGpuBackend
+    {
+        public bool ConsumesSubmittedCommandBytes => false;
     }
     private sealed class PreparingBackend : SubmissionBackend, IGuestSubmissionPreparationBackend
     {

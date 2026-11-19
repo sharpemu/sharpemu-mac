@@ -112,9 +112,17 @@ internal sealed partial class ShaderPipelineCache
         return _kernelDemands.GetValue(program, _ => new KernelDemand(evaluable));
     }
 
+    // SHARPEMU_METAL_KERNEL_PREDICTIONS=1: predict on a host that consumes no prediction (Metal) as before, for comparison.
+    private static readonly bool PredictWithoutConsumer = Environment.GetEnvironmentVariable("SHARPEMU_METAL_KERNEL_PREDICTIONS") == "1";
+
+    // Whether this cache's dispatches are evaluated on the CPU at all: only on a host that does something with a
+    // prediction (IShaderPipelineHost.ConsumesKernelPredictions); elsewhere one only costs time and refuses the
+    // dispatch's prefetch job (ComputePrefetchRefusal.Prediction).
+    private bool PredictsKernels => _host.ConsumesKernelPredictions || PredictWithoutConsumer;
+
     // Whether WithPrediction evaluates the kernel rather than returning the program as it is.
-    private static bool WouldPredict(ComputeProgram program, KernelDemand? kernel, ShaderSource? source) =>
-        kernel is not null && source is not null && program.Available && !program.Consumed &&
+    private bool WouldPredict(ComputeProgram program, KernelDemand? kernel, ShaderSource? source) =>
+        PredictsKernels && kernel is not null && source is not null && program.Available && !program.Consumed &&
         source.Registered.Frontend?.NormalizeBufferDescriptor is null;
 
     private ComputeProgram WithPrediction(

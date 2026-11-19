@@ -50,12 +50,24 @@ internal static class KernelPthreadState
         return _currentThreadHandle;
     }
 
+    // SHARPEMU_HLE_FAST_THREADID=0 keeps scePthreadGetthreadid on the managed export.
+    internal static readonly bool FastThreadIdEnabled =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_HLE_FAST_THREADID"), "0", StringComparison.Ordinal);
+
     internal static ulong GetCurrentThreadUniqueId()
     {
         var guestThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
         if (guestThreadHandle != 0)
         {
-            return EnsureGuestThreadIdentity(guestThreadHandle).UniqueId;
+            var uniqueId = EnsureGuestThreadIdentity(guestThreadHandle).UniqueId;
+            // The native scePthreadGetthreadid stub answers from here on while this handle stays
+            // bound to the host thread (a no-op unless the block publishes this very handle).
+            if (FastThreadIdEnabled)
+            {
+                GuestFastPath.PublishThreadUniqueId(guestThreadHandle, uniqueId);
+            }
+
+            return uniqueId;
         }
 
         EnsureCurrentThreadRegistered();

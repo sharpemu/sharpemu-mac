@@ -143,6 +143,52 @@ internal static class MetalV2Diagnostics
     public static readonly bool DeferEndOfPipe =
         DeferBarriers && Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFER_EOP") == "1";
 
+    // SHARPEMU_METAL_V2_EARLY_LABEL_PROBE=1 (or =all) is a measurement, not a mode to play in: a small
+    // command-processor write the interpreter flags causal (=all: any of up to eight bytes) reaches guest
+    // memory once the last flip recorded before it has completed, instead of after the GPU work recorded
+    // before the write. A title that paces its frames on such a word then submits its next frame while
+    // this one is still on the GPU, which is not what the console does: the guest may reuse memory the
+    // unfinished work still reads. It exists to measure what one frame of overlap would be worth.
+    // A comma-separated list of hex addresses instead narrows it to the writes that start at one of them.
+    public static readonly ulong[] EarlyLabelProbeAddresses = ParseEarlyLabelAddresses(
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EARLY_LABEL_PROBE"));
+
+    // SHARPEMU_FLIP_AHEAD=1 (experimental, default off): a GPU flip hands the presenter a copy of its
+    // frame, blitted in the stream at the flip, and tells video-out the flip is recorded, so the guest
+    // may learn of it before the GPU finishes it (VideoOutExports.FlipAhead.cs, MetalFlipCopyPool).
+    // SHARPEMU_FRAME_OVERLAP_PROBE=1 turns it on too.
+    public static readonly bool FlipAhead = Environment.GetEnvironmentVariable("SHARPEMU_FLIP_AHEAD") == "1" ||
+        SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled;
+
+    public static readonly int EarlyLabelProbe =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_EARLY_LABEL_PROBE") switch
+        {
+            "1" => 1,
+            "all" => 2,
+            _ => EarlyLabelProbeAddresses.Length != 0 ? 3 : 0,
+        };
+
+    private static ulong[] ParseEarlyLabelAddresses(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value is "1" or "all")
+        {
+            return [];
+        }
+
+        var addresses = new List<ulong>();
+        foreach (var part in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var text = part.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? part[2..] : part;
+            if (ulong.TryParse(text, System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture, out var address))
+            {
+                addresses.Add(address);
+            }
+        }
+
+        return [.. addresses];
+    }
+
     // SHARPEMU_METAL_V2_REPORT_VERTEX_LAYOUT=1 keeps the vertex descriptor each
     // pipeline was built with, for the per-draw report: a stride or an attribute format
     // that does not match what the program fetches is invisible in everything else.
@@ -220,11 +266,14 @@ internal static class MetalV2Diagnostics
 
     // SHARPEMU_METAL_V2_HOST_KERNEL_COPY: what the host does with a recognised copy or fill
     // kernel the image paths refuse whose destination already holds its result
-    // (MetalRenderHost.KernelFills). 0 (the default) runs it as the dispatch it is; identical
-    // consumes it and writes nothing; verify runs it and, once it completes, checks that the
-    // destination still holds what was there, reporting each kernel that would have been
-    // consumed wrongly. write (host writes of the changed pages) needs a ledger of the GPU's
-    // reads that does not exist yet, so it runs as 0.
+    // (MetalRenderHost.KernelFills). identical (the default) consumes it and writes nothing:
+    // a kernel is only compared when no recorded GPU write, overlay or image covers either
+    // side, so memory is what the dispatch would have read and written; 0 runs it as the
+    // dispatch it is; verify runs it and, once it completes, checks that the destination still
+    // holds what was there, reporting each kernel that would have been consumed wrongly. write
+    // (host writes of the changed pages) needs a ledger of the GPU's reads that does not exist
+    // yet, so it runs as 0. Demon's Souls: ~41% of its ~200 table copies per frame are
+    // identical; a verify run checked 169k of them with no mismatch.
     public static readonly MetalHostKernelCopyMode HostKernelCopy =
         ParseHostKernelCopy(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_HOST_KERNEL_COPY"));
 
@@ -240,9 +289,9 @@ internal static class MetalV2Diagnostics
     {
         switch (text)
         {
-            case null or "" or "0":
+            case "0":
                 return MetalHostKernelCopyMode.Off;
-            case "identical":
+            case null or "" or "identical":
                 return MetalHostKernelCopyMode.Identical;
             case "verify":
                 return MetalHostKernelCopyMode.Verify;
@@ -421,6 +470,30 @@ internal static class MetalV2Diagnostics
 
     public static readonly int HoldFlushBusyMaxMicroseconds =
         PositiveInt("SHARPEMU_METAL_V2_FLUSH_HOLD_BUSY_US", 16000);
+
+    // SHARPEMU_METAL_V2_COMMIT_WHEN_GPU_DRY=1 (off by default) commits early for a starved GPU; off, the open buffer
+    // is left to the stream's own flushes and limits. Off because it bought nothing where it was measured: Demon's
+    // Souls, same build and scene, 82.2 ms a frame with it and 82.1 without, for 17 more render passes and 18 more
+    // commits a frame. The GPU does starve there (~17 ms a frame), but while the worker records passes that are cheap
+    // for the GPU and dear for the CPU; the frame ends when the passes recorded last have run, and those were never
+    // waiting. On, a draw or dispatch about to prepare commits it once the GPU has finished
+    // everything committed and the buffer holds enough to be worth a split, ending an open render
+    // pass if one is (MetalCommandStream.cs, GpuDryVerdict). The bars: at least
+    // SHARPEMU_METAL_V2_GPU_DRY_MIN_COMMANDS draws and dispatches since the last commit, and at least
+    // SHARPEMU_METAL_V2_GPU_DRY_MIN_US of recording plus SHARPEMU_METAL_V2_GPU_DRY_SPLIT_PCT percent of
+    // what splitting the open pass costs the GPU, estimated as its attachment bytes stored and loaded
+    // once more at SHARPEMU_METAL_V2_GPU_DRY_SPLIT_US_PER_MB microseconds per MB (Demon's Souls: a
+    // 16 MB target loaded and stored in ~0.5 ms, so the 68 MB G-buffer set ~1.6 ms a split).
+    public static readonly bool CommitWhenGpuDry =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_COMMIT_WHEN_GPU_DRY"), "1", StringComparison.Ordinal);
+
+    public static readonly int GpuDryMinCommands = PositiveInt("SHARPEMU_METAL_V2_GPU_DRY_MIN_COMMANDS", 64);
+
+    public static readonly int GpuDryMinMicroseconds = PositiveInt("SHARPEMU_METAL_V2_GPU_DRY_MIN_US", 500);
+
+    public static readonly int GpuDrySplitMicrosecondsPerMb = PositiveInt("SHARPEMU_METAL_V2_GPU_DRY_SPLIT_US_PER_MB", 12);
+
+    public static readonly int GpuDrySplitPercent = PositiveInt("SHARPEMU_METAL_V2_GPU_DRY_SPLIT_PCT", 200);
 
     // SHARPEMU_METAL_V2_JOIN_DEVICE_RANGES=0 refuses every depth-only and subset join of a
     // device-address draw while a label copy is held, as before. Otherwise only one with a held

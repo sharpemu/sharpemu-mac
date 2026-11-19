@@ -187,7 +187,8 @@ public sealed unsafe partial class MetalClearFoldingTests
     }
 
     [Theory]
-    [InlineData(null, "Off")]
+    [InlineData(null, "Identical")]
+    [InlineData("", "Identical")]
     [InlineData("0", "Off")]
     [InlineData("identical", "Identical")]
     [InlineData("verify", "Verify")]

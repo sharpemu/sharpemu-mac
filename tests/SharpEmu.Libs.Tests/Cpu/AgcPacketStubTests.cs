@@ -29,7 +29,30 @@ public sealed unsafe class AgcPacketStubTests
         {
             "pFLArOT53+w", "LHFXRrlTPD8", "w4-d0n60hdo", "-HOOCn0JY48", "ZvwO9euwYzc", "hvUfkUIQcOE", "tSBxhAPyytQ",
             "8N2tmT3jmC8", "GIIW2J37e70", "l4fM9K-Lyks", "Yw0jKSqop+E", "B+aG9DUnTKA", "q88lQ+GP5Yk", "k3GhuSNmBLU",
+            IndexIndirectNid, DrawIndirectNid,
         }.Select(nid => new object[] { nid });
+
+    // sceAgcDcbDrawIndexIndirect / sceAgcDcbDrawIndirect: rdx is a draw modifier whose slots the stub decodes.
+    private const string IndexIndirectNid = "t1vNu082-jM";
+    private const string DrawIndirectNid = "1q1titRBL6o";
+
+    // A draw modifier that covers every branch of the slot decode on purpose: stages 3 and 5 against
+    // the others, each of bits 0, 1 and 2, bit 8 (the initiator) and bit 32 (which clears it), with
+    // random fields and high bits.
+    private static ulong DrawModifier(System.Random random)
+    {
+        var low = (uint)random.NextInt64(0, 1L << 32);
+        var stage = random.Next(4) switch { 0 => 3u, 1 => 5u, _ => (uint)random.Next(8) };
+        low = (low & 0x1FFF_FFF8u) | (stage << 29) | (uint)random.Next(8);
+        var high = random.Next(4) switch
+        {
+            0 => 0u,
+            1 => 1u,
+            2 => (uint)random.NextInt64(0, 1L << 32) & ~1u,
+            _ => (uint)random.NextInt64(0, 1L << 32),
+        };
+        return ((ulong)high << 32) | low;
+    }
 
     [Theory]
     [MemberData(nameof(Nids))]
@@ -68,6 +91,10 @@ public sealed unsafe class AgcPacketStubTests
                 _ => -64,
             };
             var arguments = new[] { Pick(), Pick(), Pick(), Pick() };
+            if (nid is IndexIndirectNid or DrawIndirectNid && random.Next(4) != 0)
+            {
+                arguments[1] = DrawModifier(random);
+            }
             var nullBuffer = random.Next(25) == 0;
 
             using var managedBlock = new Block();
@@ -145,19 +172,34 @@ public sealed unsafe class AgcPacketStubTests
         var random = new System.Random(unchecked(StableSeed(nid) ^ 0x77A1));
         var stubRan = 0;
         var declinedWithRoom = 0;
+        var nullSourceRan = 0;
+        var nullSourceDeclines = 0;
         for (var iteration = 0; iteration < 1500; iteration++)
         {
             var reserved = (uint)random.Next(3) * 3;
-            var count = random.Next(12) switch
-            {
-                0 => 0,
-                1 => 1,
-                2 => 65,
-                3 => 64,
-                4 => 33,
-                5 => 32,
-                _ => random.Next(1, 20),
-            };
+            // A null source (the range builder then reserves the payload for the caller) now and
+            // then, with counts up to the packet's limit and past it: nothing is copied then, so the
+            // buffer's room may run far past the block.
+            var valuesNull = random.Next(isRange ? 4 : 40) == 0;
+            var count = valuesNull && isRange && random.Next(2) == 0
+                ? random.Next(6) switch
+                {
+                    0 => 0x3FFF,
+                    1 => 0x4000,
+                    2 => 0x3FFE,
+                    3 => 65,
+                    _ => random.Next(1, 0x4001),
+                }
+                : random.Next(12) switch
+                {
+                    0 => 0,
+                    1 => 1,
+                    2 => 65,
+                    3 => 64,
+                    4 => 33,
+                    5 => 32,
+                    _ => random.Next(1, 20),
+                };
             var packetDwords = (isRange ? 4 : 2) + count;
             var room = random.Next(6) switch
             {
@@ -176,7 +218,6 @@ public sealed unsafe class AgcPacketStubTests
 
             // The source: the block's tail (clear of the packet area) or, now and then, inside the packet area.
             var valuesInside = random.Next(8) == 0;
-            var valuesNull = random.Next(40) == 0;
             var sourceOffset = valuesInside ? PacketOffset + 4 * random.Next(0, 24) : ValuesOffset;
             var firstOffset = random.Next(6) switch
             {
@@ -258,17 +299,27 @@ public sealed unsafe class AgcPacketStubTests
                     declinedWithRoom++;
                 }
 
+                // The range builder with a null source is the stub's for every count the export takes.
+                Assert.False(
+                    isRange && valuesNull && !nullBuffer && room >= packetDwords * 4 + (int)reserved * 4 &&
+                        count is >= 1 and <= AgcExports.RangeStubMaxReservedValues && offsetArgument is >= 1 and <= 0x3FF,
+                    $"{nid}: the stub declined a null-source range of {count} values the export reserves in place");
+                nullSourceDeclines += isRange && valuesNull ? 1 : 0;
+
                 continue;
             }
 
             stubRan++;
+            nullSourceRan += valuesNull ? 1 : 0;
             Assert.False(context.GuestCallbackDeclined, $"{nid}: the stub built a packet where the export had to call back");
             Assert.False(nullBuffer, nid + ": the stub accepted a null buffer");
+            Assert.False(valuesNull && !isRange, nid + ": the stub accepted null pairs");
             Assert.Equal(context[CpuRegister.Rax] - (ulong)managedBlock.Pointer, stubRax - (ulong)stubBlock.Pointer);
             Assert.Equal(managedBlock.Normalized(), stubBlock.Normalized());
         }
 
         Assert.True(stubRan > 150, $"{nid}: the stub took the fast path only {stubRan} times");
+        Assert.True(!isRange || nullSourceRan > 40, $"{nid}: the stub reserved a null-source payload only {nullSourceRan} times ({nullSourceDeclines} declines)");
         Assert.True(declinedWithRoom < 40, $"{nid}: the stub declined {declinedWithRoom} calls the export builds as one in-place packet");
     }
 
@@ -405,6 +456,142 @@ public sealed unsafe class AgcPacketStubTests
         }
     }
 
+    private const string PayloadAddressNid = "V++UgBtQhn0";
+
+    // The stub's null-source count limit is the export's packet limit.
+    [Fact]
+    public void TheNullSourceRangeLimitIsTheExportsPacketLimit()
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        foreach (var (count, valid) in new[] { (AgcExports.RangeStubMaxReservedValues, true), (AgcExports.RangeStubMaxReservedValues + 1, false) })
+        {
+            var context = new CpuContext(new RegionMemory(null, 0), Generation.Gen5);
+            context[CpuRegister.Rdi] = (ulong)count;
+            Assert.True(manager.TryDispatch("bxGoVxpdSPQ", context, out _));   // sceAgcCbSetShRegisterRangeDirectGetSize
+            Assert.Equal(valid, context[CpuRegister.Rax] != 0);
+        }
+    }
+
+    [Fact]
+    public void ThePayloadAddressStubAnswersWhatTheExportAnswersAndDeclinesEverythingElse()
+    {
+        if (OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
+        using var harness = new StubHarness(fallback => DirectExecutionBackend.EmitGuestAgcPayloadAddressStub(fallback), echoArguments: true);
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        var random = new System.Random(unchecked(StableSeed(PayloadAddressNid) ^ 0x4A11));
+        var managedRegion = (byte*)NativeMemory.AlignedAlloc(PatchRegionBytes, 0x1000);
+        var stubRegion = (byte*)NativeMemory.AlignedAlloc(PatchRegionBytes, 0x1000);
+        try
+        {
+            var stubRan = 0;
+            var ranByType = new int[3];
+            for (var iteration = 0; iteration < 3000; iteration++)
+            {
+                // Where the answer and the packet sit: inside a page, flush against its end, a few
+                // bytes over it, or a pointer the stub must not touch at all.
+                int Offset(int size) => random.Next(8) switch
+                {
+                    0 => 0x1000 - size,
+                    1 => 0x1000 - size + random.Next(1, 8),
+                    2 => 0x2000 - size,
+                    _ => random.Next(0, 0x2000 - size),
+                };
+
+                ulong? Special() => random.Next(14) != 0 ? null : random.Next(4) switch
+                {
+                    0 => 0UL,
+                    1 => (ulong)random.Next(1, 0x10000),
+                    2 => 0x8000_0000_0000UL + (ulong)random.Next(0, 0x1000),
+                    _ => 0xFFFF_8000_0000_0000UL | (ulong)random.NextInt64(0, 0x7FFF_FFFF_FFFF),
+                };
+
+                var outOffset = Offset(8);
+                var packetOffset = Offset(4);
+                // The answer and the header must not overlap, or the order of the read and the write shows.
+                if (Math.Abs(outOffset - packetOffset) < 8)
+                {
+                    continue;
+                }
+
+                var outSpecial = Special();
+                var packetSpecial = Special();
+                // Type: 0 (also with high bits that the export's int conversion drops), 1, or anything.
+                var type = random.Next(6) switch
+                {
+                    0 or 1 => 0UL,
+                    2 => 0x1_0000_0000UL * (ulong)random.Next(1, 1 << 30),
+                    3 => 1UL,
+                    _ => (ulong)random.NextInt64() | ((ulong)random.Next(2) << 63),
+                };
+                var header = random.Next(4) switch
+                {
+                    0 => 0xC000_0000u | AgcExports.PayloadAddressCountMask | (uint)random.Next(0x10000),
+                    1 => AgcExports.PayloadAddressCountMask,
+                    2 => 0xC000_0000u | ((uint)random.Next(0x3FFF) << 16) | (uint)random.Next(0x10000),
+                    _ => (uint)random.NextInt64(0, 1L << 32),
+                };
+
+                var fill = new System.Random(random.Next());
+                for (var index = 0; index < PatchRegionBytes; index++)
+                {
+                    managedRegion[index] = (byte)fill.Next(256);
+                }
+
+                *(uint*)(managedRegion + packetOffset) = header;
+                Buffer.MemoryCopy(managedRegion, stubRegion, PatchRegionBytes, PatchRegionBytes);
+                var pristine = new ReadOnlySpan<byte>(stubRegion, PatchRegionBytes).ToArray();
+
+                var context = new CpuContext(new RegionMemory(managedRegion, PatchRegionBytes), Generation.Gen5);
+                context[CpuRegister.Rdi] = outSpecial ?? (ulong)(managedRegion + outOffset);
+                context[CpuRegister.Rsi] = packetSpecial ?? (ulong)(managedRegion + packetOffset);
+                context[CpuRegister.Rdx] = type;
+                Assert.True(manager.TryDispatch(PayloadAddressNid, context, out var managedResult));
+
+                var stubOut = outSpecial ?? (ulong)(stubRegion + outOffset);
+                var stubPacket = packetSpecial ?? (ulong)(stubRegion + packetOffset);
+                var stubRax = harness.Call(stubOut, stubPacket, type, 0, 0);
+                var fastCase = outSpecial is null && packetSpecial is null &&
+                    (outOffset & 0xFFF) <= 0x1000 - 8 &&
+                    ((uint)type != 0 || (packetOffset & 0xFFF) <= 0x1000 - 4);
+                if (stubRax == (Sentinel ^ stubOut ^ stubPacket))
+                {
+                    Assert.False(fastCase, $"declined an answer the export gives (out=0x{outOffset:X} packet=0x{packetOffset:X} type=0x{type:X})");
+                    Assert.Equal(pristine, new ReadOnlySpan<byte>(stubRegion, PatchRegionBytes).ToArray());
+                    continue;
+                }
+
+                stubRan++;
+                ranByType[(uint)type != 0 ? 2 : (header & AgcExports.PayloadAddressCountMask) == AgcExports.PayloadAddressCountMask ? 1 : 0]++;
+                Assert.True(fastCase, $"answered where the export cannot (out=0x{outOffset:X} packet=0x{packetOffset:X} type=0x{type:X} result={managedResult})");
+                Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, managedResult);
+                Assert.Equal(context[CpuRegister.Rax], stubRax);
+                // The answer is an address: compare it relative to its region.
+                var managedAnswer = *(ulong*)(managedRegion + outOffset);
+                var stubAnswer = *(ulong*)(stubRegion + outOffset);
+                Assert.Equal(managedAnswer == 0 ? 0 : managedAnswer - (ulong)managedRegion, stubAnswer == 0 ? 0 : stubAnswer - (ulong)stubRegion);
+                *(ulong*)(managedRegion + outOffset) = 0;
+                *(ulong*)(stubRegion + outOffset) = 0;
+                Assert.Equal(
+                    new ReadOnlySpan<byte>(managedRegion, PatchRegionBytes).ToArray(),
+                    new ReadOnlySpan<byte>(stubRegion, PatchRegionBytes).ToArray());
+            }
+
+            Assert.True(stubRan > 1000, $"the stub answered only {stubRan} times");
+            Assert.All(ranByType, ran => Assert.True(ran > 100, $"answers by type (inline, full count, other): {string.Join(",", ranByType)}"));
+        }
+        finally
+        {
+            NativeMemory.AlignedFree(managedRegion);
+            NativeMemory.AlignedFree(stubRegion);
+        }
+    }
+
     // FNV-1a over the NID: string.GetHashCode is randomized per process, so a failing case would not replay.
     private static int StableSeed(string nid)
     {
@@ -447,7 +634,47 @@ public sealed unsafe class AgcPacketStubTests
             Assert.False(DirectExecutionBackend.IsAgcStubAllowed(nid, packetStubsEnabled: false, patchStubsEnabled: true, all), nid);
         }
 
+        // The payload-address stub needs its export too, and only the packet switch turns it off.
+        Assert.True(DirectExecutionBackend.IsAgcStubAllowed(PayloadAddressNid, packetStubsEnabled: true, patchStubsEnabled: false, all));
+        Assert.False(DirectExecutionBackend.IsAgcStubAllowed(PayloadAddressNid, packetStubsEnabled: false, patchStubsEnabled: true, all));
+        Assert.False(DirectExecutionBackend.IsAgcStubAllowed(PayloadAddressNid, packetStubsEnabled: true, patchStubsEnabled: true, none));
+        Assert.Equal(DirectExecutionBackend.GuestFastPathStub.AgcPacket, DirectExecutionBackend.ClassifyGuestFastPathStub(PayloadAddressNid));
+
         Assert.False(DirectExecutionBackend.IsAgcStubAllowed("Ikfdt-rIqCE", packetStubsEnabled: true, patchStubsEnabled: true, all));
+    }
+
+    // The stub's slot decode is AgcExports.IndexIndirectRegisterLocations, which the exports use:
+    // the packet's two location dwords for every modifier, stage and flag combination.
+    [Fact]
+    public void TheIndirectDrawStubsEncodeTheExportsRegisterLocations()
+    {
+        if (!OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
+        var random = new System.Random(0x1D1C);
+        foreach (var nid in new[] { IndexIndirectNid, DrawIndirectNid })
+        {
+            Assert.True(AgcExports.TryGetPacketStubSpec(nid, out var spec));
+            using var harness = new StubHarness(spec);
+            using var block = new Block();
+            for (var iteration = 0; iteration < 4000; iteration++)
+            {
+                var modifier = DrawModifier(random);
+                block.Reset(0, 0x700, iteration);
+                block.Rebase();
+                var rax = harness.Call((ulong)block.Pointer, 0x40, modifier, 0, 0);
+                Assert.Equal((ulong)(block.Pointer + PacketOffset), rax);
+                var packet = (uint*)(block.Pointer + PacketOffset);
+                var locations = nid == IndexIndirectNid
+                    ? AgcExports.IndexIndirectRegisterLocations(modifier)
+                    : AgcExports.DrawIndirectRegisterLocations(modifier);
+                Assert.Equal(0x40u, packet[1]);
+                Assert.Equal(locations, packet[2] | ((ulong)packet[3] << 32));
+                Assert.Equal(AgcExports.IndirectDrawInitiator(modifier), packet[4]);
+            }
+        }
     }
 
     [Fact]
@@ -455,8 +682,15 @@ public sealed unsafe class AgcPacketStubTests
     {
         foreach (var nid in Nids().Select(row => (string)row[0]))
         {
-            Assert.True(DirectExecutionBackend.IsAgcBuilderLeafImport(nid), nid);
             Assert.Equal(DirectExecutionBackend.GuestFastPathStub.AgcPacket, DirectExecutionBackend.ClassifyGuestFastPathStub(nid));
+            // sceAgcDcbDrawIndirect is stubbed but not a leaf builder: its export logs every refusal,
+            // a leaf's decline included, so it stays on the full path when the stub declines.
+            if (nid == DrawIndirectNid)
+            {
+                continue;
+            }
+
+            Assert.True(DirectExecutionBackend.IsAgcBuilderLeafImport(nid), nid);
         }
 
         Assert.True(DirectExecutionBackend.IsAgcBuilderLeafImport("n2fD4A+pb+g"));
@@ -608,7 +842,7 @@ public sealed unsafe class AgcPacketStubTests
         {
         }
 
-        private StubHarness(Func<nint, List<byte>> emit, bool echoArguments)
+        public StubHarness(Func<nint, List<byte>> emit, bool echoArguments)
         {
             _page = (byte*)HostMemory.Alloc(null, 4096, HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE, HostMemory.PAGE_EXECUTE_READWRITE);
             Assert.True(_page != null);

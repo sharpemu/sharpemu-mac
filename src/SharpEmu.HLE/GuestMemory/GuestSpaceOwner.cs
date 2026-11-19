@@ -57,6 +57,10 @@ public sealed class GuestSpaceOwner : IDisposable, ICpuMappedCopySource, ICpuMap
                 ? $"Could not allocate {megabytes} MB for guest direct memory. Windows requires this amount of available system commit. Close other applications or increase the paging file size."
                 : $"Could not allocate {megabytes} MB for guest direct memory.");
         }
+        else
+        {
+            GuestBackingForensics.Register(_views);
+        }
     }
 
     public ulong Granularity { get; }

@@ -509,9 +509,14 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 {
                     var call = GpuSplitWire.Read<FaultRequest>(request);
                     var memory = _memory!;
-                    var handled = call.Kind == (uint)FaultKind.Write
+                    // SHARPEMU_DIAG_FRAME_OVERLAP=1: a page the diagnostic armed is counted and let go
+                    // first; the stores run as well only when another watcher still holds it.
+                    var overlapBlocked = false;
+                    var overlap = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled &&
+                        SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.TryHandleFault((FaultKind)call.Kind, call.Address, out overlapBlocked);
+                    var handled = (overlap && !overlapBlocked) || (call.Kind == (uint)FaultKind.Write
                         ? memory.Images?.MarkCpuWrite(call.Address, call.Size) ?? false
-                        : memory.Buffers?.DownloadToCpu(call.Address, call.Size) ?? false;
+                        : memory.Buffers?.DownloadToCpu(call.Address, call.Size) ?? false) || overlap;
                     // The store may have dropped watches: the guest retries the access as soon as
                     // this answers, so their protections must be in place first.
                     _ = WaitApplied(LastRequested);

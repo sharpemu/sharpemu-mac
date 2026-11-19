@@ -66,7 +66,7 @@ public sealed class OrdinaryBackingWriteReservation : IDisposable
                 if (!(classify ? TryIsOriginalCurrent(out failure) : IsOriginalCurrent))
                     return OrdinaryBackingWriteAdmission.OriginalChanged;
                 operation = backing.BeginManagedWriteOperation();
-                if (operation.Owner is not null && operation.Slot >= 0 && operation.Identity > 0)
+                if (operation.Owner is not null && (operation.Slot >= 0 && operation.Identity > 0 || HostManagedWriteIntervals.IsDormant(operation)))
                 {
                     admitted = true;
                     return (classify ? TryIsOriginalCurrent(out failure) : IsOriginalCurrent)

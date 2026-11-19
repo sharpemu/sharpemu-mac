@@ -116,6 +116,11 @@ public sealed class RemoteGpuBackend : IGuestGpuBackend
         return _session.Writer.Write(GpuRemoteMessage.FlipRequest, in message);
     }
 
+    // The GPU process reads the command buffer and its register tables from the shared guest
+    // memory; nothing captured at submit crosses the channel (SubmitCommandStream sends the
+    // address and the length only).
+    public bool ConsumesSubmittedCommandBytes => false;
+
     public void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
     {
         var message = new SubmitCommandStreamMessage

@@ -114,7 +114,7 @@ internal sealed partial class MetalRenderHost
             Volatile.Write(ref _idleCommitQueued, 0);
             CommitCoalescedFlush();
             FlushPendingLabelWrites();
-        });
+        }, SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.GateItemKind.Flush);
     }
 
     private void RunDeferredWork(AgcExports.DeferredWork work) => _translation!.RunDeferred(work);
@@ -188,14 +188,15 @@ internal sealed partial class MetalRenderHost
     }
 
     // Host work for the worker, queued behind the work before it when called on the command thread.
-    private bool PostToWorker(Action action)
+    private bool PostToWorker(Action action,
+        SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.GateItemKind kind = SharpEmu.Libs.Gpu.Rendering.ParallelProgramPrefetch.GateItemKind.Call)
     {
         if (!OnCommandThread)
         {
             return false;
         }
 
-        _commandThread!.Post(action);
+        _commandThread!.Post(action, kind);
         return true;
     }
 
@@ -322,6 +323,7 @@ internal sealed partial class MetalRenderHost
             _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None)
         {
             _cpOverlay.Apply(address, destination);
+            NotePendingAnswer(address, destination.Length);
         }
 
         return true;

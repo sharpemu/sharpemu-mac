@@ -222,7 +222,9 @@ internal sealed unsafe partial class MetalTiler : IDisposable
     public nint BeginCompute(IMetalSubmissionContext context, bool concurrent = false)
     {
         context.ReleaseSharedEncoder();
-        var encoder = concurrent && ConcurrentDispatch
+        var encoder = MetalRenderHost.PassProfileEnabled
+            ? ProfiledEncoder(context, context.CommandBuffer, MetalProfiledEncoder.TilerCompute, null, concurrent && ConcurrentDispatch)
+            : concurrent && ConcurrentDispatch
             ? MetalNative.Send(context.CommandBuffer, SelComputeEncoderWithDispatchType, DispatchTypeConcurrent)
             : MetalNative.Send(context.CommandBuffer, SelComputeEncoder);
         MetalMemoryTelemetry.ComputeEncoders.Add();
@@ -251,7 +253,9 @@ internal sealed unsafe partial class MetalTiler : IDisposable
     public nint BeginBlit(IMetalSubmissionContext context)
     {
         context.ReleaseSharedEncoder();
-        var encoder = MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
+        var encoder = MetalRenderHost.PassProfileEnabled
+            ? ProfiledEncoder(context, context.CommandBuffer, MetalProfiledEncoder.Blit, null, concurrent: false)
+            : MetalNative.Send(context.CommandBuffer, SelBlitEncoder);
         MetalMemoryTelemetry.BlitEncoders.Add();
         if (encoder == 0)
         {
@@ -260,6 +264,27 @@ internal sealed unsafe partial class MetalTiler : IDisposable
 
         context.EncoderStarted(encoder, render: false);
         return encoder;
+    }
+
+    /// <summary>
+    /// Under SHARPEMU_METAL_V2_PROFILE_PASSES=1, in place of the plain call: the encoder the
+    /// context opens timed (named site, or the transfer's cause when null), or the plain one
+    /// for a context that records no profile (a prelude buffer, a test harness).
+    /// </summary>
+    internal static nint ProfiledEncoder(
+        IMetalSubmissionContext? context, nint commandBuffer, MetalProfiledEncoder kind, string? site, bool concurrent)
+    {
+        var encoder = context?.OpenProfiledEncoder(commandBuffer, kind, site, concurrent) ?? 0;
+        if (encoder != 0)
+        {
+            return encoder;
+        }
+
+        return kind == MetalProfiledEncoder.Blit
+            ? MetalNative.Send(commandBuffer, SelBlitEncoder)
+            : concurrent
+            ? MetalNative.Send(commandBuffer, SelComputeEncoderWithDispatchType, DispatchTypeConcurrent)
+            : MetalNative.Send(commandBuffer, SelComputeEncoder);
     }
 
     // Ends an encoder outside any ordering (tests that drive the tiler on their own).

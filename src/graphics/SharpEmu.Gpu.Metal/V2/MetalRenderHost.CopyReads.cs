@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Collections.Concurrent;
+using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Gpu.Metal.V2;
 
@@ -350,10 +351,103 @@ internal sealed partial class MetalRenderHost
         var skip = (int)((address - copy.Destination) % sizeof(uint));
         words.Slice(skip, destination.Length).CopyTo(destination);
         Interlocked.Increment(ref _concurrentCopyReads);
+        // Its owned answer is dropped by the caller: a write over it logged after the resolution began (a dispatch it was
+        // resolved ahead of) would be the destination's latest instead of the copy (IsConcurrentResolveStillCurrentAcrossDispatches).
+        assumptions.NoteCopiedThrough(address, (ulong)destination.Length);
         return true;
     }
 
     private long _concurrentCopyReads;
+
+    /// <summary>
+    /// Right after a word was read through pending copy <c>_verifiedCopy</c> with its owner from the mask of its line
+    /// (ConcurrentLineMasks), the other words of the line that copy writes are read through it too, into the
+    /// resolution's copy line, and later reads of them take the bytes from there (TryReadGuestWordConcurrent). Each is
+    /// what TryReadGuestWordConcurrentTested returns for that word at this moment, with the same answers left recorded:
+    ///   - its owner: the mask's bit (GpuWrite), while the stamp and the versions the mask stands for stand, which is
+    ///     checked here, at the same moment as the read;
+    ///   - TryReadThroughPendingCopyConcurrent: no GPU-modified image over the line (its summary, at these versions),
+    ///     and the verified copy, which covers the word and was verified at the current record stamp, so its fast path
+    ///     takes this same copy;
+    ///   - TryReadCopySourceConcurrent: a source word in a page this resolution found clean answers unowned with
+    ///     nothing recorded (a source word anywhere else is left out, for its own read to test and record), then the
+    ///     source bytes are read;
+    ///   - the owned answer the word's test records is dropped again by the read-through: nothing is left for it.
+    /// So the copy line holds those reads done now, as the clean word line holds a clean line read whole: the later
+    /// read of a word takes the answer it would have got here, and the worker's re-check at the take sees the same
+    /// recorded answers (the source pages' clean answers, recorded when they were tested) as before.
+    /// </summary>
+    private void FillCopyLine(ConcurrentAssumptions assumptions, int slot, ulong line)
+    {
+        assumptions.CopyLine = ulong.MaxValue;
+        ref readonly var summary = ref assumptions.Summary(slot);
+        var stamp = _gpuWrites.MutationStamp;
+        if (!summary.Usable || stamp != summary.Stamp || OwnershipVersions() != summary.Versions ||
+            _verifiedCopy is not { } copy || _verifiedCopyHost != this || _verifiedCopyStamp != stamp)
+        {
+            return;
+        }
+
+        var lineEnd = line + ConcurrentWordLineBytes;
+        var start = Math.Max(line, copy.Destination);
+        var end = Math.Min(lineEnd, copy.DestinationEnd);
+        ulong words = 0;
+        var at = start;
+        while (at < end)
+        {
+            // A run of words whose source words follow each other, up to the end of the copy's period.
+            var index = (at - copy.Destination) / sizeof(uint) % copy.Period;
+            var runWords = Math.Min((end - at) / sizeof(uint), copy.Period - index);
+            var runBytes = runWords * sizeof(uint);
+            var source = copy.Source + index * sizeof(uint);
+            if (assumptions.IsCleanPage(ConcurrentQuery.Word, source & ~(ConcurrentPageBytes - 1)) &&
+                assumptions.IsCleanPage(ConcurrentQuery.Word, (source + runBytes - 1) & ~(ConcurrentPageBytes - 1)) &&
+                _backing.TryReadBacking(source, assumptions.CopyLineBytes.AsSpan((int)(at - line), (int)runBytes)))
+            {
+                var first = (int)((at - line) / sizeof(uint));
+                words |= (runWords >= 64 ? ulong.MaxValue : (1UL << (int)runWords) - 1) << first;
+            }
+
+            at += runBytes;
+        }
+
+        // Only words the mask gives to a GPU write: another word of the line answers None and reads guest memory.
+        words &= summary.Mask;
+        if (words != 0)
+        {
+            assumptions.NoteCopiedThrough(line, ConcurrentWordLineBytes);
+            assumptions.CopyLine = line;
+            assumptions.CopyLineWords = words;
+            assumptions.CopyLineStamp = stamp;
+            assumptions.CopyLineVersions = summary.Versions;
+        }
+    }
+
+    // SHARPEMU_CONCURRENT_LINE_MASKS=verify: a copy-line word read again with its own test, which must give the same
+    // bytes while the stamp and versions the copy line was filled at stand.
+    private bool VerifyCopyLineWord(ulong address, uint copied, out uint word, ConcurrentAssumptions assumptions)
+    {
+        var line = assumptions.CopyLine;
+        var stamp = assumptions.CopyLineStamp;
+        var versions = assumptions.CopyLineVersions;
+        var read = TryReadGuestWordConcurrentTested(address, out word, assumptions);
+        if (_gpuWrites.MutationStamp != stamp || OwnershipVersions() != versions || _verifiedCopyStamp != stamp)
+        {
+            return read;
+        }
+
+        if (read && word == copied)
+        {
+            assumptions.Count(OwnerTestCounter.MaskVerified);
+            return true;
+        }
+
+        Interlocked.Increment(ref _lineMaskVerifyFailed);
+        var message = $"[METAL-V2][LINE_MASK] copy line verify mismatch address=0x{address:X16} line=0x{line:X16} " +
+            $"copied=0x{copied:X8} read={read} word=0x{word:X8}.";
+        Console.Error.WriteLine(message);
+        throw GpuFatal.Fatal(message);
+    }
 
     /// <summary>
     /// Answers a read the GPU is still writing from the source of the pending copy that

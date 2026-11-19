@@ -406,7 +406,9 @@ internal sealed unsafe partial class MetalImageCache
                 throw GpuFatal.Fatal("A sparse texture has every layer mapped on a heap for fewer.");
             }
 
-            var blit = MetalNative.Send(context.CommandBuffer, SelBlitCommandEncoder);
+            var blit = MetalRenderHost.PassProfileEnabled
+                ? MetalTiler.ProfiledEncoder(context, context.CommandBuffer, MetalProfiledEncoder.Blit, "sparse", false)
+                : MetalNative.Send(context.CommandBuffer, SelBlitCommandEncoder);
             if (blit == 0)
             {
                 throw GpuFatal.Fatal("A Metal blit encoder could not be created for a sparse texture.");
@@ -495,7 +497,9 @@ internal sealed unsafe partial class MetalImageCache
         }
         else
         {
-            var blit = MetalNative.Send(context.CommandBuffer, SelBlitCommandEncoder);
+            var blit = MetalRenderHost.PassProfileEnabled
+                ? MetalTiler.ProfiledEncoder(context, context.CommandBuffer, MetalProfiledEncoder.Blit, "sparse", false)
+                : MetalNative.Send(context.CommandBuffer, SelBlitCommandEncoder);
             if (blit == 0)
             {
                 throw GpuFatal.Fatal("A Metal blit encoder could not be created for a sparse texture.");

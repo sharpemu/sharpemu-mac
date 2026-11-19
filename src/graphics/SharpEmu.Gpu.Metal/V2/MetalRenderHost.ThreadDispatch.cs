@@ -98,6 +98,7 @@ internal sealed partial class MetalRenderHost
 
         var shift = argumentsAddress & 0x3;
         var alignedAddress = argumentsAddress - shift;
+        using var overlapTag = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Tag(SharpEmu.HLE.GpuMemory.OverlapTag.Indirect);
         var range = _guestMemory.Resolve(alignedAddress, shift + (3 * sizeof(uint)));
         if (!range.IsValid)
         {
@@ -105,9 +106,9 @@ internal sealed partial class MetalRenderHost
         }
 
         // The GPU reads the thread counts where the dispatch sits in the stream.
-        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint));
+        OrderAfterDeferredCopies(argumentsAddress, 3 * sizeof(uint), LabelLandCause.Indirect);
         var started = DrawTimingStart();
-        var encoder = EnsureComputeEncoder();
+        var encoder = EncodeStagedLabelReads(EnsureComputeEncoder());
         var entry = _pendingComputePipeline ??
             throw Fatal("A thread-unit indirect dispatch has no bound Metal compute pipeline state.");
         var limits = _threadLimitsTarget;

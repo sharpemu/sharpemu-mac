@@ -88,7 +88,7 @@ public sealed partial class GpuCommandInterpreter
             NotePendingBytes(destination, source);
         }
 
-        _host.RecordCommandProcessorWrite(destination, source, kind);
+        _host.RecordCommandProcessorWrite(destination, source, kind, TakeCommandProcessorWriteCausal());
 
         using var trailingScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandCpBookkeeping);
         _lastWriteLength = 0;
@@ -169,7 +169,7 @@ public sealed partial class GpuCommandInterpreter
         }
 
         NotePacketBlockWrite();
-        _host.RecordCommandProcessorQwords(destination, count, strideBytes, value, kind);
+        _host.RecordCommandProcessorQwords(destination, count, strideBytes, value, kind, TakeCommandProcessorWriteCausal());
 
         _lastWriteAddress = destination + (ulong)(count - 1) * strideBytes;
         _lastWriteValue = value;
@@ -394,6 +394,7 @@ public sealed partial class GpuCommandInterpreter
             if (byteCount is sizeof(uint) or sizeof(ulong) && PendingLabelLookup is { } lookup &&
                 lookup(sourceOrImmediate, byteCount == sizeof(ulong), out var pendingValue))
             {
+                NoteCausalRead();
                 PendingLabelRecorded?.Invoke(destination, (int)byteCount, pendingValue);
             }
 

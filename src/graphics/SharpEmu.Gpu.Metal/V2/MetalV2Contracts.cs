@@ -80,6 +80,30 @@ internal interface IMetalSubmissionContext
         _ = encoder;
         _ = render;
     }
+
+    // Profiling only, called only under SHARPEMU_METAL_V2_PROFILE_PASSES=1 in place of the
+    // plain blitCommandEncoder / computeCommandEncoder call: opens that encoder on
+    // commandBuffer through its pass descriptor with GPU timestamps at its start and end, and
+    // records it under site (or under the transfer being encoded when site is null). Zero
+    // tells the caller to open the plain encoder itself: a context that records no profile.
+    nint OpenProfiledEncoder(nint commandBuffer, MetalProfiledEncoder kind, string? site, bool concurrent)
+    {
+        _ = commandBuffer;
+        _ = kind;
+        _ = site;
+        _ = concurrent;
+        return 0;
+    }
+}
+
+// The encoders the pass profile times besides render passes and the shared compute encoder.
+internal enum MetalProfiledEncoder
+{
+    Blit,
+    // A compute encoder the tiler opens for a transfer of its own.
+    TilerCompute,
+    // A compute encoder the host opens outside the shared one (occlusion, labels, stores).
+    HostCompute,
 }
 
 // Moves image contents between guest memory and Metal textures entirely on the GPU.
@@ -154,6 +178,27 @@ internal interface IMetalImageTransfer
     bool TryEncodeTextureToTexture(IMetalSubmissionContext context,
         in ImageDescription sourceDescription, nint sourceTexture,
         in ImageDescription targetDescription, nint targetTexture);
+
+    // Whether target layers [targetFirstLayer, + layers) lie on exactly the guest bytes, and texels, of source layers
+    // [sourceFirstLayer, + layers) (MetalImageTransfer.LayerSubset). False keeps the round trip through guest memory.
+    bool TryMatchLayerSubset(in ImageDescription source, in ImageDescription target,
+        out uint sourceFirstLayer, out uint targetFirstLayer, out uint layers)
+    {
+        sourceFirstLayer = targetFirstLayer = layers = 0;
+        return false;
+    }
+
+    // The guest bytes of whole layers of a one-level layered image (MetalImageTransfer.LayerSubset); false when its
+    // layers are not equal runs that tile its bytes.
+    bool TryLayerBytes(in ImageDescription description, uint baseLayer, uint count, out ulong start, out ulong end)
+    {
+        start = end = 0;
+        return false;
+    }
+
+    // Copies whole level-0 slices between two textures of one format and extent; false with nothing encoded otherwise.
+    bool TryEncodeLayerSubsetCopy(IMetalSubmissionContext context, nint sourceTexture, uint sourceFirstLayer,
+        nint targetTexture, uint targetFirstLayer, uint layers, uint width, uint height) => false;
 
     bool HasDenseAliasCoverage(in ImageDescription description) => false;
 

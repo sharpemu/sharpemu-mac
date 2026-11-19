@@ -19,6 +19,11 @@ public sealed partial class MappedPublicationTests
         .GetProperty("Identity", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(exact)!;
     private static void EndValidationWriter(object exact, bool succeeded) => typeof(HostBackingObject)
         .GetMethod("EndManagedWrite", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [exact, succeeded]);
+    private static void ObserveValidationWriters(HostBackingObject backing)
+    {
+        var writers = typeof(HostBackingObject).GetField("_managedWrites", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(backing)!;
+        Assert.True((bool)writers.GetType().GetMethod("TryCaptureRevision", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(writers, [-1L])!);
+    }
 
     private sealed class UnknownValidationProvider : ICpuMappedPublicationSource
     {
@@ -106,6 +111,9 @@ public sealed partial class MappedPublicationTests
         using var other = new State(); var original = failure == "foreign" ? other.Capture() : state.Capture();
         if (failure == "revoked") Assert.True(state.Host.Effect(State.Address, State.Page));
         if (failure == "unknown") state.Host.Unknown();
+        // A foreign original never observes this ledger; observe it so its writer is admitted
+        // exactly (a dormant writer holds no admission to borrow).
+        if (failure == "foreign") ObserveValidationWriters(state.Backing);
         var operation = BeginValidationWriterOperation(state.Backing); Assert.True(ValidationWriterIdentity(operation) > 0);
         try
         {

@@ -374,6 +374,7 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        t_storeWaitedSerial = pending;
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         bool landed;
         if (_owner.IsWorkerThread)

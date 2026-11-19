@@ -170,6 +170,11 @@ public interface IShaderPipelineHost
     // For an error report: why a clean read of the dword can fail (mapping and GPU ownership).
     string DescribeCleanRead(ulong address) => "";
 
+    // On a thread resolving ahead of the GPU worker: a GPU write recorded since this resolution began covers memory it
+    // read, and the worker's take will refuse the resolution (latched). For a verify to tell a resolution whose readers
+    // straddle that write from a wrong answer. False on the worker.
+    bool ConcurrentReadsSuperseded() => false;
+
     // Copies guest bytes the CPU already holds, without synchronizing. False when the GPU
     // may own the range (or, for a clean read, when a clean word read would be refused);
     // the resource cache then re-materializes instead of trusting a stale copy.
@@ -181,6 +186,15 @@ public interface IShaderPipelineHost
     bool TryCompareResidentGuestBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<int> offsets,
         ReadOnlySpan<byte> recorded) => false;
 
+    // A program evaluation's recorded reads (SharpEmu.ShaderCompiler.Resources.GuestWordsComparer): true only when each
+    // range of whole words passes the ownership tests a TryReadGuestWord of its words makes, recorded as those reads record
+    // theirs, and holds the recorded bytes where those reads would find them (memory as it lies, or the pending copy that
+    // writes the range); false when one differs, is owned otherwise, or the host cannot tell.
+    bool TryCompareGuestWords(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded) => false;
+
+    // Whether TryCompareGuestWords can answer true; without it evaluations record no read proofs.
+    bool ComparesGuestWords => false;
+
     // Whether recorded GPU work may still write this dword, answered without waiting. A
     // host that returns a delegate lets a shader whose data-only table words the GPU writes
     // be re-planned to load them on the device (DeviceDataLoads); null keeps them flattened.
@@ -189,6 +203,11 @@ public interface IShaderPipelineHost
 
     uint[] NormalizeImageDescriptor(IShaderFrontend frontend, ReadOnlySpan<uint> words,
         ShaderStage stage, ulong shaderHash, string source) => frontend.NormalizeImageForResolution(words, stage, shaderHash, source, true);
+    // Whether a CPU kernel prediction (ShaderPipelineCache.KernelEvaluation) can reach anything: the host answers
+    // TryPeekResidentGuestBytes, TryPostKernelWrite or IRenderHost.NoteKnownGpuContents (and its command stream's
+    // NoteKnownWrite). Without it no dispatch is evaluated on the CPU.
+    bool ConsumesKernelPredictions => false;
+
     // A resident read that refuses instead of waiting for pending command-thread work.
     bool TryPeekResidentGuestBytes(ulong address, Span<byte> destination) => false;
 

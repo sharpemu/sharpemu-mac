@@ -30,6 +30,10 @@ internal sealed class MaterializationProgram
         public Step[] Steps = [];
         // Set when every read loads a word at a constant offset from one base (FixedReads).
         public FixedReads? Fixed;
+        // The address order this level's reads took last (ReadOrder.Sort), kept per program: one per thread and level
+        // index was overwritten by every other program the thread evaluated (a draw's pixel and vertex plans in turn),
+        // so it rarely fit and the level sorted again. Never written once published; threads may race to replace it.
+        public int[]? Order;
     }
 
     /// <summary>
@@ -103,7 +107,7 @@ internal sealed class MaterializationProgram
     [ThreadStatic]
     private static Scratch? _scratch;
 
-    private sealed class Scratch
+    internal sealed class Scratch
     {
         public ulong[] Values = new ulong[256];
         public bool[] Valid = new bool[256];
@@ -114,6 +118,30 @@ internal sealed class MaterializationProgram
         public byte[] Bytes = new byte[1024];
         public readonly ReadOrder Order = new();
         public int Count;
+
+        // While an evaluation records what it reads (ReadProof): each word read from memory, and each address whose
+        // read found none.
+        public bool Recording;
+        public ulong[] ReadAddresses = new ulong[64];
+        public uint[] ReadWords = new uint[64];
+        public int ReadCount;
+        // Where ReadProof.Build merges the reads' address-ordered runs.
+        public ulong[] MergeAddresses = new ulong[64];
+        public uint[] MergeWords = new uint[64];
+        public readonly List<ulong> Unreadable = [];
+
+        public void NoteRead(ulong address, uint word)
+        {
+            if (ReadCount == ReadAddresses.Length)
+            {
+                Array.Resize(ref ReadAddresses, ReadCount * 2);
+                Array.Resize(ref ReadWords, ReadCount * 2);
+            }
+
+            ReadAddresses[ReadCount] = address;
+            ReadWords[ReadCount] = word;
+            ReadCount++;
+        }
 
         public void Ensure(int registers)
         {
@@ -496,20 +524,275 @@ internal sealed class MaterializationProgram
         public ReadOnlySpan<DeviceAddressRange> RangeValues => Ranges.AsSpan(0, RangeCount);
     }
 
-    internal bool TryRunInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Output output)
+    internal bool TryRunInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Output output) =>
+        TryRunInto(plan, inputs, additionalTableWords, output, record: false, previous: null, out _);
+
+    // With record, also what the evaluation read (null when one address read as two values): previous itself when it
+    // holds exactly that, or a proof sharing its ranges when only their bytes differ.
+    internal bool TryRunInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Output output, bool record,
+        ReadProof? previous, out ReadProof? proof)
     {
+        proof = null;
         var activeSources = plan.ResourceBranches.Count != 0 ? RuntimeValueEvaluator.EvaluateActiveSources(plan, inputs) : [];
         var scratch = _scratch ?? new Scratch();
         _scratch = null;
         try
         {
+            scratch.Recording = record;
+            scratch.ReadCount = 0;
+            scratch.Unreadable.Clear();
             Evaluate(inputs, scratch);
-            return Emit(plan, additionalTableWords, scratch, activeSources, output);
+            scratch.Recording = false;
+            if (!Emit(plan, additionalTableWords, scratch, activeSources, output))
+            {
+                return false;
+            }
+
+            if (record)
+            {
+                proof = ReadProof.Build(this, scratch, activeSources, previous);
+            }
+
+            return true;
         }
         finally
         {
+            scratch.Recording = false;
             _scratch = scratch;
         }
+    }
+
+    /// <summary>
+    /// What one evaluation of a program read, as the proof that another evaluation with the same user data, shader base,
+    /// compute state and readers emits the same words. Every read's address is a function of the registers of the levels
+    /// before it, and those of the first read level of the user data, shader base and constants alone; so while those
+    /// are the same, every word read from memory still holds the value it was read as, and every read that found no
+    /// memory finds none again, every read is at the same address with the same outcome, level by level, and every
+    /// register comes out the same. The words emitted are a function of the registers and the active sources
+    /// (<see cref="ActiveSources"/>, which the caller evaluates again). A caller compares the words
+    /// (<see cref="Addresses"/>, <see cref="Lengths"/>, <see cref="Bytes"/>) through the ownership tests a word read
+    /// makes, recorded as that read records them, and reads <see cref="Unreadable"/> again. Immutable once built.
+    /// </summary>
+    internal sealed class ReadProof
+    {
+        // Words of one range lie in one 256-byte line, the unit the concurrent ownership tests answer for.
+        internal const int LineBytes = 256;
+
+        public required MaterializationProgram Program;
+        // The words read from memory, in address order, as runs of consecutive words within a line, and their bytes, run
+        // after run.
+        public required ulong[] Addresses;
+        public required int[] Lengths;
+        public required byte[] Bytes;
+        // Addresses whose read found no memory.
+        public required ulong[] Unreadable;
+        // The sources the plan's branches left active (empty without branches).
+        public required bool[] ActiveSources;
+
+        internal static ReadProof? Build(MaterializationProgram program, Scratch scratch, bool[] activeSources, ReadProof? previous = null)
+        {
+            var count = scratch.ReadCount;
+            var addresses = scratch.ReadAddresses;
+            var words = scratch.ReadWords;
+            SortReads(scratch, count);
+            var unique = 0;
+            var ranges = 0;
+            for (var index = 0; index < count; index++)
+            {
+                if (unique != 0 && addresses[unique - 1] == addresses[index])
+                {
+                    // One address read as two values in the same evaluation (the guest wrote it meanwhile): no proof.
+                    if (words[unique - 1] != words[index])
+                    {
+                        return null;
+                    }
+
+                    continue;
+                }
+
+                if (unique == 0 || !Continues(addresses[unique - 1], addresses[index]))
+                {
+                    ranges++;
+                }
+
+                addresses[unique] = addresses[index];
+                words[unique] = words[index];
+                unique++;
+            }
+
+            // A revalidation that read in full mostly reads what the proof before it did (its compare was refused) or the
+            // same words with other values (a words miss): kept, or its ranges shared, rather than allocated again.
+            var sameRanges = previous is not null && ReferenceEquals(previous.Program, program) && previous.Addresses.Length == ranges &&
+                previous.Bytes.Length == unique * sizeof(uint) && SameRanges(previous, addresses, unique);
+            var sameBytes = sameRanges && SameWords(previous!.Bytes, words, unique);
+            var sameRest = previous is not null && previous.ActiveSources.AsSpan().SequenceEqual(activeSources) &&
+                previous.Unreadable.AsSpan().SequenceEqual(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(scratch.Unreadable));
+            if (sameBytes && sameRest)
+            {
+                return previous;
+            }
+
+            ulong[] starts;
+            int[] lengths;
+            if (sameRanges)
+            {
+                starts = previous!.Addresses;
+                lengths = previous.Lengths;
+            }
+            else
+            {
+                starts = new ulong[ranges];
+                lengths = new int[ranges];
+                var range = -1;
+                for (var index = 0; index < unique; index++)
+                {
+                    if (index == 0 || !Continues(addresses[index - 1], addresses[index]))
+                    {
+                        starts[++range] = addresses[index];
+                    }
+
+                    lengths[range] += sizeof(uint);
+                }
+            }
+
+            byte[] bytes;
+            if (sameBytes)
+            {
+                bytes = previous!.Bytes;
+            }
+            else
+            {
+                bytes = new byte[unique * sizeof(uint)];
+                System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan(0, unique)).CopyTo(bytes);
+                if (!BitConverter.IsLittleEndian)
+                {
+                    for (var index = 0; index < unique; index++)
+                    {
+                        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), words[index]);
+                    }
+                }
+            }
+
+            return new ReadProof
+            {
+                Program = program, Addresses = starts, Lengths = lengths, Bytes = bytes,
+                Unreadable = scratch.Unreadable.Count == 0 ? [] : sameRest ? previous!.Unreadable : [.. scratch.Unreadable],
+                ActiveSources = activeSources,
+            };
+        }
+
+        // Most runs of recorded reads to merge rather than sort: each level records its reads in address order.
+        private const int MaxMergedRuns = 16;
+
+        // The recorded reads in address order. A level's reads are recorded in address order (ReadLevel sorts them, a
+        // fixed plan reads its runs in offset order), so the reads are a few ascending runs, merged here one into the
+        // ordered prefix before it; more runs than that are sorted. Equal addresses may end in any order: Build refuses
+        // them when their words differ and keeps one when they are the same.
+        private static void SortReads(Scratch scratch, int count)
+        {
+            var addresses = scratch.ReadAddresses;
+            var words = scratch.ReadWords;
+            var runs = 1;
+            for (var index = 1; index < count; index++)
+            {
+                if (addresses[index] < addresses[index - 1] && ++runs > MaxMergedRuns)
+                {
+                    Array.Sort(addresses, words, 0, count);
+                    return;
+                }
+            }
+
+            if (runs == 1)
+            {
+                return;
+            }
+
+            if (scratch.MergeAddresses.Length < count)
+            {
+                scratch.MergeAddresses = new ulong[Math.Max(count, scratch.MergeAddresses.Length * 2)];
+                scratch.MergeWords = new uint[scratch.MergeAddresses.Length];
+            }
+
+            var mergedAddresses = scratch.MergeAddresses;
+            var mergedWords = scratch.MergeWords;
+            var ordered = 1;
+            while (ordered < count && addresses[ordered] >= addresses[ordered - 1]) ordered++;
+            while (ordered < count)
+            {
+                var end = ordered + 1;
+                while (end < count && addresses[end] >= addresses[end - 1]) end++;
+                // Merge [0, ordered) and [ordered, end) into the merge buffers, then back.
+                int left = 0, right = ordered, at = 0;
+                while (left < ordered && right < end)
+                {
+                    if (addresses[right] < addresses[left])
+                    {
+                        mergedAddresses[at] = addresses[right];
+                        mergedWords[at++] = words[right++];
+                    }
+                    else
+                    {
+                        mergedAddresses[at] = addresses[left];
+                        mergedWords[at++] = words[left++];
+                    }
+                }
+
+                while (left < ordered)
+                {
+                    mergedAddresses[at] = addresses[left];
+                    mergedWords[at++] = words[left++];
+                }
+
+                // The rest of the right run is already in place after the merged part.
+                Array.Copy(mergedAddresses, addresses, at);
+                Array.Copy(mergedWords, words, at);
+                ordered = end;
+            }
+        }
+
+        // Whether the unique sorted addresses form exactly the proof's ranges.
+        private static bool SameRanges(ReadProof proof, ulong[] addresses, int unique)
+        {
+            var index = 0;
+            for (var range = 0; range < proof.Addresses.Length; range++)
+            {
+                var start = proof.Addresses[range];
+                var words = proof.Lengths[range] / sizeof(uint);
+                if (index + words > unique || addresses[index] != start || (index != 0 && Continues(addresses[index - 1], start)))
+                {
+                    return false;
+                }
+
+                for (var word = 1; word < words; word++)
+                {
+                    if (addresses[index + word] != start + (ulong)(word * sizeof(uint)))
+                    {
+                        return false;
+                    }
+                }
+
+                index += words;
+            }
+
+            return index == unique;
+        }
+
+        private static bool SameWords(byte[] bytes, uint[] words, int unique)
+        {
+            for (var index = 0; index < unique; index++)
+            {
+                if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint))) != words[index])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // Whether a word at next extends the run whose last word is at previous: the next word, in the same line.
+        private static bool Continues(ulong previous, ulong next) =>
+            next - previous == sizeof(uint) && (next & ~(ulong)(LineBytes - 1)) == (previous & ~(ulong)(LineBytes - 1));
     }
 
     private void Evaluate(ResourceRuntimeInputs inputs, Scratch scratch)
@@ -525,7 +808,7 @@ internal sealed class MaterializationProgram
             var level = _levels[levelIndex];
             if (level.Reads.Length != 0 && (level.Fixed is not { } fixedReads || !TryReadFixed(level.Reads, fixedReads, inputs, scratch)))
             {
-                ReadLevel(level.Reads, inputs, scratch, levelIndex);
+                ReadLevel(level, inputs, scratch);
             }
 
             foreach (var step in level.Steps)
@@ -780,8 +1063,13 @@ internal sealed class MaterializationProgram
                     for (var index = start; index < end; index++)
                     {
                         var target = reads[order[index]].Target;
-                        values[target] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(offsets[index] - offsets[start])..]);
+                        var word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(offsets[index] - offsets[start])..]);
+                        values[target] = word;
                         valid[target] = true;
+                        if (scratch.Recording)
+                        {
+                            scratch.NoteRead(runFirst + (ulong)(offsets[index] - offsets[start]), word);
+                        }
                     }
 
                     start = end;
@@ -792,7 +1080,7 @@ internal sealed class MaterializationProgram
             for (var index = start; index < end; index++)
             {
                 ref readonly var read = ref reads[order[index]];
-                ReadWord(inputs, lowest + (ulong)(offsets[index] - origin), baseAddress, read.Absolute, read.Target, values, valid);
+                ReadWord(inputs, lowest + (ulong)(offsets[index] - origin), baseAddress, read.Absolute, read.Target, scratch);
             }
 
             start = end;
@@ -801,8 +1089,9 @@ internal sealed class MaterializationProgram
         return true;
     }
 
-    private static void ReadLevel(ReadStep[] reads, ResourceRuntimeInputs inputs, Scratch scratch, int levelIndex)
+    private static void ReadLevel(Level level, ResourceRuntimeInputs inputs, Scratch scratch)
     {
+        var reads = level.Reads;
         var values = scratch.Values;
         var valid = scratch.Valid;
         scratch.Count = 0;
@@ -842,7 +1131,7 @@ internal sealed class MaterializationProgram
         var targets = scratch.Targets;
         var bases = scratch.NullBases;
         var absolute = scratch.Absolute;
-        scratch.Order.Sort(addresses, targets, bases, absolute, count, levelIndex);
+        scratch.Order.Sort(addresses, targets, bases, absolute, count, ref level.Order);
 
         var resident = inputs.ReadResidentMemory;
         var start = 0;
@@ -869,7 +1158,7 @@ internal sealed class MaterializationProgram
 
             for (var index = start; index < end; index++)
             {
-                ReadWord(inputs, addresses[index], bases[index], absolute[index], targets[index], values, valid);
+                ReadWord(inputs, addresses[index], bases[index], absolute[index], targets[index], scratch);
             }
 
             start = end;
@@ -880,8 +1169,8 @@ internal sealed class MaterializationProgram
     /// Puts a level's reads in address order, equal addresses in the order they were added (a stable sort). A
     /// table of descriptors interleaves its words across the reads, so they rarely arrive in order: one sort of
     /// packed (address, position) keys replaces moving every out-of-order read past each read before it. A level's
-    /// reads mostly come back in the order they took last time, so that order is tried first: the keys are unique,
-    /// so an order that leaves them increasing is the sorted one.
+    /// reads mostly come back in the order they took last time, so that order (the caller's, one per program level)
+    /// is tried first: the keys are unique, so an order that leaves them increasing is the sorted one.
     /// </summary>
     internal sealed class ReadOrder
     {
@@ -890,10 +1179,19 @@ internal sealed class MaterializationProgram
         private int[] _targets = new int[64];
         private ulong[] _bases = new ulong[64];
         private bool[] _absolute = new bool[64];
-        private int[]?[] _levelOrders = [];
-        private int[] _levelCounts = [];
+        private int[] _order = new int[64];
 
-        public void Sort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count, int level = -1)
+        public void Sort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count)
+        {
+            int[]? none = null;
+            Sort(addresses, targets, bases, absolute, count, ref none, remember: false);
+        }
+
+        // With the order these reads took last time in remembered, replaced by this sort's order when it does not fit.
+        public void Sort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count, ref int[]? remembered) =>
+            Sort(addresses, targets, bases, absolute, count, ref remembered, remember: true);
+
+        private void Sort(ulong[] addresses, int[] targets, ulong[] bases, bool[] absolute, int count, ref int[]? remembered, bool remember)
         {
             var ordered = true;
             var packable = count <= 1 << 16;
@@ -922,16 +1220,11 @@ internal sealed class MaterializationProgram
                 _targets = new int[length];
                 _bases = new ulong[length];
                 _absolute = new bool[length];
+                _order = new int[length];
             }
 
-            if (level >= _levelOrders.Length)
-            {
-                Array.Resize(ref _levelOrders, level + 1);
-                Array.Resize(ref _levelCounts, level + 1);
-            }
-
-            var known = level >= 0 ? _levelOrders[level] : null;
-            if (known is not null && _levelCounts[level] == count && Orders(known, addresses, count))
+            var known = remember ? Volatile.Read(ref remembered) : null;
+            if (known is not null && known.Length == count && Orders(known, addresses, count))
             {
                 Permute(known, addresses, targets, bases, absolute, count);
                 return;
@@ -944,16 +1237,16 @@ internal sealed class MaterializationProgram
             }
 
             keys.Sort();
-            var order = known is not null && known.Length >= count ? known : new int[Math.Max(count, 16)];
+            // A new array to remember: another thread may be checking the one published before.
+            var order = remember ? new int[count] : _order;
             for (var index = 0; index < count; index++)
             {
                 order[index] = (int)(keys[index] & 0xFFFF);
             }
 
-            if (level >= 0)
+            if (remember)
             {
-                _levelOrders[level] = order;
-                _levelCounts[level] = count;
+                Volatile.Write(ref remembered, order);
             }
 
             Permute(order, addresses, targets, bases, absolute, count);
@@ -1039,23 +1332,39 @@ internal sealed class MaterializationProgram
         for (var index = start; index < end; index++)
         {
             var target = scratch.Targets[index];
-            scratch.Values[target] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(addresses[index] - first)..]);
+            var word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(addresses[index] - first)..]);
+            scratch.Values[target] = word;
             scratch.Valid[target] = true;
+            if (scratch.Recording)
+            {
+                scratch.NoteRead(addresses[index], word);
+            }
         }
 
         return true;
     }
 
-    private static void ReadWord(ResourceRuntimeInputs inputs, ulong address, ulong baseAddress, bool absolute, int target, ulong[] values, bool[] valid)
+    private static void ReadWord(ResourceRuntimeInputs inputs, ulong address, ulong baseAddress, bool absolute, int target, Scratch scratch)
     {
+        var values = scratch.Values;
+        var valid = scratch.Valid;
         if (inputs.ReadMemory is not null && inputs.ReadMemory(address, out var word))
         {
             values[target] = word;
             valid[target] = true;
+            if (scratch.Recording)
+            {
+                scratch.NoteRead(address, word);
+            }
+
             return;
         }
 
         values[target] = 0;
         valid[target] = (baseAddress & ~3ul) == 0 || (absolute && inputs.ReadMemory is not null && !inputs.ReadsClean);
+        if (scratch.Recording)
+        {
+            scratch.Unreadable.Add(address);
+        }
     }
 }

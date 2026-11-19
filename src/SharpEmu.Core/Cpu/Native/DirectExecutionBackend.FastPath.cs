@@ -43,6 +43,12 @@ public sealed unsafe partial class DirectExecutionBackend
 		ProcessTimeMicroseconds,
 
 		/// <summary>
+		/// scePthreadGetthreadid / pthread_getthreadid_np: the unique id the managed export published
+		/// for the self handle bound to this host thread (GuestFastPath.BlockThreadUniqueIdOffset).
+		/// </summary>
+		PthreadGetthreadid,
+
+		/// <summary>
 		/// An sceAgc command builder that appends one fixed-shape packet (see <see cref="SharpEmu.Libs.Agc.AgcPacketStubSpec"/>):
 		/// the stub stores the dwords and the cursor itself, as the title's own code does.
 		/// </summary>
@@ -77,6 +83,10 @@ public sealed unsafe partial class DirectExecutionBackend
 	// scePthreadSelf / pthread_self.
 	private const string PthreadSelfNid = "aI+OeCz8xrQ";
 	private const string PosixPthreadSelfNid = "EotR8a3ASf4";
+
+	// scePthreadGetthreadid / pthread_getthreadid_np.
+	private const string PthreadGetthreadidNid = "EI-5-jlq2dE";
+	private const string PosixPthreadGetthreadidNid = "3eqs37G74-s";
 
 	// scePthreadGetspecific / pthread_getspecific.
 	private const string PthreadGetspecificNid = "eoht7mQOCmo";
@@ -233,6 +243,7 @@ public sealed unsafe partial class DirectExecutionBackend
 	{
 		PthreadSelfNid or PosixPthreadSelfNid => GuestFastPathStub.PthreadSelf,
 		PthreadGetspecificNid or PosixPthreadGetspecificNid => GuestFastPathStub.PthreadGetspecific,
+		PthreadGetthreadidNid or PosixPthreadGetthreadidNid => GuestFastPathStub.PthreadGetthreadid,
 		MemcpyNid or MemmoveNid => GuestFastPathStub.MemoryCopy,
 		MemsetNid => GuestFastPathStub.MemorySet,
 		ClockGettimeNid or KernelClockGettimeNid => GuestFastPathStub.ClockGettime,
@@ -241,7 +252,7 @@ public sealed unsafe partial class DirectExecutionBackend
 		_ => IsConstantZeroImport(nid)
 			? GuestFastPathStub.ConstantZero
 			: SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _) ||
-				SharpEmu.Libs.Agc.AgcExports.TryGetRegIndirectPatchStub(nid, out _)
+				SharpEmu.Libs.Agc.AgcExports.TryGetRegIndirectPatchStub(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetPayloadAddressStub(nid)
 					? GuestFastPathStub.AgcPacket
 					: GuestFastPathStub.None,
 	};
@@ -266,6 +277,13 @@ public sealed unsafe partial class DirectExecutionBackend
 			return patchStubsEnabled && exports.TryGetExport(nid, out _);
 		}
 
+		// The payload-address stub writes the answer the export writes on success and declines
+		// into it for the rest, so it too needs the export behind the trampoline.
+		if (SharpEmu.Libs.Agc.AgcExports.TryGetPayloadAddressStub(nid))
+		{
+			return exports.TryGetExport(nid, out _);
+		}
+
 		return SharpEmu.Libs.Agc.AgcExports.TryGetPacketStubSpec(nid, out _) || SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out _);
 	}
 
@@ -285,7 +303,9 @@ public sealed unsafe partial class DirectExecutionBackend
 		var kind = ClassifyGuestFastPathStub(nid);
 		if (kind == GuestFastPathStub.None ||
 			// The write watch inspects every managed guest write, which a native copy never reaches.
-			(kind is GuestFastPathStub.MemoryCopy or GuestFastPathStub.MemorySet && (!GuestMemoryCopyStubEnabled || GuestWriteWatch.Armed)))
+			(kind is GuestFastPathStub.MemoryCopy or GuestFastPathStub.MemorySet && (!GuestMemoryCopyStubEnabled || GuestWriteWatch.Armed)) ||
+			// SHARPEMU_HLE_FAST_THREADID=0 keeps the thread-id query on the managed export.
+			(kind == GuestFastPathStub.PthreadGetthreadid && !SharpEmu.Libs.Kernel.KernelPthreadState.FastThreadIdEnabled))
 		{
 			return false;
 		}
@@ -331,7 +351,9 @@ public sealed unsafe partial class DirectExecutionBackend
 		List<byte> code;
 		if (kind == GuestFastPathStub.AgcPacket)
 		{
-			code = SharpEmu.Libs.Agc.AgcExports.TryGetRegIndirectPatchStub(nid, out var patchSpec)
+			code = SharpEmu.Libs.Agc.AgcExports.TryGetPayloadAddressStub(nid)
+				? EmitGuestAgcPayloadAddressStub(fallbackTrampoline)
+				: SharpEmu.Libs.Agc.AgcExports.TryGetRegIndirectPatchStub(nid, out var patchSpec)
 				? EmitGuestAgcRegIndirectPatchStub(patchSpec, fallbackTrampoline)
 				: SharpEmu.Libs.Agc.AgcExports.TryGetVariablePacketStub(nid, out var variableKind)
 				? EmitGuestAgcVariablePacketStub(variableKind, fallbackTrampoline)
@@ -448,6 +470,18 @@ public sealed unsafe partial class DirectExecutionBackend
 				Emit(0x48, 0xFF, 0x40, checked((byte)GuestFastPath.BlockSelfHitsOffset));
 				// mov rax, [rax + SelfHandleOffset]
 				Emit(0x48, 0x8B, 0x40, checked((byte)GuestFastPath.BlockSelfHandleOffset));
+				break;
+
+			case GuestFastPathStub.PthreadGetthreadid:
+				// cmp qword [rax + SelfHandleOffset], 0 / je slow: nothing bound here.
+				Emit(0x48, 0x83, 0x78, checked((byte)GuestFastPath.BlockSelfHandleOffset), 0x00);
+				EmitJumpToSlowPath();
+				// cmp qword [rax + ThreadUniqueIdOffset], 0 / je slow: the export has not
+				// answered for this handle yet (it publishes the id when it does).
+				Emit(0x48, 0x83, 0x78, checked((byte)GuestFastPath.BlockThreadUniqueIdOffset), 0x00);
+				EmitJumpToSlowPath();
+				// mov rax, [rax + ThreadUniqueIdOffset]
+				Emit(0x48, 0x8B, 0x40, checked((byte)GuestFastPath.BlockThreadUniqueIdOffset));
 				break;
 
 			case GuestFastPathStub.PthreadGetspecific:
@@ -708,6 +742,57 @@ public sealed unsafe partial class DirectExecutionBackend
 			}
 		}
 
+		// One AgcModifierSgprSlot into r10d, r11d the temporary (AgcExports.IndexIndirectRegisterLocations).
+		void EmitModifierSlot(SharpEmu.Libs.Agc.AgcModifierSgprSlot slot)
+		{
+			if (slot.EnableMask == 0 || slot.FieldShift is < -1 or > 27 || slot.ShiftLeft is < 0 or > 31)
+			{
+				throw new ArgumentException("Unsupported modifier slot.", nameof(spec));
+			}
+
+			var source = (byte)slot.Register;
+			var rex = (byte)(0x40 | (source >= 8 ? 0x04 : 0) | 0x01);
+			// test reg32, mask / jz disabled
+			if (source >= 8)
+			{
+				Emit(0x41);
+			}
+
+			Emit(0xF7, (byte)(0xC0 | (source & 7))); EmitImm32(slot.EnableMask);
+			Emit(0x74, 0);
+			var disabledFixup = code.Count - 1;
+			if (slot.FieldShift < 0)
+			{
+				Emit(0x41, 0xBA); EmitImm32(1);                                                 // mov r10d, 1
+			}
+			else
+			{
+				Emit(rex, 0x89, (byte)(0xC0 | ((source & 7) << 3) | 3));                       // mov r11d, reg32
+				Emit(0x41, 0xC1, 0xEB, 29);                                                     // shr r11d, 29      the stage
+				Emit(0x41, 0xBA); EmitImm32(0x28);                                              // mov r10d, 0x28    stages 3 and 5
+				Emit(0x45, 0x0F, 0xA3, 0xDA);                                                   // bt r10d, r11d
+				Emit(0x45, 0x19, 0xD2);                                                         // sbb r10d, r10d    -1 for stages 3 and 5
+				Emit(0x41, 0x81, 0xE2); EmitImm32(0x80);                                        // and r10d, 0x80
+				Emit(0x41, 0x81, 0xC2); EmitImm32(0x8C);                                        // add r10d, 0x8C    the stage's base
+				Emit(rex, 0x89, (byte)(0xC0 | ((source & 7) << 3) | 3));                       // mov r11d, reg32
+				if (slot.FieldShift != 0)
+				{
+					Emit(0x41, 0xC1, 0xEB, checked((byte)slot.FieldShift));                     // shr r11d, n
+				}
+
+				Emit(0x41, 0x83, 0xE3, 0x1F);                                                   // and r11d, 0x1F
+				Emit(0x45, 0x01, 0xDA);                                                         // add r10d, r11d
+			}
+
+			Emit(0xEB, 0x06);                                                                   // jmp done
+			code[disabledFixup] = checked((byte)(code.Count - (disabledFixup + 1)));
+			Emit(0x41, 0xBA); EmitImm32(slot.Disabled);                                         // disabled: mov r10d, imm32
+			if (slot.ShiftLeft != 0)
+			{
+				Emit(0x41, 0xC1, 0xE2, checked((byte)slot.ShiftLeft));                          // done: shl r10d, n
+			}
+		}
+
 		for (var index = 0; index < spec.Words.Length; index++)
 		{
 			var word = spec.Words[index];
@@ -755,7 +840,42 @@ public sealed unsafe partial class DirectExecutionBackend
 					Emit(0x41, 0xF7, 0xC3); EmitImm32(1);                                       // test r11d, 1
 					Emit(0x74, 0x03);                                                           // jz +3
 					Emit(0x45, 0x31, 0xD2);                                                     // xor r10d, r10d
+					if (word.Constant != 0)
+					{
+						Emit(0x41, 0x81, 0xCA); EmitImm32(word.Constant);                       // or r10d, imm32
+					}
+
 					break;
+				}
+
+				case SharpEmu.Libs.Agc.AgcPacketStubWordKind.ModifierSgprSlots:
+				{
+					// Each slot is computed into r10d (r11d the temporary) and stored, or ORed, into
+					// the packet dword itself: the stage base needs both scratch registers.
+					if (word.Slots.Length == 0)
+					{
+						throw new ArgumentException("A modifier-slot word needs a slot.", nameof(spec));
+					}
+
+					for (var slotIndex = 0; slotIndex < word.Slots.Length; slotIndex++)
+					{
+						EmitModifierSlot(word.Slots[slotIndex]);
+						if (slotIndex == 0)
+						{
+							Emit(0x44, 0x89, 0x50, displacement);                               // mov [rax+disp], r10d
+						}
+						else
+						{
+							Emit(0x44, 0x09, 0x50, displacement);                               // or [rax+disp], r10d
+						}
+					}
+
+					if (word.Constant != 0)
+					{
+						Emit(0x81, 0x48, displacement); EmitImm32(word.Constant);               // or dword [rax+disp], imm32
+					}
+
+					continue;
 				}
 
 				default:
@@ -797,7 +917,9 @@ public sealed unsafe partial class DirectExecutionBackend
 	/// reserve, and a source that overlaps the packet being written; the export handles the rest.
 	/// <list type="bullet">
 	/// <item>ShRegisterRange(cb, offset, values, count): offset 1..0x3FF, count 1..64; writes the marker
-	/// NOP, the SET_SH_REG header, the offset and the values, and returns the SET_SH_REG packet's address.</item>
+	/// NOP, the SET_SH_REG header, the offset and the values, and returns the SET_SH_REG packet's address.
+	/// A null source reserves the payload for the caller, as the export does: nothing is copied or
+	/// checked for overlap, and the count may be anything the export takes (1..0x3FFF).</item>
 	/// <item>ShRegisters(cb, pairs, count): count 1..32 and the pairs' offsets consecutive ascending (the
 	/// export's sort is then a no-op and it emits exactly one packet); verified before anything is
 	/// written, so a decline leaves the buffer untouched.</item>
@@ -818,6 +940,15 @@ public sealed unsafe partial class DirectExecutionBackend
 			Emit(0x0F, (byte)(shortOpcode + 0x10), 0, 0, 0, 0);
 			slowPathFixups.Add(code.Count - 4);
 		}
+
+		// A forward short jump to a label PatchShortForward places.
+		int EmitShortForward(byte opcode)
+		{
+			Emit(opcode, 0);
+			return code.Count - 1;
+		}
+
+		void PatchShortForward(int fixup) => code[fixup] = checked((byte)(code.Count - (fixup + 1)));
 
 		// A backwards short jump (opcode jb 0x72) to a code offset.
 		void EmitLoopBack(int target)
@@ -841,10 +972,17 @@ public sealed unsafe partial class DirectExecutionBackend
 			Emit(0x3D); EmitImm32(0x3FF);                             // cmp eax, 0x3FF
 			EmitBranchToSlowPath(0x73);                               // jae slow: offset outside 1..0x3FF
 			Emit(0x8D, 0x41, 0xFF);                                   // lea eax, [rcx-1]
-			Emit(0x83, 0xF8, (byte)(SharpEmu.Libs.Agc.AgcExports.RangeStubMaxValues - 1)); // cmp eax, max-1
-			EmitBranchToSlowPath(0x77);                               // ja slow: count 0 or too large
 			Emit(0x48, 0x85, 0xD2);                                   // test rdx, rdx
-			EmitBranchToSlowPath(0x74);                               // jz slow: a null source reserves the payload for the caller
+			var nullSourceCount = EmitShortForward(0x74);             // jz null-source count
+			Emit(0x83, 0xF8, (byte)(SharpEmu.Libs.Agc.AgcExports.RangeStubMaxValues - 1)); // cmp eax, max-1
+			EmitBranchToSlowPath(0x77);                               // ja slow: count 0 or too many values to copy
+			var countChecked = EmitShortForward(0xEB);                // jmp count-ok
+			PatchShortForward(nullSourceCount);
+			// A null source reserves the payload for the caller (who asks for its address and fills
+			// it): nothing is copied, so any count the export takes is the stub's too.
+			Emit(0x3D); EmitImm32(SharpEmu.Libs.Agc.AgcExports.RangeStubMaxReservedValues - 1); // cmp eax, max-1
+			EmitBranchToSlowPath(0x77);                               // ja slow: count 0 or over the packet's limit
+			PatchShortForward(countChecked);
 		}
 		else
 		{
@@ -877,7 +1015,14 @@ public sealed unsafe partial class DirectExecutionBackend
 		Emit(0x4D, 0x39, 0xDA);                                       // cmp r10, r11
 		EmitBranchToSlowPath(0x72);                                   // jb slow: no room
 
-		// The source must not overlap the packet area [rax, rax + r9*4).
+		// The source must not overlap the packet area [rax, rax + r9*4). A null source has none.
+		var skipOverlap = -1;
+		if (range)
+		{
+			Emit(0x48, 0x85, 0xD2);                                   // test rdx, rdx
+			skipOverlap = EmitShortForward(0x74);                     // jz ok
+		}
+
 		Emit(0x4E, 0x8D, 0x04, 0x88);                                 // lea r8, [rax + r9*4]     end of the packet
 		if (range)
 		{
@@ -895,6 +1040,11 @@ public sealed unsafe partial class DirectExecutionBackend
 		Emit(0x49, 0x39, 0xC0);                                       // cmp r8, rax
 		EmitBranchToSlowPath(0x77);                                   // ja slow: the source ends after the packet starts
 		// ok:
+		if (skipOverlap >= 0)
+		{
+			PatchShortForward(skipOverlap);
+		}
+
 		if (!range)
 		{
 			Emit(0x44, 0x8B, 0x06);                                   // mov r8d, [rsi]           first offset
@@ -922,6 +1072,8 @@ public sealed unsafe partial class DirectExecutionBackend
 			Emit(0x41, 0x81, 0xCA); EmitImm32(SharpEmu.Libs.Agc.AgcExports.SetShRegHeaderWithoutCount); // or r10d, header
 			Emit(0x44, 0x89, 0x50, 0x08);                             // mov [rax+8], r10d
 			Emit(0x89, 0x70, 0x0C);                                   // mov [rax+12], esi        the register offset
+			Emit(0x48, 0x85, 0xD2);                                   // test rdx, rdx
+			var skipCopy = EmitShortForward(0x74);                    // jz copied: the payload stays the caller's
 			Emit(0x45, 0x31, 0xC0);                                   // xor r8d, r8d
 			var copy = code.Count;
 			Emit(0x46, 0x8B, 0x14, 0x82);                             // mov r10d, [rdx + r8*4]
@@ -929,6 +1081,7 @@ public sealed unsafe partial class DirectExecutionBackend
 			Emit(0x41, 0xFF, 0xC0);                                   // inc r8d
 			Emit(0x41, 0x39, 0xC8);                                   // cmp r8d, ecx
 			EmitLoopBack(copy);                                       // jb copy
+			PatchShortForward(skipCopy);
 			Emit(0x44, 0x8D, 0x49, 0x04);                             // lea r9d, [rcx+4]
 		}
 		else
@@ -957,6 +1110,92 @@ public sealed unsafe partial class DirectExecutionBackend
 		}
 
 		Emit(0xC3);
+
+		foreach (var fixup in slowPathFixups)
+		{
+			var delta = BitConverter.GetBytes(code.Count - (fixup + 4));
+			for (var i = 0; i < 4; i++)
+			{
+				code[fixup + i] = delta[i];
+			}
+		}
+
+		Emit(0xFF, 0x25, 0x00, 0x00, 0x00, 0x00);
+		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
+		return code;
+	}
+
+	/// <summary>
+	/// sceAgcGetDataPacketPayloadAddress(out, packet, type) as guest-side code, on the same terms as
+	/// <see cref="EmitGuestAgcPacketStub"/>: it stores the payload address the export stores at
+	/// <c>out</c> and returns 0, and declines (jumps to the import's trampoline with every argument
+	/// register intact, nothing written) for every case in which the export would not just do that:
+	/// <list type="bullet">
+	/// <item>an <c>out</c> or <c>packet</c> pointer below 0x10000 (null included) or at or above 2^47;</item>
+	/// <item>an 8-byte <c>out</c> that crosses a 4 KiB page, and for type 0 a 4-byte header that
+	/// does, so the export's partial-write and unreadable-tail answers stay its own.</item>
+	/// </list>
+	/// The answer: for type (the low 32 bits of RDX) 0, 0 when the header's count field is all ones,
+	/// else <c>packet + 4</c>; for any other type, <c>packet + 8</c>. A pointer in range whose page is
+	/// not mapped faults here where the export would answer MEMORY_FAULT, as the builder and patcher
+	/// stubs fault on such a pointer. Only RAX and the flags change.
+	/// </summary>
+	internal static List<byte> EmitGuestAgcPayloadAddressStub(nint fallbackTrampoline)
+	{
+		var code = new List<byte>(128);
+		var slowPathFixups = new List<int>();
+		void Emit(params byte[] bytes) => code.AddRange(bytes);
+		void EmitImm32(uint value) => code.AddRange(BitConverter.GetBytes(value));
+		void EmitBranchToSlowPath(byte shortOpcode)
+		{
+			Emit(0x0F, (byte)(shortOpcode + 0x10), 0, 0, 0, 0);
+			slowPathFixups.Add(code.Count - 4);
+		}
+
+		int EmitShortForward(byte opcode)
+		{
+			Emit(opcode, 0);
+			return code.Count - 1;
+		}
+
+		void PatchShortForward(int fixup) => code[fixup] = checked((byte)(code.Count - (fixup + 1)));
+
+		Emit(0x48, 0x81, 0xFF); EmitImm32(0x10000);                   // cmp rdi, 0x10000
+		EmitBranchToSlowPath(0x72);                                     // jb slow: null or a low address
+		Emit(0x48, 0x89, 0xF8);                                         // mov rax, rdi
+		Emit(0x48, 0xC1, 0xE8, 0x2F);                                   // shr rax, 47
+		EmitBranchToSlowPath(0x75);                                     // jnz slow: not a user address
+		Emit(0x48, 0x81, 0xFE); EmitImm32(0x10000);                   // cmp rsi, 0x10000
+		EmitBranchToSlowPath(0x72);                                     // jb slow
+		Emit(0x48, 0x89, 0xF0);                                         // mov rax, rsi
+		Emit(0x48, 0xC1, 0xE8, 0x2F);                                   // shr rax, 47
+		EmitBranchToSlowPath(0x75);                                     // jnz slow
+		Emit(0x89, 0xF8);                                               // mov eax, edi
+		Emit(0x25); EmitImm32(0xFFF);                                   // and eax, 0xFFF
+		Emit(0x3D); EmitImm32(0x1000 - sizeof(ulong));                  // cmp eax, 0xFF8
+		EmitBranchToSlowPath(0x77);                                     // ja slow: the answer crosses a page
+		Emit(0x85, 0xD2);                                               // test edx, edx
+		var otherType = EmitShortForward(0x75);                         // jnz other
+		Emit(0x89, 0xF0);                                               // mov eax, esi
+		Emit(0x25); EmitImm32(0xFFF);                                   // and eax, 0xFFF
+		Emit(0x3D); EmitImm32(0x1000 - sizeof(uint));                   // cmp eax, 0xFFC
+		EmitBranchToSlowPath(0x77);                                     // ja slow: the header crosses a page
+		Emit(0x8B, 0x06);                                               // mov eax, [rsi]           header
+		Emit(0x25); EmitImm32(SharpEmu.Libs.Agc.AgcExports.PayloadAddressCountMask);  // and eax, count field
+		Emit(0x3D); EmitImm32(SharpEmu.Libs.Agc.AgcExports.PayloadAddressCountMask);  // cmp eax, all ones
+		var countNotFull = EmitShortForward(0x75);                      // jne inline
+		Emit(0x31, 0xC0);                                               // xor eax, eax             no payload
+		var storeAfterNull = EmitShortForward(0xEB);                    // jmp store
+		PatchShortForward(countNotFull);
+		Emit(0x48, 0x8D, 0x46, 0x04);                                   // inline: lea rax, [rsi+4]
+		var storeAfterInline = EmitShortForward(0xEB);                  // jmp store
+		PatchShortForward(otherType);
+		Emit(0x48, 0x8D, 0x46, 0x08);                                   // other: lea rax, [rsi+8]
+		PatchShortForward(storeAfterNull);
+		PatchShortForward(storeAfterInline);
+		Emit(0x48, 0x89, 0x07);                                         // store: mov [rdi], rax
+		Emit(0x31, 0xC0);                                               // xor eax, eax
+		Emit(0xC3);                                                     // ret
 
 		foreach (var fixup in slowPathFixups)
 		{

@@ -30,8 +30,8 @@ internal sealed partial class MetalRenderHost
     private static long _labelledEncoders;
 
     private nint NewCommandBuffer() => EncoderStatusEnabled
-        ? MetalNative.Send(_queue, SelCommandBufferWithDescriptor, EncoderStatusDescriptor.Value)
-        : MetalNative.Send(_queue, SelCommandBuffer);
+        ? MetalNative.Send(RecordQueue, SelCommandBufferWithDescriptor, EncoderStatusDescriptor.Value)
+        : MetalNative.Send(RecordQueue, SelCommandBuffer);
 
     private static void LabelEncoder(nint encoder, string kind)
     {

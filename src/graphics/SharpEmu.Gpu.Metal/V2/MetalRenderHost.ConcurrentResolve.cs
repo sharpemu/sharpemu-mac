@@ -57,9 +57,31 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     bool IConcurrentResolveHost.PrefetchedDispatchesCrossDispatches => DispatchPrefetchCrossesDispatches;
 
+    // The take of a draw resolved ahead of dispatches (ParallelProgramPrefetch.SubmitDrawAhead) checks the GPU write log
+    // and the copies read through as a dispatch's does (IsConcurrentResolveStillCurrentAcrossDispatches).
+    bool IConcurrentResolveHost.PrefetchedDrawsCrossDispatches => true;
+
+    // A consumed kernel fill or copy (TryClearImageFromKernelFill, TryCopyWordsOnHost; MetalRenderHost.KernelFills) is
+    // either intercepted, which does the bookkeeping a storage store into its destination would and logs that write
+    // (TryInterceptKernelFill, TryInterceptKernelCopy: NoteGuestMemoryWrite -> MetalGpuWriteRanges.Note -> LogWrite),
+    // or found identical, which writes nothing (TakeIdenticalKernel). So IsConcurrentResolveStillCurrent sees it as it
+    // sees a dispatch's store. A DCC or constant fill and an image clear are not logged this way and stay blunt.
+    bool IConcurrentResolveHost.KernelFillWritesLogged => true;
+
     bool IConcurrentResolveHost.IsStillCurrentAcrossDispatches(object assumptions) => IsConcurrentResolveStillCurrentAcrossDispatches(assumptions);
 
     private long _writeLogRefusals;
+    // Clean word reads under a pending recorded GPU write: on the worker answered with the landed value (through the copy
+    // or after a wait); on a resolving thread answered through the copy, or the resolution abandoned.
+    private long _cleanReadsLanded;
+    // SHARPEMU_CLEAN_READ_LANDED=0: such a clean read is refused on both threads again (bd5c2009a).
+    internal static bool CleanReadsLanded { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_CLEAN_READ_LANDED") != "0";
+    private long _cleanReadsCopied;
+    private long _cleanReadsAbandoned;
+    // Verify differences excused because a GPU write logged since the resolution began covers what it read.
+    private long _supersededVerifies;
+    // Takes refused because an owned answer (a refused clean or resident read) is clean now.
+    private long _ownedNowCleanRefusals;
 
     // Small unclaimed queues can resolve on the drawing thread without a worker wakeup.
     // Component gains and ordering/device checks justify the default; the Silent Hill
@@ -163,12 +185,12 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var (computeSubmitted, computeTaken, computeRefused, computeWaitMs, computeSavedMs) = prefetch.TakeComputeCounters();
         var dispatches = $" dispatch_jobs={computeSubmitted} dispatch_taken={computeTaken} dispatch_refused=(abandoned={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Abandoned]}," +
             $"provider={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Provider]}{FormatProviderRefusals(prefetch.TakeProviderRefusals())},inputs={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Inputs]}," +
-            $"ownership={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]},effects={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Effects]}) " +
-            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
+            $"ownership={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]},effects={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Effects]},replanned={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Replanned]}) {prefetch.TakeComputeReport()} " +
+            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} superseded_verifies={Interlocked.Exchange(ref _supersededVerifies, 0)} owned_now_clean_refusals={Interlocked.Exchange(ref _ownedNowCleanRefusals, 0)} clean_under_write=(landed={Interlocked.Exchange(ref _cleanReadsLanded, 0)},copied={Interlocked.Exchange(ref _cleanReadsCopied, 0)},abandoned={Interlocked.Exchange(ref _cleanReadsAbandoned, 0)}) dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
             $"dispatch_saved_ms={computeSavedMs.ToString("F1", culture)}";
-        return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
+        return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) abandoned_verify={GpuFatal.TakeSpeculativeVerifyFailures()} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
-            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()}{dispatches}{FormatPacketCounters()} {own}{TakeDrainCallers()}";
+            $"caller_jobs={callerResolves} caller_ms={callerMs.ToString("F1", culture)} claim_steals={prefetch.TakeClaimSteals()} {prefetch.TakeResolverReport()}{dispatches}{FormatPacketCounters()} {own} {TakeOwnerTestCounters()}{TakeDrainCallers()}";
     }
 
     private static string FormatProviderRefusals(long[] refused) =>
@@ -194,7 +216,185 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     private static readonly bool ConcurrentWordLines =
         Environment.GetEnvironmentVariable("SHARPEMU_CONCURRENT_WORD_LINES") != "0";
 
-    internal sealed class ConcurrentAssumptions((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
+    // SHARPEMU_CONCURRENT_OWNED_LINES=0 tests a page found owned again for every word read in it, then the word.
+    // A page found owned is remembered for the rest of the resolution (a ring beside the clean pages), and in it
+    // the 256-byte line of a word is tested before the word: a clean line is recorded once and its words are read
+    // from it, and only the words of an owned line are tested one by one. Demon's Souls keeps a pending GPU write
+    // in its descriptor page, so each of the ~45 words a stage reads paid a page test and a word test.
+    private static readonly bool ConcurrentOwnedLinesDefault =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_CONCURRENT_OWNED_LINES");
+
+    internal bool ConcurrentOwnedLines { get; set; } = ConcurrentOwnedLinesDefault;
+
+    // SHARPEMU_CONCURRENT_SCOPED_SERIAL=0 asks the GPU for the completed serial (a message send) at every
+    // ownership test of a resolution and of the worker's re-check of one. With it on, a resolution and a re-check
+    // each read it once, at their first test that needs it. A serial only grows, so an older one reports more
+    // writes pending, never fewer: an answer it gives is owned where a newer serial may say clean, never the
+    // other way (the same argument as the worker's scoped serial, SHARPEMU_METAL_V2_SCOPED_SERIAL).
+    private static readonly bool ConcurrentScopedSerialDefault =
+        SharpEmu.ShaderCompiler.PerfSwitches.Enabled("SHARPEMU_CONCURRENT_SCOPED_SERIAL");
+
+    internal bool ConcurrentScopedSerial { get; set; } = ConcurrentScopedSerialDefault;
+
+    // SHARPEMU_CONCURRENT_LINE_MASKS=0 tests every word read in an owned line of an owned page on its own, as before;
+    // =verify answers each such word both ways and fails (fatal, mask_verify_failed) where they differ.
+    //
+    // With it on (and ConcurrentScopedSerial, which fixes the completed serial for the resolution), the line's test
+    // (ConcurrentLineOwner) takes each owner apart instead of stopping at the first: queued command writes, GPU-modified
+    // images, the two overlays, and the pending GPU writes as a mask of the line's 64 words read from the write
+    // records at one mutation stamp. A line only GPU writes own keeps that mask, and a word in it is answered from the
+    // mask instead of its own ConcurrentOwner: GpuWrite where its bits are set, None elsewhere, recorded exactly as the
+    // word's own test is (same query, range and answer), so the worker re-checks the same answers at the take.
+    // Demon's Souls' draws read ~20 words a job out of lines a pending copy writes (~167k word tests a frame, each a
+    // walk of the write records).
+    //
+    // Why the mask's answer is the word's own test's answer at the time of the read: what the worker (and the command
+    // thread) can change while the resolver reads, and what tells the resolver it did:
+    //   - queued command writes ahead of the job (PendingCommandWriteHolds): only ever released for a job, never added
+    //     (a range queued after the job was submitted is not ahead of it), so none over the line then means none over
+    //     the word now;
+    //   - GPU-modified images and the two overlays: anything that makes bytes newly owned moves OwnershipVersions (the
+    //     argument CrossDrawCleanPages rests on); the versions are read before the line's tests and compared at the
+    //     word, so none over the line then means none over the word now;
+    //   - the write records: every change (a write noted, records retired, folded or cleared, and the bounds MayCover
+    //     reads) happens inside one mutation of MetalGpuWriteRanges; the mask is read between two equal even stamps and
+    //     the stamp is compared at the word, so the records the word's own walk would read are the mask's records, and
+    //     the serial is the same scoped serial.
+    // A word whose line moved a version or the stamp, an unaligned word, or a line some other owner holds, takes its own
+    // test as before (mask_stale, mask_refused). The answer is recorded at the word as before, so the take's re-check
+    // (IsConcurrentResolveStillCurrent) is unchanged.
+    internal enum LineMaskMode : byte
+    {
+        Off,
+        On,
+        Verify,
+    }
+
+    private static readonly LineMaskMode ConcurrentLineMasksDefault =
+        Environment.GetEnvironmentVariable("SHARPEMU_CONCURRENT_LINE_MASKS") switch
+        {
+            "0" => LineMaskMode.Off,
+            "verify" => LineMaskMode.Verify,
+            _ => LineMaskMode.On,
+        };
+
+    internal LineMaskMode ConcurrentLineMasks { get; set; } = ConcurrentLineMasksDefault;
+
+    private long _lineMaskVerifyFailed;
+
+    /// <summary>
+    /// What a line test found for each owner (ConcurrentLineOwner): usable when only pending GPU writes own bytes of
+    /// the line, and then their words (<see cref="Mask"/>) as of write-record stamp <see cref="Stamp"/> and the
+    /// ownership versions <see cref="Versions"/> read before any of the line's tests.
+    /// </summary>
+    internal struct LineSummary
+    {
+        public bool Usable;
+        public int Stamp;
+        public ulong Mask;
+        public (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) Versions;
+    }
+
+    // What an ownership test costs, counted where it runs (a resolution, a re-check) and added to the host's
+    // totals once per resolution or re-check, for the PERF line: owner_tests=(...).
+    internal enum OwnerTestCounter
+    {
+        Page,
+        Line,
+        Word,
+        Recheck,
+        ImageLock,
+        SerialRead,
+        OverlayCall,
+        // Words of an owned line answered from its mask (ConcurrentLineMasks); words of a masked line that took
+        // their own test because a version or the record stamp moved (stale) or the word is unaligned (refused,
+        // with the words of lines some other owner holds); words verified both ways.
+        MaskWord,
+        MaskStale,
+        MaskRefused,
+        MaskVerified,
+        // Words a pending copy writes, answered from the copy line (TryReadGuestWordConcurrent).
+        CopyLineWord,
+    }
+
+    private static readonly string[] OwnerTestCounterNames =
+        ["page", "line", "word", "recheck", "image_locks", "serial_reads", "overlay_calls", "mask_words", "mask_stale", "mask_refused", "mask_verified", "copy_line_words"];
+
+    private readonly long[] _ownerTests = new long[OwnerTestCounterNames.Length];
+
+    /// <summary>
+    /// The serial the ownership tests of one resolution or one re-check use, and what they cost. Used by one
+    /// thread at a time.
+    /// </summary>
+    internal class ConcurrentOwnerScope
+    {
+        private readonly Func<ulong> _signaled;
+        private ulong _serial;
+        private bool _serialKnown;
+
+        public ConcurrentOwnerScope(Func<ulong> signaled)
+        {
+            _signaled = signaled;
+            Serial = ReadSerial;
+        }
+
+        // Read once per scope while Scoped is set; every call reads it again otherwise.
+        public bool Scoped;
+
+        // The completed serial, for IsGpuWritePendingConcurrent and the overlays' Coverage.
+        public readonly Func<ulong> Serial;
+
+        public readonly long[] Counters = new long[OwnerTestCounterNames.Length];
+
+        public void Count(OwnerTestCounter counter) => Counters[(int)counter]++;
+
+        // A new scope: the next test that needs the serial reads it.
+        public void ForgetSerial() => _serialKnown = false;
+
+        private ulong ReadSerial()
+        {
+            if (Scoped && _serialKnown)
+            {
+                return _serial;
+            }
+
+            Counters[(int)OwnerTestCounter.SerialRead]++;
+            _serial = _signaled();
+            _serialKnown = true;
+            return _serial;
+        }
+    }
+
+    // Adds a scope's counters to the host's totals and clears them.
+    private void FlushOwnerTests(ConcurrentOwnerScope scope)
+    {
+        var counters = scope.Counters;
+        for (var index = 0; index < counters.Length; index++)
+        {
+            if (counters[index] != 0)
+            {
+                Interlocked.Add(ref _ownerTests[index], counters[index]);
+                counters[index] = 0;
+            }
+        }
+    }
+
+    internal string TakeOwnerTestCounters()
+    {
+        var builder = new System.Text.StringBuilder("owner_tests=(");
+        for (var index = 0; index < _ownerTests.Length; index++)
+        {
+            builder.Append(index == 0 ? string.Empty : ",").Append(OwnerTestCounterNames[index]).Append('=')
+                .Append(Interlocked.Exchange(ref _ownerTests[index], 0));
+        }
+
+        // Not reset: one is a bug.
+        return builder.Append(",mask_verify_failed=").Append(Interlocked.Read(ref _lineMaskVerifyFailed)).Append(')').ToString();
+    }
+
+    internal sealed class ConcurrentAssumptions(
+        (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions, Func<ulong> signaled)
+        : ConcurrentOwnerScope(signaled)
     {
         public readonly List<(ConcurrentQuery Query, ulong Address, ulong Size, bool Owned)> Answers = new();
 
@@ -204,24 +404,128 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         // The GPU write log's count when the resolution began reading (MetalGpuWriteRanges.LoggedWriteSince).
         public ulong WriteLogVersion;
 
+        // The destinations read as the source of the pending copy that writes them, whose owned answers were dropped
+        // (TryReadThroughPendingCopyConcurrent, FillCopyLine): merged with the last range when they touch it.
+        public readonly List<(ulong Start, ulong End)> CopiedThrough = new();
+
+        public void NoteCopiedThrough(ulong address, ulong size)
+        {
+            var end = address + size;
+            if (CopiedThrough.Count != 0 && CopiedThrough[^1] is var (lastStart, lastEnd) && address <= lastEnd && lastStart <= end)
+            {
+                CopiedThrough[^1] = (Math.Min(lastStart, address), Math.Max(lastEnd, end));
+                return;
+            }
+
+            CopiedThrough.Add((address, end));
+        }
+
         // The last pages found unowned, for each kind of read.
         private readonly ulong[] _cleanPages = [ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
             ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
         private int _nextCleanPage;
 
-        // The last line of a clean page read whole for word reads (TryReadGuestWordConcurrent): the words
-        // after it in the line are answered from it, under the clean-page answer already recorded.
+        // The last pages found owned (ConcurrentOwnedLines). Not an answer: nothing is recorded for them, and a
+        // read in one is answered by its line or by itself, as it would be after testing the page again.
+        private readonly ulong[] _ownedPages = [ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
+        private int _nextOwnedPage;
+
+        // The last lines of owned pages tested, each with its answer (LineOwnedBit): a clean one was recorded.
+        private const ulong LineOwnedBit = 2;
+        private readonly ulong[] _lines = [ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
+            ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue];
+        private int _nextLine;
+
+        // The last line of a clean page or a clean line read whole for word reads (TryReadGuestWordConcurrent):
+        // the words after it in the line are answered from it, under the clean answer already recorded.
         public ulong WordLine = ulong.MaxValue;
         public readonly byte[] WordLineBytes = new byte[ConcurrentWordLineBytes];
+
+        // The line of the last word read through a pending copy with its owner from a line mask, and the words of it
+        // (CopyLineWords) read through the same copy then (FillCopyLine), with the stamp and versions they stand for.
+        public ulong CopyLine = ulong.MaxValue;
+        public ulong CopyLineWords;
+        public int CopyLineStamp;
+        public (long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) CopyLineVersions;
+        public readonly byte[] CopyLineBytes = new byte[ConcurrentWordLineBytes];
+
+        // The ring slot whose mask answered IsOwnedRecorded's last test, or -1.
+        public int LastMaskSlot = -1;
+
+        // An owned answer was recorded: a clean or resident read the resolution let refuse (a resource branch then keeps
+        // both paths). Its owner can go away with no version moving (the GPU completes a recorded write before the worker
+        // retires it), so IsConcurrentResolveStillCurrent re-tests every answer instead of trusting equal versions. Not
+        // cleared by Forget: a stale flag only costs the re-test.
+        public bool ReliesOnOwned;
+
+        // A verify on the resolving thread found a GPU write logged since the resolution began over what it read and
+        // excused a difference for it (ConcurrentReadsSuperseded): the take refuses the resolution whatever it finds.
+        public bool Superseded;
 
         // Taken again from the pool for a new resolution.
         public void Reset((long Overlay, long Labels, ulong GpuWrites, long Images, long GpuModified) versions)
         {
             Answers.Clear();
+            CopiedThrough.Clear();
+            ReliesOnOwned = false;
+            Superseded = false;
             Versions = versions;
             Array.Fill(_cleanPages, ulong.MaxValue);
             _nextCleanPage = 0;
+            Array.Fill(_ownedPages, ulong.MaxValue);
+            _nextOwnedPage = 0;
+            Array.Fill(_lines, ulong.MaxValue);
+            _nextLine = 0;
             WordLine = ulong.MaxValue;
+            CopyLine = ulong.MaxValue;
+            LastMaskSlot = -1;
+            ForgetSerial();
+        }
+
+        public bool IsOwnedPage(ConcurrentQuery query, ulong page) => Array.IndexOf(_ownedPages, page | (ulong)query) >= 0;
+
+        public void NoteOwnedPage(ConcurrentQuery query, ulong page)
+        {
+            _ownedPages[_nextOwnedPage] = page | (ulong)query;
+            _nextOwnedPage = (_nextOwnedPage + 1) & (_ownedPages.Length - 1);
+        }
+
+        // Beside each line, what its test found per owner (ConcurrentLineMasks); not usable when not taken.
+        private readonly LineSummary[] _lineSummaries = new LineSummary[8];
+
+        // Null when the line has not been tested in this resolution (or has left the ring).
+        public bool? LineOwned(ConcurrentQuery query, ulong line)
+        {
+            var slot = FindLine(query, line);
+            return slot < 0 ? null : LineIsOwned(slot);
+        }
+
+        // The line's slot in the ring, or -1.
+        public int FindLine(ConcurrentQuery query, ulong line)
+        {
+            var key = line | (ulong)query;
+            for (var slot = 0; slot < _lines.Length; slot++)
+            {
+                if ((_lines[slot] & ~LineOwnedBit) == key)
+                {
+                    return slot;
+                }
+            }
+
+            return -1;
+        }
+
+        public bool LineIsOwned(int slot) => (_lines[slot] & LineOwnedBit) != 0;
+
+        public ref readonly LineSummary Summary(int slot) => ref _lineSummaries[slot];
+
+        public int NoteLine(ConcurrentQuery query, ulong line, bool owned, in LineSummary summary = default)
+        {
+            var slot = _nextLine;
+            _lines[slot] = line | (ulong)query | (owned ? LineOwnedBit : 0);
+            _lineSummaries[slot] = summary;
+            _nextLine = (_nextLine + 1) & (_lines.Length - 1);
+            return slot;
         }
 
         public bool IsCleanPage(ConcurrentQuery query, ulong page)
@@ -271,6 +575,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 }
             }
 
+            ReliesOnOwned |= owned;
             Answers.Add((query, address, size, owned));
         }
     }
@@ -282,21 +587,30 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     internal void BeginConcurrentResolve()
     {
         ConcurrentAssumptions? pooled = null;
+        // A plain read first: an empty slot costs no exchange.
         for (var slot = 0; slot < _assumptionPool.Length && pooled is null; slot++)
         {
-            pooled = Interlocked.Exchange(ref _assumptionPool[slot], null);
+            if (Volatile.Read(ref _assumptionPool[slot]) is not null)
+            {
+                pooled = Interlocked.Exchange(ref _assumptionPool[slot], null);
+            }
         }
 
         // Read before the versions and every guest byte: a write logged after this is one the resolution may have missed.
         var writeLogVersion = _gpuWrites.WriteLogVersion;
         if (pooled is null)
         {
-            _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions()) { WriteLogVersion = writeLogVersion };
+            _concurrentAssumptions = new ConcurrentAssumptions(OwnershipVersions(), _signaledSerialReader ??= SignaledSerial)
+            {
+                WriteLogVersion = writeLogVersion,
+                Scoped = ConcurrentScopedSerial,
+            };
             return;
         }
 
         pooled.Reset(OwnershipVersions());
         pooled.WriteLogVersion = writeLogVersion;
+        pooled.Scoped = ConcurrentScopedSerial;
         _concurrentAssumptions = pooled;
     }
 
@@ -305,7 +619,9 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // Slots taken and filled with an exchange each: the resolving thread takes one per draw and the worker
     // returns one per draw, and a lock both took per draw was contended on every one (Demon's Souls, ~7000 a frame).
     private readonly ConcurrentAssumptions?[] _assumptionPool = new ConcurrentAssumptions?[MaxPooledAssumptions];
-    private const int MaxPooledAssumptions = 32;
+    // Above the jobs a resolving thread can have resolved ahead of the worker (the command thread's queue of 64 items),
+    // so a resolver ahead of the worker still finds one rather than allocating it with its lists empty.
+    private const int MaxPooledAssumptions = 96;
     private const int MaxPooledAnswers = 4096;
 
     internal void ReleaseConcurrentAssumptions(object assumptionsObject)
@@ -317,7 +633,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
         for (var slot = 0; slot < _assumptionPool.Length; slot++)
         {
-            if (Interlocked.CompareExchange(ref _assumptionPool[slot], assumptions, null) is null)
+            if (Volatile.Read(ref _assumptionPool[slot]) is null && Interlocked.CompareExchange(ref _assumptionPool[slot], assumptions, null) is null)
             {
                 return;
             }
@@ -331,6 +647,13 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     {
         var assumptions = _concurrentAssumptions ?? throw new InvalidOperationException("No concurrent resolution is open.");
         _concurrentAssumptions = null;
+        var copyLineWords = assumptions.Counters[(int)OwnerTestCounter.CopyLineWord];
+        if (copyLineWords != 0)
+        {
+            Interlocked.Add(ref _concurrentCopyReads, copyLineWords);
+        }
+
+        FlushOwnerTests(assumptions);
         return assumptions;
     }
 
@@ -386,65 +709,271 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         return builder.ToString();
     }
 
-    // On the worker: the answers a resolution relied on still hold.
+    // On the worker: the answers a resolution relied on still hold, and no GPU write logged since it began covers a
+    // range it read or a destination it read through a pending copy. Every write the worker records while a resolution
+    // is open belongs to an item ahead of the draw (the worker takes the draw only after them), so the draw sees it;
+    // once that write has completed its record is gone and a clean answer read before it is clean again (the bytes it
+    // read are not), which only the log still shows (ACleanReadIsNotCurrentOnceAWriteRecordedAfterItCompletes).
     internal bool IsConcurrentResolveStillCurrent(object assumptionsObject)
     {
         var assumptions = (ConcurrentAssumptions)assumptionsObject;
-        if (assumptions.Versions == OwnershipVersions())
+        if (assumptions.Superseded ||
+            (assumptions.WriteLogVersion != _gpuWrites.WriteLogVersion && LoggedWriteCoversRead(assumptions)))
+        {
+            Interlocked.Increment(ref _writeLogRefusals);
+            return false;
+        }
+
+        if (!assumptions.ReliesOnOwned && assumptions.Versions == OwnershipVersions())
         {
             return true;
         }
 
-        foreach (var (query, address, size, owned) in assumptions.Answers)
+        // One serial for the whole re-check (ConcurrentScopedSerial): an older serial can only turn a clean
+        // answer owned, so a re-check that passes with it would pass with every newer one.
+        var scope = t_recheckScope;
+        if (scope is null || !ReferenceEquals(t_recheckHost, this))
         {
-            if (IsOwnedConcurrent(query, address, size) != owned)
-            {
-                return false;
-            }
+            scope = t_recheckScope = new ConcurrentOwnerScope(_signaledSerialReader ??= SignaledSerial);
+            t_recheckHost = this;
         }
 
-        return true;
-    }
-
-    // On the worker, for a dispatch's resolution that may have read guest memory before the dispatches ahead of it ran:
-    // as IsConcurrentResolveStillCurrent, and no GPU write logged since it began covers a range it read. A write those
-    // dispatches recorded may have landed and retired by now, which the ownership answers alone no longer show.
-    internal bool IsConcurrentResolveStillCurrentAcrossDispatches(object assumptionsObject)
-    {
-        var assumptions = (ConcurrentAssumptions)assumptionsObject;
-        if (assumptions.WriteLogVersion != _gpuWrites.WriteLogVersion)
+        scope.Scoped = ConcurrentScopedSerial;
+        scope.ForgetSerial();
+        try
         {
-            foreach (var (_, address, size, _) in assumptions.Answers)
+            foreach (var (_, address, size, owned) in assumptions.Answers)
             {
-                if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, address, size))
+                scope.Count(OwnerTestCounter.Recheck);
+                if ((ConcurrentOwner(address, size, scope) != AbandonCause.None) != owned)
                 {
-                    Interlocked.Increment(ref _writeLogRefusals);
+                    if (owned)
+                    {
+                        // A refused read would now be answered: the resolution kept what a read now prunes.
+                        Interlocked.Increment(ref _ownedNowCleanRefusals);
+                    }
+
                     return false;
                 }
             }
+
+            return true;
+        }
+        finally
+        {
+            FlushOwnerTests(scope);
+        }
+    }
+
+    // The re-check's scope, per thread that takes resolutions.
+    [ThreadStatic]
+    private static ConcurrentOwnerScope? t_recheckScope;
+
+    [ThreadStatic]
+    private static MetalRenderHost? t_recheckHost;
+
+    // On the worker, for a resolution (a dispatch's or a draw's) that may have read guest memory before the dispatches
+    // ahead of it ran: as IsConcurrentResolveStillCurrent, and no GPU write logged since it began covers a range it read,
+    // nor a destination it read through a pending copy. A write those dispatches recorded may have landed and retired by
+    // now, which the ownership answers alone no longer show; and one over a copied destination, whose owned answer the
+    // copy read dropped, makes it the destination's latest write instead of the copy.
+    // The write log is tested by IsConcurrentResolveStillCurrent for every take.
+    internal bool IsConcurrentResolveStillCurrentAcrossDispatches(object assumptionsObject) =>
+        IsConcurrentResolveStillCurrent(assumptionsObject);
+
+    // On a resolving thread ahead of the worker, for a verify that found two readers of one resolution disagreeing: a
+    // GPU write logged since the resolution began covers what it read, so its reads straddle that write (an answer
+    // cached before it, a fresh test or a copy read after it) and the take refuses it (latched: Superseded). The worker
+    // records such a write only for an item ahead of the draw, so the value the draw needs is the one after the write.
+    // False on the worker, and when the log could not be read whole.
+    public bool ConcurrentReadsSuperseded()
+    {
+        if (_concurrentAssumptions is not { } assumptions)
+        {
+            return false;
         }
 
-        return IsConcurrentResolveStillCurrent(assumptionsObject);
+        if (assumptions.Superseded)
+        {
+            return true;
+        }
+
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            if (TryLoggedWriteCoversRead(assumptions) is { } covers)
+            {
+                assumptions.Superseded = covers;
+                if (covers)
+                {
+                    Interlocked.Increment(ref _supersededVerifies);
+                }
+
+                return covers;
+            }
+
+            Thread.SpinWait(8);
+        }
+
+        return false;
+    }
+
+    private bool? TryLoggedWriteCoversRead(ConcurrentAssumptions assumptions)
+    {
+        foreach (var (_, address, size, _) in assumptions.Answers)
+        {
+            if (_gpuWrites.TryLoggedWriteSinceSnapshot(assumptions.WriteLogVersion, address, size) is not { } logged)
+            {
+                return null;
+            }
+
+            if (logged)
+            {
+                return true;
+            }
+        }
+
+        foreach (var (start, end) in assumptions.CopiedThrough)
+        {
+            if (_gpuWrites.TryLoggedWriteSinceSnapshot(assumptions.WriteLogVersion, start, end - start) is not { } logged)
+            {
+                return null;
+            }
+
+            if (logged)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // On the worker, which logs: whether a GPU write logged since the resolution began covers a range it answered or read
+    // through a copy.
+    private bool LoggedWriteCoversRead(ConcurrentAssumptions assumptions)
+    {
+        foreach (var (_, address, size, _) in assumptions.Answers)
+        {
+            if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, address, size))
+            {
+                return true;
+            }
+        }
+
+        foreach (var (start, end) in assumptions.CopiedThrough)
+        {
+            if (_gpuWrites.LoggedWriteSince(assumptions.WriteLogVersion, start, end - start))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // A write the command thread queued ahead of the draw being resolved, still waiting for the worker,
     // is checked first: the worker records a write's ownership before it lets go of the queued range,
     // so the range found gone means the ownership below is already there.
     private bool IsOwnedConcurrent(ConcurrentQuery query, ulong address, ulong size) =>
-        ConcurrentOwner(address, size) != AbandonCause.None;
+        ConcurrentOwner(address, size, scope: null) != AbandonCause.None;
 
-    // The first owner of the range, in the order the tests above are cheapest to fail.
-    private AbandonCause ConcurrentOwner(ulong address, ulong size) =>
-        PendingCommandWriteHolds(address, size) ? AbandonCause.Queued
-        : _imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size) ? AbandonCause.Image
-        : IsGpuWritePendingConcurrent(address, size) ? AbandonCause.GpuWrite
-        : _cpOverlay.Count != 0 &&
-            _cpOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
-            ? AbandonCause.CommandProcessor
-        : _labelOverlay.Count != 0 &&
-            _labelOverlay.Coverage(address, size, _signaledSerialReader ??= SignaledSerial) != MetalOverlayCoverage.None
-            ? AbandonCause.Label
-        : AbandonCause.None;
+    // The first owner of the range, in the order the tests above are cheapest to fail. A scope gives the
+    // completed serial (read once while it is scoped) and counts what the tests cost; without one, each test
+    // that needs the serial asks the GPU for it.
+    private AbandonCause ConcurrentOwner(ulong address, ulong size, ConcurrentOwnerScope? scope)
+    {
+        if (PendingCommandWriteHolds(address, size))
+        {
+            return AbandonCause.Queued;
+        }
+
+        if (_imageCache.MayOwn(address, size))
+        {
+            scope?.Count(OwnerTestCounter.ImageLock);
+            if (_imageCache.HasGpuModifiedImageBytes(address, size))
+            {
+                return AbandonCause.Image;
+            }
+        }
+
+        var serial = scope?.Serial ?? (_signaledSerialReader ??= SignaledSerial);
+        if (IsGpuWritePendingConcurrent(address, size, serial))
+        {
+            return AbandonCause.GpuWrite;
+        }
+
+        if (_cpOverlay.Count != 0)
+        {
+            scope?.Count(OwnerTestCounter.OverlayCall);
+            if (_cpOverlay.Coverage(address, size, serial) != MetalOverlayCoverage.None)
+            {
+                return AbandonCause.CommandProcessor;
+            }
+        }
+
+        if (_labelOverlay.Count != 0)
+        {
+            scope?.Count(OwnerTestCounter.OverlayCall);
+            if (_labelOverlay.Coverage(address, size, serial) != MetalOverlayCoverage.None)
+            {
+                return AbandonCause.Label;
+            }
+        }
+
+        return AbandonCause.None;
+    }
+
+    // For an error report (a read-proof verify mismatch): how each reader of this thread answers the word now. Off the
+    // worker: the resolution's word line and copy line caches, its clean-page answer, the word read as a resolution
+    // reads it, the pending copy's source; then the owner, the backing and the host's range state.
+    public string DescribeCleanRead(ulong address)
+    {
+        var builder = new System.Text.StringBuilder();
+        const ulong lineMask = ConcurrentWordLineBytes - 1;
+        var line = address & ~lineMask;
+        var offset = (int)(address & lineMask);
+        if (_concurrentAssumptions is { } assumptions && (address & 3) == 0)
+        {
+            builder.Append(FormattableString.Invariant($"word_line={(assumptions.WordLine == line ? $"0x{System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(assumptions.WordLineBytes.AsSpan(offset)):X8}" : "other")} "));
+            var copyBit = ((assumptions.CopyLineWords >> (offset >> 2)) & 1) != 0;
+            builder.Append(FormattableString.Invariant($"copy_line={(assumptions.CopyLine == line ? copyBit ? $"0x{System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(assumptions.CopyLineBytes.AsSpan(offset)):X8}" : "line_no_bit" : "other")} "));
+            builder.Append($"clean_page={assumptions.IsCleanPage(ConcurrentQuery.Word, address & ~(ConcurrentPageBytes - 1))} ");
+            try
+            {
+                var savedLine = assumptions.WordLine;
+                var savedCopy = assumptions.CopyLine;
+                assumptions.WordLine = ulong.MaxValue;
+                assumptions.CopyLine = ulong.MaxValue;
+                builder.Append(TryReadGuestWordConcurrentTested(address, out var tested, assumptions)
+                    ? FormattableString.Invariant($"tested_read=0x{tested:X8} ") : "tested_read=refused ");
+                assumptions.WordLine = savedLine;
+                assumptions.CopyLine = savedCopy;
+            }
+            catch (GpuFatal.AbandonedWorkException)
+            {
+                builder.Append("tested_read=abandoned ");
+            }
+
+            Span<byte> through = stackalloc byte[sizeof(uint)];
+            builder.Append(TryReadThroughPendingCopyConcurrent(address, through, assumptions)
+                ? FormattableString.Invariant($"pending_copy=0x{System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(through):X8} ") : "pending_copy=none ");
+        }
+        else
+        {
+            builder.Append("thread=worker ");
+        }
+
+        builder.Append(DescribeGuestRangeForDiagnostics(address, sizeof(uint)));
+        return builder.ToString();
+    }
+
+    // Diagnostics (DescribeGuestRangeForDiagnostics): the first owner the resolving thread's test names, any thread.
+    private string ConcurrentOwnerForDiagnostics(ulong address, ulong size) =>
+        ConcurrentOwner(address, size, scope: null) is var cause && cause == AbandonCause.None ? "none" : AbandonCauseNames[(int)cause];
+
+    private bool PendingCommandWriteHoldsForDiagnostics(ulong address, ulong size) => PendingCommandWriteHolds(address, size);
+
+    private bool IsGpuWritePendingForDiagnostics(ulong address, ulong size) => IsGpuWritePendingConcurrent(address, size);
 
     private bool PendingCommandWriteHolds(ulong address, ulong size) =>
         _commandThread is { } thread && ParallelProgramPrefetch.ResolvingJob is var job and >= 0 &&
@@ -460,6 +989,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // otherwise for the range itself.
     private bool IsOwnedRecorded(ConcurrentQuery query, ulong address, ulong size, ConcurrentAssumptions assumptions)
     {
+        assumptions.LastMaskSlot = -1;
         var page = address & ~(ConcurrentPageBytes - 1);
         var withinPage = size != 0 && size <= ConcurrentPageBytes && address - page <= ConcurrentPageBytes - size;
         if (withinPage)
@@ -469,30 +999,211 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 return false;
             }
 
-            if (CrossDrawCleanPages && IsCrossDrawClean(query, page, assumptions.Versions))
+            var ownedLines = ConcurrentOwnedLines;
+            if (!ownedLines || !assumptions.IsOwnedPage(query, page))
             {
-                assumptions.Record(query, page, ConcurrentPageBytes, false);
-                assumptions.NoteCleanPage(query, page);
-                return false;
-            }
-
-            if (!IsOwnedConcurrent(query, page, ConcurrentPageBytes))
-            {
-                assumptions.Record(query, page, ConcurrentPageBytes, false);
-                assumptions.NoteCleanPage(query, page);
-                if (CrossDrawCleanPages)
+                if (CrossDrawCleanPages && IsCrossDrawClean(query, page, assumptions.Versions))
                 {
-                    NoteCrossDrawClean(query, page, assumptions.Versions);
+                    assumptions.Record(query, page, ConcurrentPageBytes, false);
+                    assumptions.NoteCleanPage(query, page);
+                    return false;
                 }
 
-                return false;
+                assumptions.Count(OwnerTestCounter.Page);
+                if (ConcurrentOwner(page, ConcurrentPageBytes, assumptions) == AbandonCause.None)
+                {
+                    assumptions.Record(query, page, ConcurrentPageBytes, false);
+                    assumptions.NoteCleanPage(query, page);
+                    if (CrossDrawCleanPages)
+                    {
+                        NoteCrossDrawClean(query, page, assumptions.Versions);
+                    }
+
+                    return false;
+                }
+
+                // Remembered for the rest of the resolution, and not recorded: an owned page answers nothing
+                // itself. Should it turn clean meanwhile, its reads keep taking the finer tests below, which only
+                // ever find less clean than the page would.
+                if (ownedLines)
+                {
+                    assumptions.NoteOwnedPage(query, page);
+                }
+            }
+
+            // In an owned page, the read's line first. Every test is an overlap test, so a clean line is clean for
+            // every range inside it; its answer is recorded like a clean page's and checked again at the take.
+            // A range longer than a line, or one that leaves its line, is in no single line: tested as itself.
+            var line = address & ~((ulong)ConcurrentWordLineBytes - 1);
+            if (ownedLines && size <= ConcurrentWordLineBytes && address - line <= ConcurrentWordLineBytes - size)
+            {
+                var slot = assumptions.FindLine(query, line);
+                bool lineOwned;
+                if (slot < 0)
+                {
+                    assumptions.Count(OwnerTestCounter.Line);
+                    LineSummary summary = default;
+                    lineOwned = ConcurrentLineMasks != LineMaskMode.Off && assumptions.Scoped
+                        ? ConcurrentLineOwner(line, assumptions, out summary)
+                        : ConcurrentOwner(line, ConcurrentWordLineBytes, assumptions) != AbandonCause.None;
+                    slot = assumptions.NoteLine(query, line, lineOwned, summary);
+                    if (!lineOwned)
+                    {
+                        assumptions.Record(query, line, ConcurrentWordLineBytes, false);
+                    }
+                }
+                else
+                {
+                    lineOwned = assumptions.LineIsOwned(slot);
+                }
+
+                if (!lineOwned)
+                {
+                    return false;
+                }
+
+                if (TryLineMaskOwner(assumptions, slot, line, address, size, out var maskOwner))
+                {
+                    _lastConcurrentOwner = maskOwner;
+                    assumptions.LastMaskSlot = slot;
+                    var maskOwned = maskOwner != AbandonCause.None;
+                    assumptions.Record(query, address, size, maskOwned);
+                    return maskOwned;
+                }
             }
         }
 
-        _lastConcurrentOwner = ConcurrentOwner(address, size);
+        assumptions.Count(OwnerTestCounter.Word);
+        _lastConcurrentOwner = ConcurrentOwner(address, size, assumptions);
         var owned = _lastConcurrentOwner != AbandonCause.None;
         assumptions.Record(query, address, size, owned);
         return owned;
+    }
+
+    // ConcurrentOwner(line, 256) != None, with each owner tested (ConcurrentLineMasks): the same tests in the same
+    // order, the pending GPU writes as a word mask, and the overlays asked even when a GPU write already owns the line.
+    // The summary is usable when the mask is known and nothing but GPU writes owns bytes of the line.
+    private bool ConcurrentLineOwner(ulong line, ConcurrentOwnerScope scope, out LineSummary summary)
+    {
+        const ulong size = ConcurrentWordLineBytes;
+        summary = default;
+        // Read before any test below: a change after this that could make a word of the line owned moves one of them.
+        var versions = OwnershipVersions();
+        if (PendingCommandWriteHolds(line, size))
+        {
+            return true;
+        }
+
+        if (_imageCache.MayOwn(line, size))
+        {
+            scope.Count(OwnerTestCounter.ImageLock);
+            if (_imageCache.HasGpuModifiedImageBytes(line, size))
+            {
+                return true;
+            }
+        }
+
+        // MayCover reads bounds the records' mutations change, so an even stamp read before it stands for its answer too.
+        ulong mask = 0;
+        var stamp = _gpuWrites.MutationStamp;
+        var known = (stamp & 1) == 0;
+        if (_gpuWrites.MayCover(line, size))
+        {
+            var completed = scope.Serial();
+            known = false;
+            for (var attempt = 0; attempt < 4 && !known; attempt++)
+            {
+                known = _gpuWrites.TryPendingWordMask(line, completed, out mask, out stamp);
+                if (!known)
+                {
+                    Thread.SpinWait(8);
+                }
+            }
+
+            if (!known)
+            {
+                // IsGpuWritePendingConcurrent's answer when the records keep changing: pending.
+                return true;
+            }
+        }
+
+        var cp = false;
+        if (_cpOverlay.Count != 0)
+        {
+            scope.Count(OwnerTestCounter.OverlayCall);
+            cp = _cpOverlay.Coverage(line, size, scope.Serial) != MetalOverlayCoverage.None;
+        }
+
+        var label = false;
+        if (_labelOverlay.Count != 0)
+        {
+            scope.Count(OwnerTestCounter.OverlayCall);
+            label = _labelOverlay.Coverage(line, size, scope.Serial) != MetalOverlayCoverage.None;
+        }
+
+        summary = new LineSummary { Usable = known && !cp && !label, Stamp = stamp, Mask = mask, Versions = versions };
+        return mask != 0 || cp || label;
+    }
+
+    // The owner of a word of a line tested with ConcurrentLineOwner, from its mask, while the versions and the record
+    // stamp the mask was taken at stand (see ConcurrentLineMasks). False: the word takes its own test.
+    private bool TryLineMaskOwner(ConcurrentAssumptions assumptions, int slot, ulong line, ulong address, ulong size, out AbandonCause owner)
+    {
+        owner = AbandonCause.None;
+        var mode = ConcurrentLineMasks;
+        if (mode == LineMaskMode.Off)
+        {
+            return false;
+        }
+
+        ref readonly var summary = ref assumptions.Summary(slot);
+        if (!summary.Usable || ((address | size) & 3) != 0)
+        {
+            assumptions.Count(OwnerTestCounter.MaskRefused);
+            return false;
+        }
+
+        if (_gpuWrites.MutationStamp != summary.Stamp || OwnershipVersions() != summary.Versions)
+        {
+            assumptions.Count(OwnerTestCounter.MaskStale);
+            return false;
+        }
+
+        // Inside the line (IsOwnedRecorded's test), whole words: bits first .. first + words - 1.
+        var first = (int)((address - line) >> 2);
+        var words = (int)(size >> 2);
+        var bits = (words >= 64 ? ulong.MaxValue : (1UL << words) - 1) << first;
+        owner = (summary.Mask & bits) != 0 ? AbandonCause.GpuWrite : AbandonCause.None;
+        assumptions.Count(OwnerTestCounter.MaskWord);
+        if (mode == LineMaskMode.Verify)
+        {
+            VerifyLineMaskOwner(assumptions, summary, address, size, owner);
+        }
+
+        return true;
+    }
+
+    // SHARPEMU_CONCURRENT_LINE_MASKS=verify: the word's own test as well. Only a difference while the versions and the
+    // stamp still stand is a wrong answer (one moved, both answers may be right at their times).
+    private void VerifyLineMaskOwner(ConcurrentAssumptions assumptions, in LineSummary summary, ulong address, ulong size, AbandonCause maskOwner)
+    {
+        var own = ConcurrentOwner(address, size, assumptions);
+        if (_gpuWrites.MutationStamp != summary.Stamp || OwnershipVersions() != summary.Versions)
+        {
+            return;
+        }
+
+        if (own == maskOwner)
+        {
+            assumptions.Count(OwnerTestCounter.MaskVerified);
+            return;
+        }
+
+        Interlocked.Increment(ref _lineMaskVerifyFailed);
+        var message = $"[METAL-V2][LINE_MASK] verify mismatch address=0x{address:X16} size={size} mask=0x{summary.Mask:X16} " +
+            $"mask_owner={maskOwner} own_owner={own}.";
+        Console.Error.WriteLine(message);
+        throw GpuFatal.Fatal(message);
     }
 
     // SHARPEMU_CONCURRENT_CROSS_CLEAN=0 tests every page of every resolution again. A page found clean stays
@@ -554,14 +1265,14 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
     // A recorded GPU write the GPU has not finished covers these bytes. The coarse bounds test first, then
     // the records themselves, read only while the worker leaves them alone (a few tries, else pending).
-    private bool IsGpuWritePendingConcurrent(ulong address, ulong size)
+    private bool IsGpuWritePendingConcurrent(ulong address, ulong size, Func<ulong>? completedSerial = null)
     {
         if (!_gpuWrites.MayCover(address, size))
         {
             return false;
         }
 
-        var completed = SignaledSerial();
+        var completed = completedSerial is null ? SignaledSerial() : completedSerial();
         for (var attempt = 0; attempt < 4; attempt++)
         {
             if (_gpuWrites.TryPendingSerialSnapshot(address, size, completed, out var pending))
@@ -585,6 +1296,28 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             return true;
         }
 
+        if ((address & ~lineMask) == assumptions.CopyLine && (address & 3) == 0 &&
+            ((assumptions.CopyLineWords >> (int)((address & lineMask) >> 2)) & 1) != 0)
+        {
+            var copied = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                assumptions.CopyLineBytes.AsSpan((int)(address & lineMask), sizeof(uint)));
+            assumptions.Count(OwnerTestCounter.CopyLineWord);
+            if (ConcurrentLineMasks != LineMaskMode.Verify)
+            {
+                word = copied;
+                return true;
+            }
+
+            return VerifyCopyLineWord(address, copied, out word, assumptions);
+        }
+
+        return TryReadGuestWordConcurrentTested(address, out word, assumptions);
+    }
+
+    // A word read with its own ownership test (or its line's mask), and through a pending copy where one writes it.
+    private bool TryReadGuestWordConcurrentTested(ulong address, out uint word, ConcurrentAssumptions assumptions)
+    {
+        const ulong lineMask = ConcurrentWordLineBytes - 1;
         word = 0;
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (IsOwnedRecorded(ConcurrentQuery.Word, address, sizeof(uint), assumptions))
@@ -594,11 +1327,17 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             var owner = _lastConcurrentOwner;
             if (owner == AbandonCause.GpuWrite)
             {
+                var maskSlot = assumptions.LastMaskSlot;
                 var answers = assumptions.Answers.Count;
                 if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions))
                 {
                     assumptions.Forget(ConcurrentQuery.Word, address, sizeof(uint), answers);
                     word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+                    if (maskSlot >= 0 && (address & 3) == 0)
+                    {
+                        FillCopyLine(assumptions, maskSlot, address & ~lineMask);
+                    }
+
                     return true;
                 }
 
@@ -610,11 +1349,13 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             throw new GpuFatal.AbandonedWorkException($"The resolution reads GPU-owned memory: address=0x{address:X16}.");
         }
 
-        // The whole page answered clean: the rest of the line is read with this word. The line lies within the
-        // page, which an aligned line of a power of two below the page size always does.
+        // The whole page, or the whole line of an owned page, answered clean: the rest of the line is read with
+        // this word. The line lies within the page, which an aligned line of a power of two below the page size
+        // always does.
         var line = address & ~lineMask;
         if (ConcurrentWordLines && (address & 3) == 0 &&
-            assumptions.IsCleanPage(ConcurrentQuery.Word, address & ~(ConcurrentPageBytes - 1)) &&
+            (assumptions.IsCleanPage(ConcurrentQuery.Word, address & ~(ConcurrentPageBytes - 1)) ||
+             (ConcurrentOwnedLines && assumptions.LineOwned(ConcurrentQuery.Word, line) == false)) &&
             _backing.TryReadBacking(line, assumptions.WordLineBytes))
         {
             assumptions.WordLine = line;
@@ -655,6 +1396,47 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             Interlocked.Increment(ref _abandonCauses[(int)AbandonCause.Code]);
             throw new GpuFatal.AbandonedWorkException($"The resolution reads shader code the GPU may write: address=0x{address:X16}.");
         }
+    }
+
+    // TryReadCleanGuestWord off the worker. A word a pending recorded GPU write owns is the worker's to read after that
+    // write (it reads through the copy or waits): read through the copy here too (its source's answers recorded, the
+    // word's owned answer dropped, as TryReadGuestWordConcurrentTested does), else the resolution is abandoned, so a
+    // resource branch's predicate never keeps both paths here where the worker keeps one. Any other owner (an image,
+    // an overlay) refuses the read as before.
+    private bool TryReadCleanGuestWordConcurrent(ulong address, out uint word, ConcurrentAssumptions assumptions)
+    {
+        word = 0;
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        if (!IsOwnedRecorded(ConcurrentQuery.Resident, address, sizeof(uint), assumptions))
+        {
+            if (!_backing.TryReadBacking(address, bytes))
+            {
+                return false;
+            }
+
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            return true;
+        }
+
+        var owner = _lastConcurrentOwner;
+        if (owner != AbandonCause.GpuWrite || !CleanReadsLanded)
+        {
+            return false;
+        }
+
+        var answers = assumptions.Answers.Count;
+        if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions))
+        {
+            assumptions.Forget(ConcurrentQuery.Resident, address, sizeof(uint), answers);
+            Interlocked.Increment(ref _cleanReadsCopied);
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            return true;
+        }
+
+        _lastConcurrentOwner = owner;
+        Interlocked.Increment(ref _cleanReadsAbandoned);
+        NoteAbandonCause(address, sizeof(uint));
+        throw new GpuFatal.AbandonedWorkException($"The resolution reads a clean word a pending GPU write owns: address=0x{address:X16}.");
     }
 
     // The clean and resident readers refuse owned bytes on the worker too, so off it they refuse
@@ -733,4 +1515,126 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
 
         return true;
     }
+
+    // TryCompareGuestWords off the worker. Each range (whole words in one line) takes IsOwnedRecorded as a word read of
+    // it does (query Word: its page, its line, or the line's mask, recorded the same way), so the take's re-check
+    // (IsConcurrentResolveStillCurrent) tests every word compared here as it would the words read. A range a GPU write
+    // owns is read through the pending copy that writes all of it, as TryReadGuestWordConcurrentTested reads each of its
+    // words (TryReadThroughPendingCopyConcurrent: that copy the latest write over the range, its source owned by
+    // nothing, the source's answers recorded, the range's owned answer dropped), and compared there: any word of the
+    // range read alone finds that same copy, since a later write over it would be the range's latest. Any other owned
+    // range refuses the compare, its owned answer dropped: the caller then reads the words itself, recording their own
+    // answers. Then the other ranges' bytes, where they lie.
+    private bool TryCompareGuestWordsConcurrent(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded,
+        ConcurrentAssumptions assumptions)
+    {
+        if (_backing.SingleCopy is { ReleasedChunks: > 0 })
+        {
+            return false;
+        }
+
+        var count = addresses.Length;
+        var offset = 0;
+        // Ranges answered through a copy (at most 64), left out of the backing compare below.
+        ulong throughCopies = 0;
+        Span<byte> through = stackalloc byte[MaterializationProgramLineBytes];
+        for (var index = 0; index < count; index++)
+        {
+            var address = addresses[index];
+            var length = lengths[index];
+            if (length <= 0 || length > MaterializationProgramLineBytes || ((address | (ulong)length) & 3) != 0 || offset > recorded.Length - length ||
+                ulong.MaxValue - address < (ulong)length)
+            {
+                return false;
+            }
+
+            var answers = assumptions.Answers.Count;
+            if (IsOwnedRecorded(ConcurrentQuery.Word, address, (ulong)length, assumptions))
+            {
+                var owned = assumptions.Answers.Count > answers;
+                if (_lastConcurrentOwner == AbandonCause.GpuWrite && index < 64)
+                {
+                    var before = assumptions.Answers.Count;
+                    var bytes = through[..length];
+                    if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions))
+                    {
+                        if (owned)
+                        {
+                            assumptions.Forget(ConcurrentQuery.Word, address, (ulong)length, before);
+                        }
+
+                        if (!bytes.SequenceEqual(recorded.Slice(offset, length)))
+                        {
+                            return false;
+                        }
+
+                        throughCopies |= 1UL << index;
+                        offset += length;
+                        continue;
+                    }
+                }
+
+                if (owned)
+                {
+                    assumptions.Forget(ConcurrentQuery.Word, address, (ulong)length, assumptions.Answers.Count);
+                }
+
+                return false;
+            }
+
+            offset += length;
+        }
+
+        return offset == recorded.Length && SameBackingBytes(addresses, lengths, recorded, throughCopies);
+    }
+
+    // Whether each range's backing bytes are the recorded ones (range after range, the ranges skip names left out):
+    // compared where they lie through the backing's alias when it has one, else read out a range at a time.
+    private unsafe bool SameBackingBytes(ReadOnlySpan<ulong> addresses, ReadOnlySpan<int> lengths, ReadOnlySpan<byte> recorded, ulong skip = 0)
+    {
+        var aliased = _backing.TryEnterBackingAliasAccess();
+        try
+        {
+            Span<byte> read = stackalloc byte[MaterializationProgramLineBytes];
+            var offset = 0;
+            for (var index = 0; index < addresses.Length; index++)
+            {
+                var length = lengths[index];
+                var expected = recorded.Slice(offset, length);
+                offset += length;
+                if (index < 64 && ((skip >> index) & 1) != 0)
+                {
+                    continue;
+                }
+
+                if (aliased && _backing.TryResolveBackingAlias(addresses[index], (ulong)length, out var alias))
+                {
+                    if (!new ReadOnlySpan<byte>((void*)alias, length).SequenceEqual(expected))
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                var bytes = length <= read.Length ? read[..length] : new byte[length];
+                if (!_backing.TryReadBacking(addresses[index], bytes) || !bytes.SequenceEqual(expected))
+                {
+                    return false;
+                }
+            }
+        }
+        finally
+        {
+            if (aliased)
+            {
+                _backing.ExitBackingAliasAccess();
+            }
+        }
+
+        return true;
+    }
+
+    // The longest range a read proof compares (MaterializationProgram.ReadProof.LineBytes).
+    private const int MaterializationProgramLineBytes = 256;
 }

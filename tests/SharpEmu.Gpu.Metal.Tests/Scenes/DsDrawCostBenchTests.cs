@@ -22,7 +22,7 @@ namespace SharpEmu.Gpu.Metal.Tests.Scenes;
 /// load five sampled T#s, two storage T#s, two S#s and four V#s from a table of their own; each stores two images and
 /// a buffer of its own and samples what the dispatch sixteen before stored, a CS partial flush after every sixteenth.
 /// </summary>
-public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBase(output)
+public sealed partial class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBase(output)
 {
     private const uint Rgba8 = 56;
     private const uint Rgba32F = 77;
@@ -205,13 +205,26 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
     private static readonly MethodInfo PrefetchCounters =
         typeof(MetalRenderHost).GetMethod("FormatPrefetchCounters", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
+    private static readonly MethodInfo KeptProgramsReport =
+        typeof(SharpEmu.Libs.Gpu.Rendering.GraphicsPrograms).Assembly.GetType("SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache")!
+            .GetMethod("TakeKeptProgramsReport", BindingFlags.Static | BindingFlags.Public)!;
+
+    private static readonly MethodInfo ReadBindingCounters =
+        typeof(MetalRenderHost).GetMethod("TakeReadBindingCounters", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
     [DllImport("libSystem.dylib")]
     private static extern ulong clock_gettime_nsec_np(int clockId);
 
     // CLOCK_THREAD_CPUTIME_ID: the recording thread's own CPU time.
     private static ulong ThreadCpuNanoseconds() => clock_gettime_nsec_np(16);
 
-    private enum Variation { Draws, Dispatches }
+    private enum Variation { Draws, Dispatches, GameShaped, GameWords }
+
+    // GameShaped: the draw stream split into this many submissions a round, a command buffer committed about every
+    // SubmissionsPerCommit of them (Demon's Souls: ~39 submissions and ~17.5 command buffers a frame).
+    private const int GameSubmissions = 39;
+    private const double SubmissionsPerCommit = 2.2;
+    private const int ChurnTextures = 8;
 
     private static ulong Texels(SceneRig rig, uint width, uint height, uint layers, uint bytesPerTexel, Func<uint, uint, uint, uint> word)
     {
@@ -236,14 +249,34 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
     {
         var path = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_OUTPUT");
         if (path is null) return;
+        Measure(path, shardBench: false);
+    }
+
+    // SHARPEMU_DS_SHARD_BENCH_OUTPUT=<path>: the resolver alone, as N independent shards on N threads (RunShardBench).
+    // Builds the game stream of _VARIATION (GameWords by default) with the SHARPEMU_DS_DRAW_BENCH_* settings, records
+    // _WARM rounds on the worker (20 by default here), captures the program resolutions the last of them takes, and
+    // replays those without the worker.
+    [Fact]
+    public void MeasureShardedResolutionWhenRequested()
+    {
+        var path = Environment.GetEnvironmentVariable("SHARPEMU_DS_SHARD_BENCH_OUTPUT");
+        if (path is null) return;
+        Measure(path, shardBench: true);
+    }
+
+    private void Measure(string path, bool shardBench)
+    {
         Environment.SetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE", "1");
         int Setting(string name, int fallback) =>
             int.TryParse(Environment.GetEnvironmentVariable($"SHARPEMU_DS_DRAW_BENCH_{name}"), out var value) && value > 0 ? value : fallback;
         var drawCount = Setting("DRAWS", 1024);
         var dispatchCount = Setting("DISPATCHES", 256);
         var rounds = Setting("ROUNDS", 40);
-        var warm = Setting("WARM", 150);
-        var only = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_VARIATION");
+        var warm = Setting("WARM", shardBench ? 20 : 150);
+        var only = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_VARIATION") ?? (shardBench ? nameof(Variation.GameWords) : null);
+        // _REBIND=n: every nth draw of a pass writes its targets and depth state again with the values they hold (no
+        // flush), as a title's material binds do; 0 (the default) writes them only at a pass's first draw.
+        var rebind = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_REBIND"), out var rebindEvery) && rebindEvery > 0 ? rebindEvery : 0;
         using var rig = CreateRig();
         Assert.NotNull(rig);
 
@@ -277,31 +310,88 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
         // Each mesh a quad over one cell of a 6x4 grid, four 16-byte-record vertex buffers and a constants buffer;
         // indices 0-5 and an indexed-indirect argument record.
         var objectConstants = rig.Memory.Upload<float>(new float[16], 256);
-        var meshes = Enumerable.Range(0, Meshes).Select(mesh =>
+        (ulong table, ulong indices, ulong arguments) Mesh(int mesh, ulong normalBuffer = 0, ulong tableAt = 0)
         {
-            var (column, row) = (mesh % 6, mesh / 6);
+            var (column, row) = (mesh % 6, mesh / 6 % 4);
             var (left, right) = (-1f + column / 3f, -1f + (column + 1) / 3f);
             var (top, bottom) = (1f - row / 2f, 1f - (row + 1) / 2f);
             float[] positions = [left, bottom, 0.5f, 1, right, bottom, 0.5f, 1, left, top, 0.5f, 1, left, top, 0.5f, 1, right, bottom, 0.5f, 1, right, top, 0.5f, 1];
             float[] uvs = [0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1];
             var position = rig.Memory.Upload<float>(positions);
             var uv = rig.Memory.Upload<float>(uvs);
-            var normal = rig.Memory.Upload<float>(new float[24]);
-            var color = rig.Memory.Upload<float>(Enumerable.Range(0, 24).Select(index => index % 4 == 3 ? 0f : mesh / 512f).ToArray());
+            var normal = normalBuffer != 0 ? normalBuffer : rig.Memory.Upload<float>(new float[24]);
+            var color = rig.Memory.Upload<float>(Enumerable.Range(0, 24).Select(index => index % 4 == 3 ? 0f : mesh % 512 / 512f).ToArray());
             var constants = rig.Memory.Upload<float>(new float[8], 256);
-            var table = rig.Memory.Upload<uint>(
+            uint[] tableWords =
             [
                 .. Descriptors.Buffer(position, 16, 6), .. Descriptors.Buffer(uv, 16, 6), .. Descriptors.Buffer(normal, 16, 6),
                 .. Descriptors.Buffer(color, 16, 6), .. Descriptors.Buffer(constants, 16, 2),
-            ], 256);
+            ];
+            if (tableAt != 0) rig.Memory.Write<uint>(tableAt, tableWords);
+            var table = tableAt != 0 ? tableAt : rig.Memory.Upload<uint>(tableWords, 256);
             var indices = rig.Memory.Upload<ushort>([0, 1, 2, 3, 4, 5, 0, 0], 256);
             var arguments = rig.Memory.Upload<uint>([6, 1, 0, 0, 0, 0, 0, 0], 256);
             return (table, indices, arguments);
-        }).ToArray();
+        }
+
+        var meshes = Enumerable.Range(0, Meshes).Select(mesh => Mesh(mesh)).ToArray();
 
         var vertexPrograms = Enumerable.Range(0, 3).Select(count => rig.Program(WithNops(TableVertex, count))).ToArray();
         var pixelPrograms = new[] { 5, 6 }.Select(attachments =>
             Enumerable.Range(0, 4).Select(count => rig.Program(WithNops(TablePixel(attachments), count))).ToArray()).ToArray();
+
+        // One draw as DrawStream records it: a pass's first draw (or a submission's) sets the targets and depth.
+        void EmitDraw(ScenePm4 pm4, int draw, int pass, bool fullState, (ulong table, ulong indices, ulong arguments) mesh, ulong material,
+            ulong pixelConstantsAt = 0)
+        {
+            var attachments = pass % 2 == 0 ? 5 : 6;
+            var set = pass % TargetSets;
+            uint[] vertexData = [Descriptors.Lo(mesh.table), Descriptors.Hi(mesh.table), 0, 0, .. Descriptors.Buffer(objectConstants, 16, 4)];
+            uint[] pixelData = [Descriptors.Lo(material), Descriptors.Hi(material), 0, 0,
+                .. Descriptors.Buffer(pixelConstantsAt != 0 ? pixelConstantsAt : pixelConstants, 16, 2)];
+            var vertexProgram = vertexPrograms[(draw / 3) % vertexPrograms.Length];
+            var pixelProgram = pixelPrograms[attachments - 5][(draw / 2) % 4];
+            SceneState state;
+            var rebound = !fullState && rebind != 0 && draw % rebind == rebind - 1;
+            if (fullState || rebound)
+            {
+                state = new SceneState(TargetSize, TargetSize)
+                    .DepthTarget(depths[set], TargetSize, TargetSize, zFormat: 3)
+                    .DepthControl(test: true, write: true, CompareFunc.LessEqual);
+                for (var slot = 0u; slot < attachments; slot++)
+                    state.ColorTarget(slot, targets[set][slot], TargetSize, TargetSize, format: 14, numberType: 7);
+                var mask = (1u << (attachments * 4)) - 1;
+                state.Context[Cx.CbTargetMask] = mask;
+                state.Context[Cx.CbShaderMask] = mask;
+                state.Context[Cx.SpiShaderColFormat] = 0x99999999u & mask;
+                if (!rebound) pm4.Event(ScenePm4.EventCsPartialFlush);
+            }
+            else
+            {
+                state = new SceneState(TargetSize, TargetSize);
+                state.Context.Clear();
+                state.Uconfig.Clear();
+                state.Shader.Clear();
+            }
+
+            state.VertexShader(vertexProgram, vertexData).PixelShader(pixelProgram, pixelData).Emit(pm4);
+            pm4.NumInstances(1);
+            switch (draw % 10)
+            {
+                case < 7:
+                    pm4.IndexType(0);
+                    pm4.DrawIndexed(mesh.indices, 6, 6);
+                    break;
+                case < 9:
+                    pm4.Raw(ScenePm4.Header(4, ScenePm4.OpSetBase), 1u, (uint)mesh.arguments, (uint)(mesh.arguments >> 32));
+                    pm4.IndexType(0).Packet(ScenePm4.OpIndexBase, (uint)mesh.indices, (uint)(mesh.indices >> 32)).Packet(ScenePm4.OpIndexBufferSize, 6u);
+                    pm4.Packet(ScenePm4.OpDrawIndexIndirect, 0u, 0u, 0u, 0u);
+                    break;
+                default:
+                    pm4.DrawAuto(6);
+                    break;
+            }
+        }
 
         uint[] DrawStream()
         {
@@ -319,7 +409,8 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 var vertexProgram = vertexPrograms[(draw / 3) % vertexPrograms.Length];
                 var pixelProgram = pixelPrograms[attachments - 5][(draw / 2) % 4];
                 SceneState state;
-                if (draw % passLength == 0)
+                var rebound = draw % passLength != 0 && rebind != 0 && draw % rebind == rebind - 1;
+                if (draw % passLength == 0 || rebound)
                 {
                     state = new SceneState(TargetSize, TargetSize)
                         .DepthTarget(depths[set], TargetSize, TargetSize, zFormat: 3)
@@ -330,7 +421,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                     state.Context[Cx.CbTargetMask] = mask;
                     state.Context[Cx.CbShaderMask] = mask;
                     state.Context[Cx.SpiShaderColFormat] = 0x99999999u & mask;
-                    pm4.Event(ScenePm4.EventCsPartialFlush);
+                    if (!rebound) pm4.Event(ScenePm4.EventCsPartialFlush);
                 }
                 else
                 {
@@ -404,39 +495,339 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
             return pm4.ToArray();
         }
 
+        // The dispatch table DispatchStream binds for dispatch n, storing its buffer into writeBuffer.
+        ulong DispatchTable(int dispatch, ulong writeBuffer)
+        {
+            var table = new List<uint>();
+            table.AddRange(Descriptors.Texture(dispatch < StorageImages ? sources[dispatch] : storage[dispatch - StorageImages], Rgba32F, StorageEdge, StorageEdge));
+            for (var texture = 1; texture < 5; texture++)
+                table.AddRange(Descriptors.Texture(textures[(dispatch * 3 + texture) % SampledTextures], Rgba8, TextureSize, TextureSize));
+            table.AddRange(Descriptors.Texture(storage[dispatch], Rgba32F, StorageEdge, StorageEdge));
+            table.AddRange(Descriptors.Texture(scratch[dispatch], Rgba32F, StorageEdge, StorageEdge));
+            table.AddRange(samplers[dispatch % samplers.Length]);
+            table.AddRange(samplers[(dispatch + 1) % samplers.Length]);
+            for (var buffer = 0; buffer < 3; buffer++)
+                table.AddRange(Descriptors.Buffer(readBuffers[(dispatch + buffer) % readBuffers.Length], 4, StorageEdge * StorageEdge, 20));
+            table.AddRange(Descriptors.Buffer(writeBuffer, 4, StorageEdge * StorageEdge, 20));
+            return rig.Memory.Upload<uint>([.. table], 256);
+        }
+
+        // GameShaped: the draw stream shaped like a Demon's Souls frame where the read-binding memo sees it. _MESHES
+        // (3000) meshes of about seven read-only ranges each (some 21k distinct ranges), _GAME_DRAWS (7300) draws a
+        // round, each mesh in two draws in a row ~1.2 times a round, far apart; GameSubmissions submissions with a commit
+        // about every SubmissionsPerCommit; in the last submission before each commit a WRITE_DATA every sixth draw into
+        // a label area, held to the commit (~600 a round, pending for about half of each command buffer, which leaves
+        // the v1 memo the ~38% of hits it had in game), every 200th of them into the object constants every draw binds;
+        // four dispatches at the start of each pass storing four buffers that
+        // the draws of four meshes read as their normals; and a texture on far pages dropped every third submission and
+        // made again when sampled next (image-set changes).
+        // GameWords: GameShaped whose descriptor words change between rounds under unchanged keys, as Demon's Souls'
+        // per-frame constants do (resolve memo miss_by words ~32% of its draws, key_miss user_data_only ~8.5%): every
+        // third mesh's table points its constants V# at one of two zero buffers in turn, and every 32nd draw's pixel
+        // constants V# (user data) at a copy of the pixel constants that changes every round. Same image as GameShaped.
+        var gameMeshCount = Setting("MESHES", 3000);
+        var gameDrawCount = Setting("GAME_DRAWS", 7300);
+        const int PixelConstantCopies = 256;
+        var alternateConstants = rig.Memory.Upload<float>(new float[8], 256);
+        var pixelConstantCopies = Enumerable.Range(0, PixelConstantCopies)
+            .Select(_ => rig.Memory.Upload<float>([0.0625f, 0, 0, 0, 0, 0, 0, 0], 256)).ToArray();
+        Assert.All(pixelConstantCopies, copy => Assert.Equal(Descriptors.Hi(pixelConstantCopies[0]), Descriptors.Hi(copy)));
+        // SHARPEMU_DS_DRAW_BENCH_COPIED_TABLES=1: the game meshes' vertex tables (one per 128 bytes) lie in the
+        // destination of a copy kernel the host refuses, armed again for every command buffer, as Demon's Souls' draws
+        // read a table its copy kernel writes every frame: off the worker each table word is owned by the copy's pending
+        // write and answered from its source (~20 word tests a draw, as in game). The destination holds the copy's result.
+        var copiedTables = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_COPIED_TABLES") == "1";
+        // SHARPEMU_DS_DRAW_BENCH_DISPATCH_EVERY=n: one of the four buffer-storing dispatches after every nth draw of the game
+        // streams as well, as Demon's Souls runs its ~1000 dispatches a frame between draws: each holds the program
+        // resolution of the draw after it (its gate), unless that draw's job looks ahead of dispatches
+        // (SHARPEMU_PREFETCH_DRAW_LOOKAHEAD). 0 (the default) leaves the streams as they were.
+        // SHARPEMU_DS_DRAW_BENCH_CHURN_EVERY=n: GameWords changes the table of every nth mesh between rounds (3 by default);
+        // 1 changes them all, so nearly every revalidation of a kept stage finds its words changed.
+        var churnEvery = Setting("CHURN_EVERY", 3);
+        // SHARPEMU_DS_DRAW_BENCH_MESH_REPEAT=n: each game mesh is drawn in n draws in a row (2 by default). With 1, _MESHES
+        // at _GAME_DRAWS and _CHURN_EVERY=1, every draw has a mesh of its own whose table changes every round.
+        var meshRepeat = Setting("MESH_REPEAT", 2);
+        var dispatchEvery = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_DISPATCH_EVERY"), out var every) && every > 0 ? every : 0;
+        // SHARPEMU_DS_DRAW_BENCH_DISPATCH_REBIND=1: those dispatches run each program over the four tables in turn, so a
+        // dispatch's user data differs from the last of its program and its kept program is rebound (Demon's Souls: ~95%
+        // of dispatches rebound, ~2% kept, ~2.5% resolved); without it each program keeps one table and is kept.
+        var dispatchRebind = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_DISPATCH_REBIND") == "1";
+        // SHARPEMU_DS_DRAW_BENCH_BURST=1: a round's game streams are all submitted before the worker records any, as
+        // Demon's Souls submits ~13 command buffers at once, so the collector call after each submission lies between
+        // draws (and is looked ahead of with SHARPEMU_PREFETCH_DRAW_LOOKAHEAD); one commit and one copy arming a round,
+        // and the churned textures unregistered after it. 0 (the default) records each submission as it is queued.
+        var burst = Environment.GetEnvironmentVariable("SHARPEMU_DS_DRAW_BENCH_BURST") == "1";
+        ulong copyDestination = 0, copySource = 0, copyWords = 0;
+        void ArmCopiedTables()
+        {
+            if (copyWords == 0) return;
+            Assert.False(rig.Host.TryCopyWordsOnHost(copyDestination, copySource, copyWords - 1, copyWords));
+            rig.Host.NoteGuestMemoryWrite(copyDestination, copyWords * sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
+        }
+
+        (uint[][] Streams, ulong[] Written, ulong[] Churn, (ulong Address, uint[] Even, uint[] Odd)[] WordChurn, (int Stream, int Word)[] KeyChurn)
+            GameStreams(bool churnWords)
+        {
+            if (copiedTables)
+            {
+                copyWords = (ulong)gameMeshCount * 32;
+                copyDestination = rig.Memory.Allocate(copyWords * sizeof(uint), 0x10000);
+                copySource = rig.Memory.Allocate(copyWords * sizeof(uint), 0x10000);
+                rig.Host.HostKernelCopyMode = MetalHostKernelCopyMode.Off;
+                rig.Host.HostKernelCopyDryRun = false;
+            }
+
+            var gameMeshes = Enumerable.Range(0, gameMeshCount)
+                .Select(mesh => Mesh(mesh, tableAt: copiedTables ? copyDestination + (ulong)mesh * 128 : 0)).ToArray();
+            if (copiedTables)
+            {
+                // dst[i] = src[i % (words - 1)]: the source is the destination, and the destination's last word (padding) its first.
+                var copied = rig.Read<uint>(copyDestination, (int)copyWords);
+                rig.Memory.Write<uint>(copySource, copied);
+                rig.Memory.Write32(copyDestination + (copyWords - 1) * sizeof(uint), copied[0]);
+            }
+
+            var written = Enumerable.Range(0, 4).Select(_ => rig.Memory.Upload<uint>(new uint[StorageEdge * StorageEdge], 256)).ToArray();
+            var dynamicMeshes = written.Select((buffer, index) => Mesh(index, normalBuffer: buffer)).ToArray();
+            var dispatchTables = written.Select((buffer, index) => DispatchTable(index, buffer)).ToArray();
+            var labels = rig.Memory.Allocate(0x10000, 0x10000);
+            var churn = Enumerable.Range(0, ChurnTextures).Select(index =>
+                Texels(rig, TextureSize, TextureSize, 1, 4, (_, y, x) => 0x30000000u + (uint)index * 0x00020406u + y * 0x0200u + x * 0x20u)).ToArray();
+            var churnMaterials = churn.Select((texture, index) =>
+            {
+                var table = new List<uint>();
+                table.AddRange(Descriptors.Texture(texture, Rgba8, TextureSize, TextureSize));
+                for (var slot = 1; slot < 12; slot++)
+                    table.AddRange(Descriptors.Texture(textures[(index * 5 + slot * 3) % SampledTextures], Rgba8, TextureSize, TextureSize));
+                for (var slot = 0; slot < 2; slot++)
+                    table.AddRange(Descriptors.Texture(arrays[(index + slot) % ArrayTextures], Rgba8, TextureSize, TextureSize, type: 13, depthOrLastLayer: 1));
+                for (var sampler = 0; sampler < 5; sampler++) table.AddRange(samplers[(sampler + index) % samplers.Length]);
+                return rig.Memory.Upload<uint>([.. table], 256);
+            }).ToArray();
+
+            var streams = new uint[GameSubmissions][];
+            var passLength = (gameDrawCount + Passes - 1) / Passes;
+            var labelWrites = 0;
+            var wordChurn = churnWords
+                ? gameMeshes.Where((_, index) => index % churnEvery == 0).Select(mesh =>
+                    (mesh.table + 0x40, rig.Read<uint>(mesh.table + 0x40, 4), Descriptors.Buffer(alternateConstants, 16, 2))).ToArray()
+                : [];
+            var keyChurn = new List<(int Stream, int Word)>();
+            var keyChurnStarts = new List<(int Stream, int Start, int End)>();
+            ScenePm4? pm4 = null;
+            var submission = -1;
+            for (var draw = 0; draw <= gameDrawCount; draw++)
+            {
+                var next = draw == gameDrawCount ? GameSubmissions : (int)((long)draw * GameSubmissions / gameDrawCount);
+                if (next != submission)
+                {
+                    if (pm4 is not null) streams[submission] = pm4.ToArray();
+                    if (draw == gameDrawCount) break;
+                    pm4 = new ScenePm4();
+                    submission = next;
+                }
+
+                var pass = draw / passLength;
+                var passStart = draw % passLength == 0;
+                if (passStart)
+                {
+                    for (var dispatch = 0; dispatch < dispatchTables.Length; dispatch++)
+                    {
+                        var compute = new SceneState(1, 1);
+                        compute.Context.Clear();
+                        compute.Uconfig.Clear();
+                        compute.ComputeShader(computePrograms[dispatch % computePrograms.Length], 8, 8, 1,
+                            [Descriptors.Lo(dispatchTables[dispatch]), Descriptors.Hi(dispatchTables[dispatch])], true, true, false, 1, 0);
+                        compute.Emit(pm4!);
+                        pm4!.DispatchDirect(StorageEdge / 8, StorageEdge / 8, 1);
+                    }
+                }
+
+                var firstOfSubmission = (int)((long)draw * GameSubmissions / gameDrawCount) != (int)((long)(draw - 1) * GameSubmissions / gameDrawCount) || draw == 0;
+                var mesh = draw % 16 == 15
+                    ? dynamicMeshes[draw / 16 % dynamicMeshes.Length]
+                    : gameMeshes[(int)((ulong)(draw / meshRepeat) * 7919UL % (ulong)gameMeshCount)];
+                var material = firstOfSubmission
+                    ? churnMaterials[submission % ChurnTextures]
+                    : materials[(draw * 11 + pass * 3) % Materials];
+                var newKey = churnWords && draw % 32 == 7;
+                var emittedFrom = pm4!.Count;
+                EmitDraw(pm4!, draw, pass, passStart || firstOfSubmission, mesh, material, newKey ? pixelConstantCopies[0] : 0);
+                if (newKey) keyChurnStarts.Add((submission, emittedFrom, pm4!.Count));
+                if (dispatchEvery != 0 && draw % dispatchEvery == dispatchEvery - 1)
+                {
+                    var dispatch = draw / dispatchEvery % dispatchTables.Length;
+                    var program = dispatchRebind ? draw / dispatchEvery / dispatchTables.Length % computePrograms.Length : dispatch % computePrograms.Length;
+                    var compute = new SceneState(1, 1);
+                    compute.Context.Clear();
+                    compute.Uconfig.Clear();
+                    compute.ComputeShader(computePrograms[program], 8, 8, 1,
+                        [Descriptors.Lo(dispatchTables[dispatch]), Descriptors.Hi(dispatchTables[dispatch])], true, true, false, 1, 0);
+                    compute.Emit(pm4!);
+                    pm4!.DispatchDirect(StorageEdge / 8, StorageEdge / 8, 1);
+                }
+
+                var commitFollows = (int)((submission + 1) / SubmissionsPerCommit) != (int)(submission / SubmissionsPerCommit);
+                if (commitFollows && draw % 6 == 5)
+                {
+                    labelWrites++;
+                    var constants = labelWrites % 200 == 0;
+                    var address = constants ? objectConstants + 0x3C : labels + (ulong)(labelWrites % 4096) * 4;
+                    pm4!.Packet(ScenePm4.OpWriteData, [1u << 8, (uint)address, (uint)(address >> 32), constants ? 0u : (uint)labelWrites]);
+                }
+            }
+
+            // The word of each such draw that holds its pixel constants' low address bits (found once in its packets).
+            foreach (var (stream, start, end) in keyChurnStarts)
+            {
+                var found = Enumerable.Range(start, end - start).Where(word => streams[stream][word] == Descriptors.Lo(pixelConstantCopies[0])).ToArray();
+                Assert.Single(found);
+                keyChurn.Add((stream, found[0]));
+            }
+
+            return (streams, written, churn, wordChurn, [.. keyChurn]);
+        }
+
         var phases = Enum.GetValues<RenderPhaseProfile.Phase>().Where(phase => phase != RenderPhaseProfile.Phase.Count).ToArray();
         var profiling = RenderPhaseProfile.Enabled;
         var results = new List<object>();
         ulong submissionId = 1000;
         foreach (var variation in Enum.GetValues<Variation>().Where(variation => only is null || variation.ToString() == only))
         {
-            var words = variation == Variation.Draws ? DrawStream() : DispatchStream();
-            var items = variation == Variation.Draws ? drawCount : dispatchCount;
-            var streamAddress = rig.Memory.Upload<uint>(words, 256);
+            var game = variation is Variation.GameShaped or Variation.GameWords ? GameStreams(variation == Variation.GameWords) : default;
+            var words = variation switch
+            {
+                Variation.Draws => DrawStream(),
+                Variation.Dispatches => DispatchStream(),
+                _ => [],
+            };
+            var items = variation switch
+            {
+                Variation.Draws => drawCount,
+                Variation.Dispatches => dispatchCount,
+                _ => gameDrawCount,
+            };
+            var streamAddress = words.Length != 0 ? rig.Memory.Upload<uint>(words, 256) : 0;
+            var gameStreams = game.Streams?.Select(stream => (Address: rig.Memory.Upload<uint>(stream, 256), Length: (uint)stream.Length)).ToArray();
             var wall = new List<double>();
             var cpu = new List<double>();
             var phaseTotals = new Dictionary<string, double>();
             long allocated = 0;
             long allAllocated = 0;
+            long passes = 0;
             var collections = 0;
+            // The shard bench takes the resolutions of the worker's last warm round (its program takes, in order).
+            var translation = shardBench ? TranslationField.GetValue(rig.Host)! : null;
+            var liveExecutor = translation is not null ? (SharpEmu.Libs.Gpu.Rendering.RenderExecutor)TranslationExecutor.GetValue(translation)! : null;
+            var capture = liveExecutor is not null
+                ? new CapturingPrefetch(liveExecutor.Prefetch ?? throw new InvalidOperationException("The shard bench needs the parallel resolver."))
+                : null;
+            if (capture is not null) liveExecutor!.Prefetch = capture;
             for (var round = 0; round < warm + rounds; round++)
             {
-                if (round == warm) _ = PrefetchCounters.Invoke(rig.Host, null);
+                if (capture is not null)
+                {
+                    if (round == warm)
+                    {
+                        liveExecutor!.Prefetch = capture.Inner;
+                        Output.WriteLine($"captured round, worker resolver: {PrefetchCounters.Invoke(rig.Host, null)}");
+                        // SHARPEMU_DS_SHARD_BENCH_NEW_EVERY=n: one draw in n more takes per-frame pixel constants (a new key every
+                        // frame), on top of the stream's every 32nd.
+                        var newEvery = int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DS_SHARD_BENCH_NEW_EVERY"), out var everyNew) && everyNew > 0 ? everyNew : 0;
+                        var jobs = CapturedJobs(capture.Jobs!, Descriptors.Lo(pixelConstantCopies[(warm - 1) % PixelConstantCopies]), Descriptors.Lo(pixelConstants), newEvery);
+                        results.Add(RunShardBench(rig, translation!, variation.ToString(), jobs,
+                            frame =>
+                            {
+                                // The replay resolves every job while the tables' copy is pending, so each read goes through to
+                                // the copy's source: the churn is written there too (Demon's Souls' copy source changes per frame).
+                                foreach (var (address, even, odd) in game.WordChurn ?? [])
+                                {
+                                    rig.Memory.Write<uint>(address, frame % 2 == 0 ? even : odd);
+                                    if (copyWords != 0) rig.Memory.Write<uint>(copySource + (address - copyDestination), frame % 2 == 0 ? even : odd);
+                                }
+
+                                foreach (var job in capture.Jobs!.Where(job => job.KeyWord >= 0))
+                                    job.Banks.Shader.Pixel.UserScalars.Values[job.KeyWord] = Descriptors.Lo(pixelConstantCopies[frame % PixelConstantCopies]);
+                                ArmCopiedTables();
+                            },
+                            () =>
+                            {
+                                rig.Host.FlushCommandBuffer();
+                                rig.Drain();
+                            },
+                            firstFrame: warm));
+                        break;
+                    }
+
+                    capture.Jobs = round == warm - 1 ? [] : null;
+                    // The worker's own resolver counters over the captured round (the single-resolver mix in situ).
+                    if (round == warm - 1) _ = PrefetchCounters.Invoke(rig.Host, null);
+                }
+
+                if (round == warm)
+                {
+                    _ = SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport();
+                    _ = PrefetchCounters.Invoke(rig.Host, null);
+                    _ = KeptProgramsReport.Invoke(null, null);
+                }
+                foreach (var (address, even, odd) in game.WordChurn ?? []) rig.Memory.Write<uint>(address, round % 2 == 0 ? even : odd);
+                foreach (var (stream, word) in game.KeyChurn ?? [])
+                    rig.Memory.Write32(gameStreams![stream].Address + (ulong)word * 4, Descriptors.Lo(pixelConstantCopies[round % PixelConstantCopies]));
                 RenderPasses.SetValue(rig.Host, 0L);
                 var before = profiling ? phases.Select(phase => PhaseTicks(phase)).ToArray() : null;
-                rig.Host.CommandStream.EnqueueGraphics(streamAddress, (uint)words.Length, ++submissionId, null);
+                if (gameStreams is null) rig.Host.CommandStream.EnqueueGraphics(streamAddress, (uint)words.Length, ++submissionId, null);
                 var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
                 var allBefore = GC.GetTotalAllocatedBytes(precise: false);
                 var collectionsBefore = GC.CollectionCount(0);
                 var cpuStarted = ThreadCpuNanoseconds();
                 var started = Stopwatch.GetTimestamp();
-                rig.RecordPending();
+                if (gameStreams is null)
+                {
+                    rig.RecordPending();
+                }
+                else if (burst)
+                {
+                    ArmCopiedTables();
+                    for (var index = 0; index < gameStreams.Length; index++)
+                    {
+                        rig.Host.CommandStream.EnqueueGraphics(gameStreams[index].Address, gameStreams[index].Length, ++submissionId, null);
+                    }
+
+                    rig.RecordPending();
+                    rig.Host.FlushCommandBuffer();
+                    for (var index = 2; index < gameStreams.Length; index += 3)
+                    {
+                        ((SharpEmu.HLE.GpuMemory.IGuestImageStore)rig.Host.ImageCache).Unregister(game.Churn[index % ChurnTextures], 0x10000);
+                    }
+                }
+                else
+                {
+                    ArmCopiedTables();
+                    for (var index = 0; index < gameStreams.Length; index++)
+                    {
+                        rig.Host.CommandStream.EnqueueGraphics(gameStreams[index].Address, gameStreams[index].Length, ++submissionId, null);
+                        rig.RecordPending();
+                        if ((int)((index + 1) / SubmissionsPerCommit) != (int)(index / SubmissionsPerCommit))
+                        {
+                            rig.Host.FlushCommandBuffer();
+                            ArmCopiedTables();
+                        }
+
+                        if (index % 3 == 2)
+                        {
+                            var churn = game.Churn[index % ChurnTextures];
+                            ((SharpEmu.HLE.GpuMemory.IGuestImageStore)rig.Host.ImageCache).Unregister(churn, 0x10000);
+                        }
+                    }
+                }
+
                 var elapsed = Stopwatch.GetTimestamp() - started;
                 var cpuElapsed = ThreadCpuNanoseconds() - cpuStarted;
                 var roundAllocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
                 var roundAll = GC.GetTotalAllocatedBytes(precise: false) - allBefore;
                 var roundCollections = GC.CollectionCount(0) - collectionsBefore;
                 rig.Drain();
+                passes = (long)RenderPasses.GetValue(rig.Host)!;
                 var counters = rig.Host.ReadAndResetPerfCounters();
                 if (round < warm) continue;
                 wall.Add(elapsed * 1e6 / Stopwatch.Frequency / items);
@@ -454,18 +845,26 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 }
             }
 
+            if (capture is not null) continue;
             var prefetch = (string)PrefetchCounters.Invoke(rig.Host, null)!;
+            // The recorder's target reuse over the measured rounds, and the render passes of the last one.
+            var inPlace = SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport();
+            // The compute kept programs of the measured rounds; the graphics ones and the resolve memo are in the prefetch counters.
+            var kept = (string)KeptProgramsReport.Invoke(null, null)!;
+            // Read-only bindings answered from the one before (MetalReadBindingMemo) over every round, warm-up included.
+            var bindings = (string)ReadBindingCounters.Invoke(rig.Host, null)!;
             var checksum = 0xCBF29CE484222325UL;
             void Fold(ulong address, int count)
             {
                 foreach (var word in rig.Read<uint>(address, count)) checksum = (checksum ^ word) * 0x100000001B3UL;
             }
 
-            if (variation == Variation.Draws)
+            if (variation != Variation.Dispatches)
             {
                 foreach (var set in targets)
                 foreach (var target in set)
                     Fold(target, (int)(SceneDraws.LinearPitchBytes(TargetSize, 16) / 4 * TargetSize));
+                foreach (var buffer in game.Written ?? []) Fold(buffer, (int)(StorageEdge * StorageEdge));
             }
             else
             {
@@ -475,7 +874,7 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
 
             wall.Sort();
             cpu.Sort();
-            var unit = variation == Variation.Draws ? "draw" : "dispatch";
+            var unit = variation == Variation.Dispatches ? "dispatch" : "draw";
             Output.WriteLine($"{variation}: wall median {wall[wall.Count / 2]:F2} us/{unit}, p25 {wall[wall.Count / 4]:F2}; " +
                 $"thread cpu median {cpu[cpu.Count / 2]:F2}, p25 {cpu[cpu.Count / 4]:F2}; {allocated / (double)(rounds * items):F0} B/{unit} (all threads {allAllocated / (double)(rounds * items):F0}), " +
                 $"gen0 {collections}; checksum {checksum:X16}");
@@ -495,6 +894,10 @@ public sealed class DsDrawCostBenchTests(ITestOutputHelper output) : SceneTestBa
                 gen0CollectionsPerThousandItems = collections * 1000.0 / (rounds * items),
                 checksum = $"{checksum:X16}",
                 counters = prefetch,
+                kept,
+                bindings,
+                inPlace,
+                passesLastRound = passes,
                 phaseMicroseconds = phaseTotals.Where(pair => pair.Value / rounds >= 0.005)
                     .OrderByDescending(pair => pair.Value).ToDictionary(pair => pair.Key, pair => Math.Round(pair.Value / rounds, 3)),
             });

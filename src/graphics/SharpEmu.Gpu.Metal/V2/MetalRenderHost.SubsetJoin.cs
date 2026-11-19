@@ -182,7 +182,7 @@ internal sealed partial class MetalRenderHost
         // device-address program is checked against the ranges binding ordered.
         if (_deferredLabelCopies.Count != 0 && BindsDeferredCopyDestination())
         {
-            _landDeferredLabels = true;
+            RequestLabelLanding(LabelLandCause.Join);
             return RefuseSubsetJoin("copies");
         }
 
@@ -344,11 +344,9 @@ internal sealed partial class MetalRenderHost
                 var slot = output < 8 ? (int)((remap >> (output * 4)) & 0xF) - 1 : -1;
                 return slot < 0 ? match.Value : $"[[color({slot})";
             });
-            var library = CompileLibrary(source, module.Hash, shader.UsesPerVertexInputs, prewarmable: true, out var archiveKey, out _);
-            nint error = 0;
-            var function = shader.UsesMipStatisticsConstant
-                ? NewMipStatisticsFunction(library, shader.EntryPoint, enabled: counters, out error)
-                : MetalNative.Send(library, MetalNative.Selector("newFunctionWithName:"), MetalNative.NsString(shader.EntryPoint));
+            var library = CompileLibrary(source, module.Hash, shader.UsesPerVertexInputs, prewarmable: true, out var archiveKey, out _, out _);
+            // Its buffer words stay generic (MetalRenderHost.BufferWordVariants).
+            var function = NewTranslatedFunction(library, shader, mipStatistics: counters, out var error);
             if (function == 0)
             {
                 ReleaseLibrary(library);

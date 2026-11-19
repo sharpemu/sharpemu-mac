@@ -269,8 +269,17 @@ public static class RenderPhaseProfile
 
     internal static void SetOverlayCapture(bool phases, bool timeline)
     {
+        timeline &= phases;
+        if (phases == _overlayPhasesWanted && timeline == _overlayTimelineWanted)
+        {
+            // The overlay states its demand again with every snapshot it takes. What it wants has not changed, so
+            // the render thread's sampling stands: resuming the capture here put every frame back under the clock
+            // (a paused capture lasted only until the overlay's next snapshot, a few milliseconds).
+            return;
+        }
+
         _overlayPhasesWanted = phases;
-        _overlayTimelineWanted = phases && timeline;
+        _overlayTimelineWanted = timeline;
         _overlaySkip = 0;
         if (phases)
         {
@@ -278,7 +287,7 @@ public static class RenderPhaseProfile
             Volatile.Write(ref _overlayCaptureStart, Stopwatch.GetTimestamp());
         }
 
-        _overlayTimeline = phases && timeline;
+        _overlayTimeline = timeline;
         _overlayPhases = phases;
     }
 
@@ -291,6 +300,15 @@ public static class RenderPhaseProfile
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY_PHASE_SAMPLE"), out var sample)
             ? Math.Clamp(sample, 1, 64)
             : 4;
+
+    // A captured frame also has to be this long after the last one began. At a low frame rate one frame in four is
+    // still several a second, and each costs the render thread: Demon's Souls at 12 fps drew every fourth frame about
+    // 5 ms slower (80 against 85 ms), a visible beat in the frame pacing for a breakdown nobody reads that often.
+    // SHARPEMU_OVERLAY_PHASE_MIN_MS=0 samples by frame count alone.
+    internal static long OverlayPhaseMinTicks { get; set; } =
+        (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY_PHASE_MIN_MS"), out var minMs)
+            ? Math.Clamp(minMs, 0, 10_000)
+            : 1000) * Stopwatch.Frequency / 1000;
 
     private static bool _overlayPhasesWanted;
     private static bool _overlayTimelineWanted;
@@ -741,7 +759,8 @@ public static class RenderPhaseProfile
         {
             Overlay.OverlayTelemetry.EndRenderFrame(now, null, null);
             _overlaySegments?.Clear();
-            if (_overlayPhasesWanted && --_overlaySkip <= 0)
+            if (_overlayPhasesWanted && --_overlaySkip <= 0 &&
+                now - Volatile.Read(ref _overlayCaptureStart) >= OverlayPhaseMinTicks)
             {
                 // The next frame is captured from here.
                 Array.Clear(_framePhaseTicks);

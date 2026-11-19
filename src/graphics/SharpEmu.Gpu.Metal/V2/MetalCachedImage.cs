@@ -163,8 +163,16 @@ internal sealed class MetalCachedImage : IDisposable
         Texture = texture;
         ResidentEnd = description.Data.Size;
         // A newly created image starts with the guest's bytes as its contents, so the
-        // first use uploads unless the GPU takes ownership first.
+        // first use uploads unless the GPU takes ownership first. Stale over all of it, said
+        // as such: an empty interval would let the next run widen it to that run alone.
         _cpuDirty = !ImageDescription.IsEmptyRange(description.Data);
+        if (_cpuDirty)
+        {
+            _stale[0] = (0, description.Data.Size);
+            _staleCount = 1;
+            StaleCauses = 1 << (int)MetalImageDirtyCause.Created;
+        }
+
         NoteContentChanged();
     }
 
@@ -412,13 +420,19 @@ internal sealed class MetalCachedImage : IDisposable
             _lastAccessTick = value;
             if (SharpEmu.Logging.MemoryTelemetry.Enabled)
             {
-                LastAccessTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                LastAccessTimestamp = Volatile.Read(ref AccessClock);
             }
         }
     }
 
     /// <summary>Stopwatch ticks of the last use; kept only with SHARPEMU_LOG_MEMORY=1 (idle-age census).</summary>
     public long LastAccessTimestamp;
+
+    // The time a use is stamped with: read once per collection (MetalImageCache.Collect, at the end of every guest
+    // submission), not per use. Every texture binding and attachment sets LastAccessTick, and a clock read there
+    // was ~1.7% of Demon's Souls' GPU worker in every SHARPEMU_LOG_MEMORY=1 run; the census buckets idle images by
+    // a second, ten and sixty, which one submission's lag does not move.
+    internal static long AccessClock = System.Diagnostics.Stopwatch.GetTimestamp();
 
     // The submission serial of the command buffer that last wrote the image, so a
     // writeback knows whether the GPU work it depends on has been recorded.
@@ -454,8 +468,7 @@ internal sealed class MetalCachedImage : IDisposable
     {
         _windowLinearView = true;
         _cpuDirty = false;
-        DirtyStart = 0;
-        DirtyEnd = 0;
+        _staleCount = 0;
         NoteContentChanged();
     }
 
@@ -606,14 +619,55 @@ internal sealed class MetalCachedImage : IDisposable
     public MetalImageDirtyCause DirtyCause { get; private set; } = MetalImageDirtyCause.Created;
 
     /// <summary>
-    /// The guest bytes of this image, as offsets into it, that guest memory holds a newer
-    /// version of than the texture does. One merged interval rather than a set: a second
-    /// range that does not touch the first widens it to cover both, which costs an upload
-    /// of the bytes between them and never an upload too few.
+    /// Every cause that marked the image stale since it was last clean, as bits of 1 &lt;&lt; cause.
+    /// <see cref="DirtyCause"/> keeps only the first, so a CPU-written image an alias hand-over
+    /// later marks over another run still says CpuWrite there; the upload prelude reads this.
     /// </summary>
-    public ulong DirtyStart { get; private set; }
+    public byte StaleCauses { get; private set; }
 
-    public ulong DirtyEnd { get; private set; }
+    /// <summary>
+    /// A device copy (an alias or stencil copy from another texture) wrote this texture since its
+    /// last whole refresh: the texture holds bytes guest memory may not, so the upload prelude never
+    /// moves a whole upload of it.
+    /// </summary>
+    public bool DeviceCopiedSinceRefresh;
+
+    /// <summary>The most stale runs, and the most published runs, an image holds apart with run sets on.</summary>
+    public const int MaxRuns = 4;
+
+    /// <summary>
+    /// How many stale runs and how many published runs this image holds apart. One - a single
+    /// merged interval each, as before - unless the cache admitted it with run sets on
+    /// (SHARPEMU_METAL_V2_ALIAS_RUN_SETS), when it is <see cref="MaxRuns"/>.
+    /// </summary>
+    public int RunCapacity { get; set; } = 1;
+
+    /// <summary>Where the cache counts what run sets do; null outside a cache.</summary>
+    public MetalRunSetStats? RunStats;
+
+    // Sorted, and none overlaps or touches the next.
+    private readonly (ulong Start, ulong End)[] _stale = new (ulong, ulong)[MaxRuns];
+    private int _staleCount;
+    private readonly (ulong Start, ulong End)[] _published = new (ulong, ulong)[MaxRuns];
+    private int _publishedCount;
+
+    /// <summary>
+    /// The guest bytes of this image, as offsets into it, that guest memory holds a newer
+    /// version of than the texture does. With one run (run sets off) a second range that
+    /// does not touch the first widens it to cover both, which costs an upload of the bytes
+    /// between them and never an upload too few - for an image the texture owns no byte of.
+    /// A GPU-written image holds bytes only its texture has between two runs, so its runs are
+    /// kept apart, up to <see cref="RunCapacity"/>.
+    /// </summary>
+    public ReadOnlySpan<(ulong Start, ulong End)> StaleRuns => _stale.AsSpan(0, _staleCount);
+
+    public int StaleRunCount => _staleCount;
+
+    /// <summary>Where the first stale run starts: with one run, the stale interval.</summary>
+    public ulong DirtyStart => _staleCount == 0 ? 0 : _stale[0].Start;
+
+    /// <summary>Where the last stale run ends.</summary>
+    public ulong DirtyEnd => _staleCount == 0 ? 0 : _stale[_staleCount - 1].End;
 
     /// <summary>
     /// The bytes already published to guest memory since this image was last written by
@@ -621,9 +675,166 @@ internal sealed class MetalCachedImage : IDisposable
     /// the image stays GPU-modified and this is what keeps the next alias from publishing
     /// the same bytes again.
     /// </summary>
-    public ulong PublishedStart { get; private set; }
+    public ReadOnlySpan<(ulong Start, ulong End)> PublishedRuns => _published.AsSpan(0, _publishedCount);
 
-    public ulong PublishedEnd { get; private set; }
+    // Adds [start, end) to sorted runs that neither overlap nor touch, absorbing every run it overlaps or touches,
+    // into `into` (room for one more than the runs), and returns how many runs that makes.
+    internal static int UnionRun(
+        ReadOnlySpan<(ulong Start, ulong End)> runs, ulong start, ulong end, Span<(ulong Start, ulong End)> into)
+    {
+        var count = 0;
+        var placed = false;
+        foreach (var run in runs)
+        {
+            if (run.End < start)
+            {
+                into[count++] = run;
+            }
+            else if (run.Start > end)
+            {
+                if (!placed)
+                {
+                    into[count++] = (start, end);
+                    placed = true;
+                }
+
+                into[count++] = run;
+            }
+            else
+            {
+                start = Math.Min(start, run.Start);
+                end = Math.Max(end, run.End);
+            }
+        }
+
+        if (!placed)
+        {
+            into[count++] = (start, end);
+        }
+
+        return count;
+    }
+
+    // Removes [start, end) from sorted runs into `into` (room for one more than the runs: a cut from the middle of
+    // one makes two), and returns how many runs are left.
+    internal static int SubtractRun(
+        ReadOnlySpan<(ulong Start, ulong End)> runs, ulong start, ulong end, Span<(ulong Start, ulong End)> into)
+    {
+        var count = 0;
+        foreach (var run in runs)
+        {
+            if (run.End <= start || run.Start >= end)
+            {
+                into[count++] = run;
+                continue;
+            }
+
+            if (run.Start < start)
+            {
+                into[count++] = (run.Start, start);
+            }
+
+            if (run.End > end)
+            {
+                into[count++] = (end, run.End);
+            }
+        }
+
+        return count;
+    }
+
+    private static bool Contains(ReadOnlySpan<(ulong Start, ulong End)> runs, ulong start, ulong end)
+    {
+        foreach (var run in runs)
+        {
+            if (run.Start <= start && end <= run.End)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>True when the texture is stale over all of <c>[start, end)</c>: one run holds it.</summary>
+    public bool IsStaleOver(ulong start, ulong end) => _cpuDirty && Contains(StaleRuns, start, end);
+
+    /// <summary>True when the texture is stale over any byte of <c>[start, end)</c>.</summary>
+    public bool StaleOverlaps(ulong start, ulong end)
+    {
+        foreach (var run in StaleRuns)
+        {
+            if (run.Start < end && run.End > start)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether <c>[start, end)</c> can be marked stale without widening a run over bytes between
+    /// two runs: the runs it does not overlap or touch, and it, fit in <see cref="RunCapacity"/>.
+    /// </summary>
+    public bool CanAddStaleRun(ulong start, ulong end)
+    {
+        if (!_cpuDirty)
+        {
+            return true;
+        }
+
+        var apart = 0;
+        foreach (var run in StaleRuns)
+        {
+            if (run.End < start || run.Start > end)
+            {
+                apart++;
+            }
+        }
+
+        return apart + 1 <= RunCapacity;
+    }
+
+    /// <summary>The run <c>[start, end)</c> becomes once marked stale: it and every run it overlaps or touches.</summary>
+    public (ulong Start, ulong End) MergedStaleRun(ulong start, ulong end)
+    {
+        foreach (var run in StaleRuns)
+        {
+            if (run.End >= start && run.Start <= end)
+            {
+                start = Math.Min(start, run.Start);
+                end = Math.Max(end, run.End);
+            }
+        }
+
+        return (start, end);
+    }
+
+    /// <summary>
+    /// Whether marking <c>[start, end)</c> current leaves none of it stale. A cut from the middle
+    /// of a run makes two; with one run (or a full set) the run is kept whole instead
+    /// (<see cref="RefreshComplete(ulong, ulong)"/>), so bytes that are not guest memory's must not
+    /// be put there.
+    /// </summary>
+    public bool CanCutStale(ulong start, ulong end)
+    {
+        foreach (var run in StaleRuns)
+        {
+            if (run.Start < start && run.End > end)
+            {
+                return _staleCount < RunCapacity;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Where the first published run starts.</summary>
+    public ulong PublishedStart => _publishedCount == 0 ? 0 : _published[0].Start;
+
+    /// <summary>Where the last published run ends.</summary>
+    public ulong PublishedEnd => _publishedCount == 0 ? 0 : _published[_publishedCount - 1].End;
 
     public void MarkCpuDirty(MetalImageDirtyCause cause = MetalImageDirtyCause.Invalidated) =>
         MarkCpuDirty(cause, 0, Description.Data.Size);
@@ -646,24 +857,74 @@ internal sealed class MetalCachedImage : IDisposable
         // Guest memory got newer bytes; the texture itself is unchanged until the upload, so
         // released chunks stay restorable from it (the upload's read restores what it covers).
         BumpContentVersion();
+        StaleCauses = (byte)((_cpuDirty ? StaleCauses : 0) | (1 << (int)cause));
         if (!_cpuDirty)
         {
             DirtyCause = cause;
-            DirtyStart = start;
-            DirtyEnd = end;
+            _stale[0] = (start, end);
+            _staleCount = 1;
             _cpuDirty = true;
             BindingVersion++;
             Epochs?.NoteBindingChanged();
             return;
         }
 
-        if (start < DirtyStart || end > DirtyEnd)
+        if (Contains(StaleRuns, start, end))
         {
-            DirtyStart = Math.Min(DirtyStart, start);
-            DirtyEnd = Math.Max(DirtyEnd, end);
-            BindingVersion++;
-            Epochs?.NoteBindingChanged();
+            return;
         }
+
+        if (RunCapacity <= 1)
+        {
+            _stale[0] = (Math.Min(_stale[0].Start, start), Math.Max(_stale[0].End, end));
+        }
+        else
+        {
+            Span<(ulong Start, ulong End)> runs = stackalloc (ulong, ulong)[MaxRuns + 1];
+            var count = UnionRun(StaleRuns, start, end, runs);
+            if (count > RunCapacity)
+            {
+                count = MergeClosest(runs[..count]);
+            }
+
+            runs[..count].CopyTo(_stale);
+            _staleCount = count;
+            RunStats?.NoteSets(count);
+        }
+
+        BindingVersion++;
+        Epochs?.NoteBindingChanged();
+    }
+
+    // One run too many: the two runs with the least between them become one. The bytes between them are marked
+    // stale too, which is exact only while guest memory holds them for this image - always, when the texture owns
+    // none of its bytes; for a GPU-written image the cache never lets it come to this (CanAddStaleRun), and if it
+    // does anyway it is counted and warned about, since a refresh of the merged run replaces bytes only the
+    // texture holds.
+    private int MergeClosest(Span<(ulong Start, ulong End)> runs)
+    {
+        var closest = 0;
+        for (var index = 1; index + 1 < runs.Length; index++)
+        {
+            if (runs[index + 1].Start - runs[index].End < runs[closest + 1].Start - runs[closest].End)
+            {
+                closest = index;
+            }
+        }
+
+        runs[closest] = (runs[closest].Start, runs[closest + 1].End);
+        runs[(closest + 2)..].CopyTo(runs[(closest + 1)..]);
+        RunStats?.NoteMerged(unpublished: _gpuModified);
+        if (_gpuModified)
+        {
+            MetalV2Diagnostics.WarnOnce(
+                $"run-set-unpublished-merge:{Description.PixelFormat}",
+                "A GPU-written image's stale runs were merged over bytes only its texture holds; its next refresh " +
+                $"replaces them with older guest bytes: {Description.PixelFormat} {Description.Extent.Width}x" +
+                $"{Description.Extent.Height} 0x{Description.Data.Address:X16}+0x{Description.Data.Size:X}.");
+        }
+
+        return runs.Length - 1;
     }
 
     /// <summary>The whole image is in the texture again.</summary>
@@ -672,8 +933,8 @@ internal sealed class MetalCachedImage : IDisposable
         NoteContentChanged();
         var wasDirty = _cpuDirty;
         _cpuDirty = false;
-        DirtyStart = 0;
-        DirtyEnd = 0;
+        _staleCount = 0;
+        DeviceCopiedSinceRefresh = false;
         if (wasDirty)
         {
             BindingVersion++;
@@ -696,27 +957,49 @@ internal sealed class MetalCachedImage : IDisposable
             return;
         }
 
+        if (RunCapacity > 1)
+        {
+            // A cut from the middle of a run makes two of it while the set has room; a full
+            // set keeps that run whole, as one interval does (CanCutStale).
+            Span<(ulong Start, ulong End)> runs = stackalloc (ulong, ulong)[MaxRuns + 1];
+            var count = SubtractRun(StaleRuns, start, end, runs);
+            if (count > RunCapacity ||
+                (count == _staleCount && runs[..count].SequenceEqual(StaleRuns)))
+            {
+                return;
+            }
+
+            runs[..count].CopyTo(_stale);
+            _staleCount = count;
+            RunStats?.NoteSets(count);
+            BindingVersion++;
+            Epochs?.NoteBindingChanged();
+            return;
+        }
+
         // A cut from the front or the back narrows the interval; a cut from the middle
         // would split it, and one interval cannot hold two, so it keeps the wider half.
-        if (start <= DirtyStart && end > DirtyStart)
+        var (dirtyStart, dirtyEnd) = _stale[0];
+        if (start <= dirtyStart && end > dirtyStart)
         {
-            DirtyStart = end;
+            dirtyStart = end;
         }
-        else if (end >= DirtyEnd && start < DirtyEnd)
+        else if (end >= dirtyEnd && start < dirtyEnd)
         {
-            DirtyEnd = start;
+            dirtyEnd = start;
         }
         else
         {
             return;
         }
 
-        if (DirtyEnd <= DirtyStart)
+        if (dirtyEnd <= dirtyStart)
         {
             RefreshComplete();
             return;
         }
 
+        _stale[0] = (dirtyStart, dirtyEnd);
         BindingVersion++;
         Epochs?.NoteBindingChanged();
     }
@@ -724,7 +1007,16 @@ internal sealed class MetalCachedImage : IDisposable
     /// <param name="depthPlaneChanged">
     /// False for a depth-stencil target the GPU writes only the stencil of.
     /// </param>
-    public void MarkGpuModified(bool depthPlaneChanged = true)
+    public void MarkGpuModified(bool depthPlaneChanged = true) => MarkGpuModified(depthPlaneChanged, keepStale: false);
+
+    /// <summary>
+    /// As <see cref="MarkGpuModified(bool)"/> for a write that touches no stale byte: every stale run stays as it
+    /// is (MetalImageCache.TryKeepOtherLayersStaleLocked), so nothing about how the image binds moves with it.
+    /// </summary>
+    public void MarkGpuModifiedKeepingStale(bool depthPlaneChanged = true) =>
+        MarkGpuModified(depthPlaneChanged, keepStale: true);
+
+    private void MarkGpuModified(bool depthPlaneChanged, bool keepStale)
     {
         // Every write path gives a texture held from a later level the whole chain first
         // (MetalImageCache.PromoteLinearView): a writeback of a cut texture would retile its
@@ -747,15 +1039,23 @@ internal sealed class MetalCachedImage : IDisposable
 
         var wasModified = _gpuModified;
         var wasDirty = _cpuDirty;
-        var wasPublished = PublishedEnd > PublishedStart;
+        var wasPublished = _publishedCount != 0;
         // Claimed before the image is GPU-modified: the guest process never sees it so unclaimed.
+        // Every stale run goes: a caller whose write leaves some of them stale marks those again
+        // after this (MetalImageCache.CompleteDeferredLocked).
         ClaimPendingWriteback();
         _gpuModified = true;
-        _cpuDirty = false;
-        DirtyStart = 0;
-        DirtyEnd = 0;
-        PublishedStart = 0;
-        PublishedEnd = 0;
+        if (keepStale)
+        {
+            wasDirty = false;
+        }
+        else
+        {
+            _cpuDirty = false;
+            _staleCount = 0;
+        }
+
+        _publishedCount = 0;
         GpuWriteSequence = Interlocked.Increment(ref _gpuWriteCounter);
         if (!wasModified)
         {
@@ -773,52 +1073,102 @@ internal sealed class MetalCachedImage : IDisposable
     public void MarkPublished(ulong start, ulong end)
     {
         end = Math.Min(end, Description.Data.Size);
-        if (end <= start)
+        if (end <= start || Contains(PublishedRuns, start, end))
         {
             return;
         }
 
-        var (wasStart, wasEnd) = (PublishedStart, PublishedEnd);
-        if (PublishedEnd <= PublishedStart)
+        if (RunCapacity > 1)
         {
-            PublishedStart = start;
-            PublishedEnd = end;
+            // Runs with unpublished bytes between them stay apart: widening one over the gap
+            // would claim bytes guest memory never got. A set one too full forgets its shortest
+            // run, which only costs publishing it again.
+            Span<(ulong Start, ulong End)> runs = stackalloc (ulong, ulong)[MaxRuns + 1];
+            var count = UnionRun(PublishedRuns, start, end, runs);
+            if (count > RunCapacity)
+            {
+                count = DropShortest(runs[..count]);
+            }
+
+            runs[..count].CopyTo(_published);
+            _publishedCount = count;
         }
-        else if (start > PublishedEnd || end < PublishedStart)
+        else if (_publishedCount == 0)
+        {
+            _published[0] = (start, end);
+            _publishedCount = 1;
+        }
+        else if (start > _published[0].End || end < _published[0].Start)
         {
             // Two runs with unpublished bytes between them: one interval cannot hold both,
             // and widening it over the gap would claim bytes guest memory never got. The
             // longer run is kept; forgetting the other only costs publishing it again.
-            if (end - start > PublishedEnd - PublishedStart)
+            if (end - start <= _published[0].End - _published[0].Start)
             {
-                PublishedStart = start;
-                PublishedEnd = end;
+                return;
             }
+
+            _published[0] = (start, end);
         }
         else
         {
-            PublishedStart = Math.Min(PublishedStart, start);
-            PublishedEnd = Math.Max(PublishedEnd, end);
+            _published[0] = (Math.Min(_published[0].Start, start), Math.Max(_published[0].End, end));
         }
 
-        if (PublishedStart != wasStart || PublishedEnd != wasEnd)
+        BindingVersion++;
+        Epochs?.NoteBindingChanged();
+    }
+
+    private static int DropShortest(Span<(ulong Start, ulong End)> runs)
+    {
+        var shortest = 0;
+        for (var index = 1; index < runs.Length; index++)
         {
-            BindingVersion++;
-            Epochs?.NoteBindingChanged();
+            // On a tie the later run goes, as one interval keeps the earlier half.
+            if (runs[index].End - runs[index].Start <= runs[shortest].End - runs[shortest].Start)
+            {
+                shortest = index;
+            }
         }
+
+        runs[(shortest + 1)..].CopyTo(runs[shortest..]);
+        return runs.Length - 1;
     }
 
     /// <summary>True when guest memory already holds this run of the image.</summary>
-    public bool IsPublished(ulong start, ulong end) =>
-        PublishedEnd > PublishedStart && start >= PublishedStart && end <= PublishedEnd;
+    public bool IsPublished(ulong start, ulong end) => Contains(PublishedRuns, start, end);
+
+    /// <summary>
+    /// The texture got bytes over <c>[start, end)</c> guest memory does not hold (a copy from an alias that still
+    /// owes them): what was published there is not this image's any more. A cut from the middle of the one run
+    /// (or of a full set) keeps the longer side; forgetting a run only costs publishing it again.
+    /// </summary>
+    public void ForgetPublished(ulong start, ulong end)
+    {
+        Span<(ulong Start, ulong End)> runs = stackalloc (ulong, ulong)[MaxRuns + 1];
+        var count = SubtractRun(PublishedRuns, start, end, runs);
+        if (count == _publishedCount && runs[..count].SequenceEqual(PublishedRuns))
+        {
+            return;
+        }
+
+        if (count > RunCapacity)
+        {
+            count = DropShortest(runs[..count]);
+        }
+
+        runs[..count].CopyTo(_published);
+        _publishedCount = count;
+        BindingVersion++;
+        Epochs?.NoteBindingChanged();
+    }
 
     public void ClearGpuModified()
     {
         var wasModified = _gpuModified;
         _gpuModified = false;
         ReleasePendingWriteback();
-        PublishedStart = 0;
-        PublishedEnd = 0;
+        _publishedCount = 0;
         if (wasModified)
         {
             BindingVersion++;
