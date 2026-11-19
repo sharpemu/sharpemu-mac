@@ -155,6 +155,27 @@ public sealed class Gen5MslBufferAtomicTests(ITestOutputHelper output)
         Assert.Equal(expected, Execute(shader, initial));
     }
 
+    // Upstream 7cf0ac568 (BufferAtomicRangeDeviceTests): a returning atomic past the buffer drops its operation and
+    // returns zero, for every operation, not only swap.
+    [Theory]
+    [InlineData(0x32u)] // add
+    [InlineData(0x33u)] // sub
+    [InlineData(0x36u)] // unsigned min
+    [InlineData(0x38u)] // unsigned max
+    [InlineData(0x3Au)] // or
+    [InlineData(0x3Cu)] // inc
+    [InlineData(0x40u)] // fmax
+    public void EveryReturningAtomicOutOfRangeReturnsZeroAndWritesNothing(uint opcode)
+    {
+        var fixture = Fixture(true, 0, 2048, 0, indexed: false, opcode);
+        var shader = Compile(fixture, 0);
+        if (!RequireDevice()) return;
+
+        var expected = SentinelBuffer(32);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(48), 0u);
+        Assert.Equal(expected, Execute(shader, SentinelBuffer(32)));
+    }
+
     [Theory]
     [InlineData(true, 1u, 8u, 4u, true, true, 32, true)]
     [InlineData(false, 1u, 8u, 4u, true, true, 32, true)]
