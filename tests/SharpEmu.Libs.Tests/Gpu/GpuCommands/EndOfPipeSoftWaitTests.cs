@@ -424,4 +424,46 @@ public sealed class EndOfPipeSoftWaitTests
         Assert.Equal(SliceResult.BlockedWithoutProgress, setup.Queue.ProcessOne());
         Assert.Equal(1, setup.Queue.BlockedQueueCount);
     }
+
+    // A host that defers labels (Metal) leaves the release out of guest memory; another queue's wait is met at once by
+    // the queue's pending label, as by a label written as parsed. A host that records deferred labels' landings gives it
+    // one, so the wait is soft and passes when the release's tick completes.
+    [Fact]
+    public void ADeferredLabelTakesALandingOnAHostThatRecordsItsTick()
+    {
+        var setup = NewQueue();
+        setup.Host.DefersEndOfPipeLabels = true;
+        setup.Host.PendingLabelTick = 7;
+        setup.Host.RecordsDeferredLabelLandings = true;
+        setup.Host.EndOfPipeRecorded = write => write.Landing?.Recorded(7);
+        var landing = Published(setup, Release32(Label, 1));
+        Assert.Equal(0u, setup.Host.ReadDword(Label));
+        Graphics0(setup, 3, Wait32(3, Label, 1), Draw(7));
+        OtherWork(setup);
+
+        Assert.Equal(SliceResult.BlockedWithoutProgress, setup.Queue.ProcessOne());
+        Assert.Equal(0, Draws(setup));
+
+        setup.Queue.NotifyCompletedGpuTick(7);
+        RunUntilIdle(setup);
+
+        Assert.Equal(1, Draws(setup));
+        Assert.Equal(EndOfPipeLandings.Release.Complete, landing.ReleasedBy);
+    }
+
+    [Fact]
+    public void ADeferredLabelTakesNoLandingOnAHostThatDoesNotRecordIt()
+    {
+        var setup = NewQueue();
+        setup.Host.DefersEndOfPipeLabels = true;
+        setup.Host.PendingLabelTick = 7;
+        Compute(setup, FirstCompute, ComputeA, 1, Release32(Label, 1));
+        Assert.Equal(SliceResult.Completed, setup.Queue.ProcessOne());
+        Assert.Null(setup.Host.EndOfPipeWrites[^1].Landing);
+        Graphics0(setup, 3, Wait32(3, Label, 1), Draw(7));
+        OtherWork(setup);
+
+        Assert.Equal(SliceResult.Completed, setup.Queue.ProcessOne());
+        Assert.Equal(1, Draws(setup));
+    }
 }

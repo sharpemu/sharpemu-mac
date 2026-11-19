@@ -302,6 +302,13 @@ public interface ICommandStreamHost
     /// </remarks>
     bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => DefersEndOfPipeLabels;
 
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS on a host that defers labels: a label this host defers still releases another
+    // queue's wait at parse time through the queue's pending labels, as an immediately written one does, so it takes a
+    // landing too. Only a host that names the tick of every landing it is handed (EndOfPipeLanding.Recorded) and reports
+    // that tick's completion (CommandStreamQueue.NotifyCompletedGpuTick) answers true; any other host's deferred labels
+    // take no landing, as before.
+    bool RecordsDeferredLabelLandings => false;
+
     // A host that counts no occlusion samples (Metal). Its ZPASS_DUMP pairs are the
     // always-visible ones: every dump writes one value from a counter that only grows to
     // 16 depth blocks, and the counter select and reset events are ignored, so an end dump

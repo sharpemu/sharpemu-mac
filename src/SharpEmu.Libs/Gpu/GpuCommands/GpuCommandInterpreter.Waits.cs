@@ -91,10 +91,17 @@ public sealed partial class GpuCommandInterpreter
             pendingAnswer = satisfied;
         }
 
+        // Met by another queue's label still pending on a host that records deferred labels' landings: the value the
+        // landing is admitted against (RecordsDeferredLabelLandings).
+        ulong? pendingLabelAnswer = null;
         if (!satisfied && PendingLabelLookup is { } pending && pending(address, is64Bit, out var labelValue))
         {
             _ = WaitOperation.TryCompare(labelValue, reference, mask, compareFunction, out satisfied);
             pendingAnswer = satisfied;
+            if (satisfied && _host.RecordsDeferredLabelLandings)
+            {
+                pendingLabelAnswer = labelValue;
+            }
         }
 
         if (!satisfied && !deferred)
@@ -125,9 +132,11 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        // Met by the label bytes in guest memory, not a deferred label, a pending label or this queue's own write.
-        if (!deferred && !causal && Landings is { } landings && _execution is { } execution &&
-            landings.Admit(QueueId, address, is64Bit ? 8 : 4, compareFunction, reference, mask, value, CompletedGpuTick) is { } landing)
+        // Met by the label bytes in guest memory, not a deferred label, a pending label or this queue's own write; or by
+        // another queue's pending label on a host that records the landings of deferred labels.
+        if (!deferred && (!causal || pendingLabelAnswer is not null) && Landings is { } landings && _execution is { } execution &&
+            landings.Admit(QueueId, address, is64Bit ? 8 : 4, compareFunction, reference, mask, pendingLabelAnswer ?? value,
+                CompletedGpuTick) is { } landing)
         {
             ResumeSoftWait(new SoftWait(execution, execution.Depth, _packetAddress, landing, System.Diagnostics.Stopwatch.GetTimestamp()));
         }

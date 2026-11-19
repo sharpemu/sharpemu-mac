@@ -117,6 +117,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
 
     public bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => DefersKind?.Invoke(kind) ?? DefersEndOfPipeLabels;
 
+    public bool RecordsDeferredLabelLandings { get; set; }
+
     public bool FlipDone { get; set; } = true;
 
     public ulong NextFlipRequestId { get; set; } = 1;
