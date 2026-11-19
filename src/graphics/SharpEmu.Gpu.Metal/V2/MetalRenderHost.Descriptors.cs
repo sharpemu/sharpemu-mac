@@ -1263,9 +1263,22 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
+            if (range.Size == 0)
+            {
+                continue;
+            }
+
+            // An evaluated range past the guest address space the caches track is refused, as the
+            // Vulkan presenter refuses it (ObtainDeviceAddressRanges), not read as an unmapped page.
+            if (range.Base >= MetalImagePageOwners.AddressSpaceSize || range.Size > MetalImagePageOwners.AddressSpaceSize - range.Base)
+            {
+                throw Fatal($"A device-address range is outside the cache: handle={range.Handle} base=0x{range.Base:X16} " +
+                    $"size=0x{range.Size:X} hash=0x{stage.Program.Hash:X16}.");
+            }
+
             // A pointer to an unmapped page resolves to null in the shader, which drops
             // the access; there is nothing to publish, invalidate or wait for.
-            if (range.Size == 0 || range.Base == 0 || !_memory.CanRead(range.Base, 1))
+            if (range.Base == 0 || !_memory.CanRead(range.Base, 1))
             {
                 continue;
             }
