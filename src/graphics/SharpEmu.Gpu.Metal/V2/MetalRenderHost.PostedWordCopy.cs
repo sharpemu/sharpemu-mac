@@ -23,7 +23,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 //   - unsupported: a null, unaligned, empty, overlapping or overflowing range, or one over 16 MiB
 //     (GuestBufferCache.MaxHostCopyWords);
 //   - thread: asked on the command thread rather than the worker;
-//   - image / metadata: an image may own the destination's pages, or surface metadata lies there (a
+//   - image / metadata: an image's bytes lie in the destination, or surface metadata does (a
 //     store into either needs the image cache's bookkeeping, which the dispatch's storage binding does);
 //   - input: the source is not final (a recorded GPU write, a GPU-modified image, pending
 //     command-processor or label bytes), is surface metadata, or cannot be read;
@@ -50,6 +50,13 @@ internal sealed partial class MetalRenderHost
     private static readonly string[] PostedWordCopyRefusalNames = ["posted", "unsupported", "thread", "image", "metadata", "input", "encode", "host_kernel_copy"];
 
     private readonly long[] _postedWordCopies = new long[PostedWordCopyRefusalNames.Length];
+
+    /// <summary>
+    /// The image refusal asks for image bytes in the destination, not image pages (upstream 90d306cb1).
+    /// SHARPEMU_METAL_V2_POSTED_WORD_COPY_EXACT_IMAGE=0 refuses any destination an image shares a page with.
+    /// </summary>
+    internal static bool PostedWordCopyExactImageBytes { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_POSTED_WORD_COPY_EXACT_IMAGE") != "0";
 
     /// <summary>Posted word copies (index 0) and refusals by reason, since the host started.</summary>
     internal long PostedWordCopies(PostedWordCopyRefusal outcome) => Interlocked.Read(ref _postedWordCopies[(int)outcome]);
@@ -82,7 +89,10 @@ internal sealed partial class MetalRenderHost
             return PostedWordCopyRefusal.Thread;
         }
 
-        if (_imageCache.MayOwn(destination, size))
+        // Exact (upstream 90d306cb1): only an image whose bytes the store meets refuses it, not one that merely shares
+        // a page with it; the store's GPU copy touches no byte such an image holds.
+        if (_imageCache.MayOwn(destination, size) &&
+            (!PostedWordCopyExactImageBytes || _imageCache.HasImageBytes(destination, size)))
         {
             return PostedWordCopyRefusal.Image;
         }

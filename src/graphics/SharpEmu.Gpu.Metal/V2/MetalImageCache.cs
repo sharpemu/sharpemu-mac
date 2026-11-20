@@ -2232,6 +2232,29 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         return false;
     }
 
+    /// <summary>
+    /// True while a live image's guest bytes overlap the range, whatever its state: the exact answer behind
+    /// <see cref="MayOwn"/>, which answers by page (upstream's QueryRegion(...).ImageBytes, 90d306cb1).
+    /// </summary>
+    public bool HasImageBytes(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
+        {
+            return false;
+        }
+
+        using var held = _lock.Hold();
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            if (_slots.TryGet(imageIdentifier) is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // Diagnostics (SHARPEMU_PREFETCH_DRAW_LOOKAHEAD=census): the live images over the range, with their extent and state.
     internal string DescribeRangeOwners(ulong address, ulong size)
     {
