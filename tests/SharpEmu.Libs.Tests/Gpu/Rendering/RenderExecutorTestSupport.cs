@@ -446,7 +446,17 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
         Calls.Add($"draw_mesh {groupCountX} {groupCountY} {groupCountZ}");
 
-    public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
+    public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
+    {
+        Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
+        DispatchOverlaps.Add(NextDispatchMayOverlap);
+        NextDispatchMayOverlap = false;
+    }
+
+    /// <summary>The overlap mark each dispatch was recorded with (IRenderHost.NextDispatchMayOverlap).</summary>
+    public List<bool> DispatchOverlaps { get; } = new();
+
+    public bool NextDispatchMayOverlap { get; set; }
 
     public bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical) => false;
 

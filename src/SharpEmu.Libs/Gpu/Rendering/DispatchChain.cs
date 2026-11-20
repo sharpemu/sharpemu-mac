@@ -29,6 +29,74 @@ internal sealed class DispatchChain
     private bool _recordWritesImages;
     private long _promotions;
 
+    // The dispatches recorded since the last one the stream ordered (DispatchOverlap): those an overlap-marked dispatch
+    // runs beside on a host that honours the mark. Kept apart from the deferred-barrier chain above, which a host that
+    // records its barriers at once resets after every dispatch.
+    private readonly List<GuestSpan> _groupTouched = new();
+    private readonly List<GuestSpan> _groupWritten = new();
+    private bool _groupConservative;
+    private bool _groupReadImages;
+    private bool _groupWroteImages;
+
+    /// <summary>
+    /// Called after <see cref="NeedsHazardBarrier"/> for the same dispatch: whether it may still run beside the dispatches
+    /// recorded since the last ordered one, as the stream marked it (<paramref name="marked"/>). The console runs such
+    /// dispatches together too, so a guest only leaves the barrier out where it believes they share nothing; but the
+    /// host's dispatches do not take the console's time, and a dependency the console's timing hides (a small producer
+    /// finishing before its consumer reads) becomes a race here. A marked dispatch that touches what one of them wrote,
+    /// writes what one of them touched, or whose accesses (or theirs) are not all known is ordered after them instead,
+    /// and counted (<see cref="DispatchChainTally.OverlapsOrdered"/>). SHARPEMU_DISPATCH_OVERLAP_HAZARDS=0 runs every
+    /// marked dispatch beside the ones before it again.
+    /// </summary>
+    public bool KeepsOverlap(bool marked)
+    {
+        if (!marked || !OverlapHazardsChecked)
+        {
+            ResetGroup();
+            AddToGroup();
+            return marked;
+        }
+
+        var unknown = _groupConservative || _recordConservative || _groupTouched.Count > MaxSpans;
+        var hazard = !unknown &&
+            ((_recordReadsImages && _groupWroteImages) || (_recordWritesImages && (_groupWroteImages || _groupReadImages)) ||
+             Overlaps(_recordTouched, _groupWritten) || Overlaps(_recordWritten, _groupTouched));
+        if (unknown || hazard)
+        {
+            DispatchChainTally.NoteOverlapOrdered(unknown);
+            ResetGroup();
+            AddToGroup();
+            return false;
+        }
+
+        AddToGroup();
+        return true;
+    }
+
+    /// <summary>A dispatch recorded without the mark whose own ordering the host decides: kept in the group, never ending it.</summary>
+    public void JoinOverlapGroup() => AddToGroup();
+
+    internal static bool OverlapHazardsChecked { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_DISPATCH_OVERLAP_HAZARDS") != "0";
+
+    private void ResetGroup()
+    {
+        _groupTouched.Clear();
+        _groupWritten.Clear();
+        _groupConservative = false;
+        _groupReadImages = false;
+        _groupWroteImages = false;
+    }
+
+    private void AddToGroup()
+    {
+        _groupTouched.AddRange(_recordTouched);
+        _groupWritten.AddRange(_recordWritten);
+        _groupConservative |= _recordConservative;
+        _groupReadImages |= _recordReadsImages;
+        _groupWroteImages |= _recordWritesImages;
+    }
+
     public bool NeedsHazardBarrier(ResolvedDispatch record, in ShaderStageResources stage, long promotions)
     {
         if (_open && promotions != _promotions)
@@ -229,6 +297,21 @@ public static class DispatchChainTally
             Interlocked.Increment(ref _decisions[(int)decision]);
         }
     }
+
+    private static long _overlapsOrderedHazard;
+    private static long _overlapsOrderedUnknown;
+
+    /// <summary>Overlap-marked dispatches ordered after the ones before them (DispatchChain.KeepsOverlap), always counted.</summary>
+    public static void NoteOverlapOrdered(bool unknown) =>
+        Interlocked.Increment(ref unknown ? ref _overlapsOrderedUnknown : ref _overlapsOrderedHazard);
+
+    /// <summary>Overlap-marked dispatches ordered for a shared range (Hazard) or for accesses not all known (Unknown).</summary>
+    public static (long Hazard, long Unknown) OverlapsOrdered =>
+        (Interlocked.Read(ref _overlapsOrderedHazard), Interlocked.Read(ref _overlapsOrderedUnknown));
+
+    /// <summary>The overlap orderings since the last call, for a backend's report line.</summary>
+    public static string TakeOverlapReport() =>
+        FormattableString.Invariant($"overlap_ordered=[hazard:{Interlocked.Exchange(ref _overlapsOrderedHazard, 0)},unknown:{Interlocked.Exchange(ref _overlapsOrderedUnknown, 0)}]");
 
     public static string TakeReport() =>
         FormattableString.Invariant($"chain_open={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Open], 0)} chain_start={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Start], 0)} ") +

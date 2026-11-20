@@ -33,6 +33,13 @@ public sealed class DispatchChainTests : IDisposable
         _executor.Dispatch(submitId, Banks(), 1, 1, 1, 0x41);
     }
 
+    // A dispatch the stream reached from the one before it through register writes alone (DispatchOverlap).
+    private void DispatchMarked(ulong submitId, BufferResourceInfo[] buffers, uint[][] descriptors)
+    {
+        _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: buffers), buffers: descriptors));
+        _executor.Dispatch(submitId, Banks(), 1, 1, 1, 0x41 | RenderExecutor.DispatchMayOverlapBit);
+    }
+
     private int HazardBarriers => _host.Calls.Count(call => call == "write_hazard_barrier");
 
     [Theory]
@@ -125,6 +132,62 @@ public sealed class DispatchChainTests : IDisposable
         Dispatch(2, [Written], [BufferDescriptor(BufferB, 4, 16)]);
 
         Assert.Equal(2, HazardBarriers);
+    }
+
+    // HostKernelCopySceneTests' reader: a marked dispatch reading what the marked dispatch before it wrote ran beside it
+    // and read the bytes from before the write. It is ordered after it now, and counted; disjoint ones still overlap.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AMarkedDispatchThatReadsWhatTheOneBeforeItWroteIsOrderedAfterIt(bool checkHazards)
+    {
+        var saved = DispatchChain.OverlapHazardsChecked;
+        DispatchChain.OverlapHazardsChecked = checkHazards;
+        try
+        {
+            var before = DispatchChainTally.OverlapsOrdered;
+            DispatchMarked(1, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+            DispatchMarked(2, [Read], [BufferDescriptor(BufferA + 0x20, 4, 4)]);
+            // A third, disjoint from both, still runs beside the second (the group restarts at the ordered one).
+            DispatchMarked(3, [Written], [BufferDescriptor(BufferB, 4, 16)]);
+
+            Assert.Equal(checkHazards ? [true, false, true] : new[] { true, true, true }, _host.DispatchOverlaps);
+            Assert.Equal(before.Hazard + (checkHazards ? 1 : 0), DispatchChainTally.OverlapsOrdered.Hazard);
+            Assert.Equal(before.Unknown, DispatchChainTally.OverlapsOrdered.Unknown);
+        }
+        finally
+        {
+            DispatchChain.OverlapHazardsChecked = saved;
+        }
+    }
+
+    [Fact]
+    public void AMarkedDispatchIsCheckedAgainstEveryDispatchSinceTheLastOrderedOne()
+    {
+        DispatchMarked(1, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+        DispatchMarked(2, [Written], [BufferDescriptor(BufferB, 4, 16)]);
+        // Overlaps the first, two dispatches back, with no barrier between them either.
+        DispatchMarked(3, [Written], [BufferDescriptor(BufferA + 0x10, 4, 4)]);
+
+        Assert.Equal([true, true, false], _host.DispatchOverlaps);
+    }
+
+    [Fact]
+    public void AMarkedDispatchWhoseAccessesAreNotAllKnownIsOrdered()
+    {
+        var before = DispatchChainTally.OverlapsOrdered;
+        DispatchMarked(1, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+        var heap = new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Compute,
+            Buffers = [Written],
+            Bindings = new BindingLayout { UsesBindlessHeap = true },
+        };
+        _pipelines.Compute = ComputeProgram(Stage(heap, [BufferDescriptor(BufferB, 4, 16)]));
+        _executor.Dispatch(2, Banks(), 1, 1, 1, 0x41 | RenderExecutor.DispatchMayOverlapBit);
+
+        Assert.Equal([true, false], _host.DispatchOverlaps);
+        Assert.Equal(before.Unknown + 1, DispatchChainTally.OverlapsOrdered.Unknown);
     }
 
     [Fact]
