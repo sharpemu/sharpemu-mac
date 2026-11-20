@@ -3314,6 +3314,7 @@ internal sealed partial class MetalRenderHost :
         DisposeOcclusionAudit();
         DisposeWriteFences();
         DisposeHostMovie();
+        DisposeBindlessHeap();
         DisposeBindlessImages();
         DisposePipelines();
         (_transfer as IDisposable)?.Dispose();

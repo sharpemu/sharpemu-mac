@@ -231,7 +231,7 @@ internal sealed partial class MetalRenderHost
             _bindlessDescriptors += count;
         }
 
-        BindlessResidency?.PruneIfDue(_bindlessTables.Values, SubmissionSerial, CompletedSerial);
+        BindlessResidency?.PruneIfDue(BindlessResidencyTables, SubmissionSerial, CompletedSerial);
         _bindlessResolveTicks += Stopwatch.GetTimestamp() - started;
     }
 
