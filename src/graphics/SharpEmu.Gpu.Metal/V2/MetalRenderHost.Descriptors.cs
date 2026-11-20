@@ -62,6 +62,8 @@ internal sealed partial class MetalRenderHost
         public uint[] BufferLengths = [];
         public uint[] ShaderData = [];
         public ulong[] BindlessTableAddresses = [];
+        // The stage's heap views as shader data (MetalRenderHost.BindlessHeap.cs), found before its images.
+        public uint[] HeapViews = [];
         public int ImageCount;
         public int SamplerCount;
         public int BufferCount;
@@ -240,6 +242,7 @@ internal sealed partial class MetalRenderHost
         _preparedStageMask = 0;
         ResetUsedResources();
         _bindlessDeclarations.Clear();
+        _heapPrepared = false;
         Array.Clear(_stageArgumentValid);
         Array.Clear(_stageUsesDeviceAddresses);
         _hasPushData = false;
@@ -478,6 +481,12 @@ internal sealed partial class MetalRenderHost
         prepared.MovieChroma = movie.Chroma;
         // The stage binding plan for these arrays (MetalRenderHost.StagePlan.cs), or whether to keep this one's answers.
         var plan = FindStagePlan(stageIndex, program, info, snapshot, movie, out var storePlan);
+        // Where the stage's heap views have their elements, found before the stage's own images, as Vulkan does.
+        if (layout.UsesBindlessHeap)
+        {
+            PrepareHeapViews(prepared, layout, snapshot);
+        }
+
         if (storePlan && _stagePlanEntries.Length < info.Images.Count)
         {
             _stagePlanEntries = new TextureMemoEntry?[info.Images.Count];
@@ -580,6 +589,12 @@ internal sealed partial class MetalRenderHost
             {
                 throw UserRegisterOutsideUserData(program, layout, snapshot);
             }
+        }
+
+        if (layout.HeapViewCount != 0)
+        {
+            prepared.HeapViews.AsSpan(0, checked((int)(layout.HeapViewCount * HeapView.DwordCount)))
+                .CopyTo(shaderData.AsSpan((int)layout.HeapViewsDword));
         }
 
         stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, shaderDwords));
@@ -1068,6 +1083,11 @@ internal sealed partial class MetalRenderHost
         if (snapshot.BindlessImages.Length != 0 || stage.Program.Bindings!.BindlessImageTableCount != 0)
         {
             BindBindlessImages(stage, info, snapshot);
+        }
+
+        if (stage.Program.Bindings!.UsesBindlessHeap)
+        {
+            BindBindlessHeap();
         }
     }
 
@@ -1835,6 +1855,12 @@ internal sealed partial class MetalRenderHost
                     // One table for every program, resident with the windows, so two programs
                     // reaching the same guest qword take the same lock.
                     BinaryPrimitives.WriteUInt64LittleEndian(span, _guestMemory.PairLockTableGpuAddress);
+                    break;
+                case MslArgumentFieldKind.BindlessHeapElements:
+                    BinaryPrimitives.WriteUInt64LittleEndian(span, RequireHeapAddress(_heapElementsAddress, stage));
+                    break;
+                case MslArgumentFieldKind.BindlessHeapFeedback:
+                    BinaryPrimitives.WriteUInt64LittleEndian(span, RequireHeapAddress(_heapFeedbackAddress, stage));
                     break;
                 case MslArgumentFieldKind.BindlessImageTables:
                     for (var index = 0; index < field.Count; index++)

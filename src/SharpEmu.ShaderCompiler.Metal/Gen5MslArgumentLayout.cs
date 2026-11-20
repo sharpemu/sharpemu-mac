@@ -30,6 +30,13 @@ public enum MslArgumentFieldKind
     // bindless slot (BindingLayout.BindlessImageTableCount). Each entry is 16 bytes: a
     // texture's gpuResourceID and the class variant that reads it (sharpemu_bindless_entry).
     BindlessImageTables,
+    // The bindless heap's element table (BindlessHeap): one 8-byte texture or sampler handle per element, slot-major
+    // (slot * BindlessHeap.Capacity + element); a zero image handle is the null element. Declared only by a program
+    // that reads heap records (BindingLayout.UsesBindlessHeap).
+    BindlessHeapElements,
+    // The bindless heap's feedback words (BindlessHeap.FeedbackWords): the mark bitsets the shader sets for every
+    // element it reads, then the numeric class of every image element, which the host writes.
+    BindlessHeapFeedback,
 }
 
 // One field of the stage argument buffer: its binding kind, id range and byte range.
@@ -52,6 +59,10 @@ public sealed class Gen5MslArgumentLayout
     public const string StepReportName = "step_report";
     public const string PairLocksName = "pair_locks";
     public const string BindlessImagesName = "bindless_images";
+    public const string HeapElementsName = "heap_elements";
+    public const string HeapFeedbackName = "heap_feedback";
+    /// <summary>The bytes of one bindless heap element: a texture's or sampler's gpuResourceID.</summary>
+    public const int HeapElementBytes = 8;
     public const string MipStatisticsName = "mip_stats";
 
     /// <summary>The bytes of one bindless table entry: gpuResourceID, variant, reserved.</summary>
@@ -142,6 +153,12 @@ public sealed class Gen5MslArgumentLayout
         {
             Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.BindlessImageTables, BindlessImagesName,
                 layout.BindlessImageTableCount, ResourceBytes);
+        }
+
+        if (layout.UsesBindlessHeap)
+        {
+            Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.BindlessHeapElements, HeapElementsName, 1, ResourceBytes);
+            Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.BindlessHeapFeedback, HeapFeedbackName, 1, ResourceBytes);
         }
 
         // Always last, so adding them never moves a descriptor field.

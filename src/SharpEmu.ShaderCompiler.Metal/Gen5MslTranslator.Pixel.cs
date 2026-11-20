@@ -108,6 +108,11 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
+                if (IsHeapImageAccess(instruction, out var heapImage, out var heapSlot))
+                {
+                    return TryEmitHeapImage(instruction, image, heapImage, heapSlot, out error);
+                }
+
                 if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out packedFormat, out samplerInfo, out error, out resourceIndex))
                 {
                     return false;

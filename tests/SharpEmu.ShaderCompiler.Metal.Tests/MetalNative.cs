@@ -236,7 +236,8 @@ internal static partial class MetalNative
         IReadOnlyList<DeviceTable>? tables = null,
         IReadOnlyList<DeviceTable>? bindlessTables = null,
         Func<DescriptorBindingKind, nint>? textureOfClass = null,
-        IReadOnlyList<(uint Index, uint Value)>? constants = null)
+        IReadOnlyList<(uint Index, uint Value)>? constants = null,
+        (DeviceTable Elements, DeviceTable Feedback)? heap = null)
     {
         result = [];
         stepCapHits = 0;
@@ -288,6 +289,12 @@ internal static partial class MetalNative
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 8)),
                             SendULong(sampler, Selector("gpuResourceID")));
                         break;
+                    case MslArgumentFieldKind.BindlessHeapElements:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), SendULong(heap!.Value.Elements.Buffer, Selector("gpuAddress")));
+                        break;
+                    case MslArgumentFieldKind.BindlessHeapFeedback:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset), SendULong(heap!.Value.Feedback.Buffer, Selector("gpuAddress")));
+                        break;
                     case MslArgumentFieldKind.BufferByteCounts:
                         BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 4)), (uint)bufferContents.Length);
                         break;
@@ -332,6 +339,9 @@ internal static partial class MetalNative
                     .. texture == 0 ? Array.Empty<nint>() : [texture],
                     .. (tables ?? []).SelectMany(static table => (nint[])[table.Buffer, .. table.Residents]),
                     .. (bindlessTables ?? []).SelectMany(static table => (nint[])[table.Buffer, .. table.Residents]),
+                    .. heap is { } heapTables
+                        ? (nint[])[heapTables.Elements.Buffer, .. heapTables.Elements.Residents, heapTables.Feedback.Buffer]
+                        : [],
                     .. textureOfClass is null ? Array.Empty<nint>() : layout.Fields
                         .Where(static field => field.FieldKind == MslArgumentFieldKind.Textures)
                         .Select(field => textureOfClass(field.Kind)).Distinct(),
