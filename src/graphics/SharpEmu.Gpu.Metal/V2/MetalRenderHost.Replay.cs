@@ -450,6 +450,15 @@ internal sealed partial class MetalRenderHost
             return ReplayRefusal.Bindless;
         }
 
+        // A program that reads the bindless heap is never replayed: each item prepares its heap views and takes the
+        // marks that completed before it (PrepareHeapViews), which a replay would skip. The engine already seals no
+        // such program (RenderRecorder.IsReplayable); the host refuses too, as upstream's does
+        // (VulkanVideoPresenter.DrawReplay.cs: entry.UsesBindlessHeap).
+        if (layout.UsesBindlessHeap)
+        {
+            return ReplayRefusal.Bindless;
+        }
+
         if (program.UsesDeviceAddresses || info.WritesDeviceAddresses || snapshot.DeviceAddressRanges.Length != 0)
         {
             return ReplayRefusal.DeviceAddresses;

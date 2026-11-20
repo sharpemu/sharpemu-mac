@@ -162,6 +162,35 @@ public sealed class BindlessHeapSceneTests(ITestOutputHelper output) : SceneTest
         }
     }
 
+    // Two identical dispatches in one submission are what dispatch replay serves. A program that reads the heap is
+    // never replayed: the engine does not seal it (RenderRecorder.IsReplayable) and the host would refuse its capture
+    // (MetalRenderHost.Replay.cs), because each dispatch prepares its own heap views. Both read what one alone reads.
+    [Fact]
+    public void ADispatchThatReadsTheHeapIsNeverReplayed()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        if (!rig.Host.DispatchReplayEnabled) return;
+        const int textures = 8;
+        var heap = Build(rig, textures, records: 16, tableRecords: 16);
+        var keys = Enumerable.Range(0, Lanes).Select(lane => lane * 5 % 16).ToArray();
+        _ = Pass(rig, heap, keys);
+
+        rig.Memory.Write<uint>(heap.Output, new uint[Lanes * 4]);
+        rig.Memory.Write<uint>(heap.Output + KeyOffset, keys.Select(key => (uint)key << 4).ToArray());
+        uint[] userData = [Descriptors.Lo(heap.Block), Descriptors.Hi(heap.Block)];
+        var pm4 = rig.Dispatch(new ScenePm4(), Program, userData, 1, threadsX: Lanes);
+        rig.Submit(rig.Dispatch(pm4, Program, userData, 1, threadsX: Lanes));
+
+        Assert.False(rig.Host.ReplaySealed(true), "a dispatch that reads the heap was sealed for replay");
+        Assert.Equal(0, rig.Host.ReplayCounts.Dispatches);
+        var words = rig.Read<float>(heap.Output, Lanes * 4);
+        for (var lane = 0; lane < Lanes; lane++)
+        {
+            AssertTexel(words.AsSpan(lane * 4, 4).ToArray(), Expected(keys[lane] % textures), $"lane {lane} key {keys[lane]}");
+        }
+    }
+
     [Fact]
     public void ResolvedElementsStayAcrossDispatchesAndARewrittenRecordTakesItsNewTexture()
     {
