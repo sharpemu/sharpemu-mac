@@ -111,7 +111,8 @@ internal static unsafe class GpuProcessLauncher
     private const string HeapCountVariable = "DOTNET_GCHeapCount";
     private const string HostHeapCount = "4";
 
-    private static List<string> EnvironmentBlock()
+    // Internal for tests: process B reads its switches (SHARPEMU_DRAW_REPLAY and the rest) from this block.
+    internal static List<string> EnvironmentBlock()
     {
         var block = new List<string>();
         var gen0Set = false;

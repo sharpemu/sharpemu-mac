@@ -2687,7 +2687,7 @@ internal sealed partial class MetalRenderHost :
 
         if (_memory.CanRead(address, size))
         {
-            return size;
+            return NoteReplayClamp(address, size, size);
         }
 
         var clamped = 1UL;
@@ -2705,7 +2705,7 @@ internal sealed partial class MetalRenderHost :
             }
         }
 
-        return clamped;
+        return NoteReplayClamp(address, size, clamped);
     }
 
     public BufferBinding NullBuffer => new((ulong)_guestMemory.NullBuffer, 0);
@@ -2747,7 +2747,7 @@ internal sealed partial class MetalRenderHost :
                 VerifyReadBinding(address, size, computeStage: false, MetalWritebackCause.BufferBinding, memo);
             }
 
-            return new BufferBinding((ulong)memo.Buffer, memo.Offset);
+            return NoteReplayObtain(address, size, isWritten, new BufferBinding((ulong)memo.Buffer, memo.Offset));
         }
 
         var memoStamp = !isWritten && ReadBindingMemoEnabled ? ReadBindingStamp() : default;
@@ -2765,7 +2765,7 @@ internal sealed partial class MetalRenderHost :
 
         if (!range.IsValid)
         {
-            return NullBuffer;
+            return NoteReplayObtain(address, size, isWritten, NullBuffer);
         }
 
         if (!isWritten && ReadBindingMemoEnabled)
@@ -2783,7 +2783,7 @@ internal sealed partial class MetalRenderHost :
             NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.WrittenBinding);
         }
 
-        return new BufferBinding((ulong)range.Buffer, range.Offset);
+        return NoteReplayObtain(address, size, isWritten, new BufferBinding((ulong)range.Buffer, range.Offset));
     }
 
     public BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment)
@@ -3150,7 +3150,7 @@ internal sealed partial class MetalRenderHost :
             $"transfers=[{TakeTransferCauses()}] {TakePreludeText()}" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
             $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()} " +
-            SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport());
+            SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport() + " " + TakeReplayHostReport());
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");
