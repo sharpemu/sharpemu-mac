@@ -3281,7 +3281,7 @@ internal sealed partial class MetalRenderHost :
             RetireUploadPreludes(CompletedSerial, all: true);
             ReleaseInFlightSubmissions();
             ReportStepCaps();
-            ReportCallFaults();
+            ReportCallFaults(shutdown: true);
             DisposeStepReport();
             DisposeShaderCalls();
         }

@@ -21,7 +21,8 @@ namespace SharpEmu.Gpu.Metal.V2;
 //    completed it is read, its bits stamped with the snapshot number (CallMarkedAt) and cleared, and the two swap. The
 //    program cache compares the stamps with the snapshot in which it named a callee (ShaderCalleeTiers).
 //  - Call faults: a call of a program linked per record that no record names claims an 8-word report
-//    (Gen5MslArgumentLayout.CallFaultWords), read once per flush and logged as [UNLINKED_CALL] with a counter.
+//    (Gen5MslArgumentLayout.CallFaultWords), read once per flush and logged as [UNLINKED_CALL] with a counter; under
+//    SHARPEMU_STRICT_COMPUTE (on unless 0) it is fatal, as on Vulkan (BdaFaultProcessor).
 internal sealed partial class MetalRenderHost
 {
     internal static readonly bool ShaderCallsEnabled =
@@ -223,9 +224,11 @@ internal sealed partial class MetalRenderHost
     private nint _callFaultContents;
     private ulong _callFaultAddress;
 
-    private unsafe Span<uint> CallFaultWords => new((void*)_callFaultContents, Gen5MslArgumentLayout.CallFaultWords);
+    internal unsafe Span<uint> CallFaultWords => new((void*)_callFaultContents, Gen5MslArgumentLayout.CallFaultWords);
+    // An unlinked call stops the emulator, as any compute failure does, unless SHARPEMU_STRICT_COMPUTE=0 (tests change it).
+    internal bool StrictCompute = Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0";
 
-    private ulong CallFaultsAddress()
+    internal ulong CallFaultsAddress()
     {
         if (_callFaultBuffer == 0)
         {
@@ -239,7 +242,7 @@ internal sealed partial class MetalRenderHost
     }
 
     // Once per flush: a claimed report names the caller, the call and its target; the waves that made the call ended at it.
-    private void ReportCallFaults()
+    internal void ReportCallFaults(bool shutdown = false)
     {
         PollCallMarks();
         if (_callFaultBuffer == 0)
@@ -259,12 +262,18 @@ internal sealed partial class MetalRenderHost
         var stage = words[6];
         words[1..].Clear();
         Volatile.Write(ref words[0], 0u);
+        var message = $"The shader called an unlinked function: hash=0x{hash:X16} pc=0x{pc:X} target=0x{target:X16} stage={stage}.";
+        // At shutdown the host is draining and the fault is only reported; the emulator is stopping anyway.
+        if (StrictCompute && !shutdown)
+        {
+            throw Fatal(message);
+        }
+
         var unlinked = ++UnlinkedCalls;
         if (unlinked <= 16 || (unlinked & (unlinked - 1)) == 0)
         {
-            Console.Error.WriteLine($"[METAL-V2][WARN][UNLINKED_CALL] The shader called an unlinked function: hash=0x{hash:X16} " +
-                $"pc=0x{pc:X} target=0x{target:X16} stage={stage} count={unlinked}. The waves that made the call were ended; " +
-                "images can be incorrect.");
+            Console.Error.WriteLine($"[METAL-V2][WARN][UNLINKED_CALL] {message} count={unlinked}. The waves that made the call were " +
+                "ended; images can be incorrect. SHARPEMU_STRICT_COMPUTE=0 is set.");
         }
     }
 
