@@ -645,6 +645,7 @@ public static partial class Gen5MslTranslator
 
                 {
                     DeclareLayoutBindings();
+                    PlanShaderCalls();
                 }
 
                 foreach (var instruction in _request.Program.Instructions)
@@ -926,6 +927,7 @@ public static partial class Gen5MslTranslator
 
             // A request binds one argument buffer per stage; its lengths replace the uniforms.
             EmitResourceStruct(source);
+            EmitShaderCallPrelude(source);
 
             AppendTrailingPreludes(source, preludes, _options.BranchlessDwordLoads, _options.CheapFloatWrappers);
             if (UsesMipStatisticsConstant)
@@ -2011,12 +2013,23 @@ public static partial class Gen5MslTranslator
 
                 if (instruction.Opcode == "SEndpgm")
                 {
+                    if (instruction.Control is ShaderCallFaultControl callFault)
+                    {
+                        EmitShaderCallFault(callFault);
+                    }
+
                     terminator = BlockTerminator.Exit("active = false;");
                     return true;
                 }
 
                 if (instruction.Opcode == "SBranch")
                 {
+                    // A run-time-record call whose callee the program lacks returns at once, marked for the host.
+                    if (instruction.Control is ShaderCallFaultControl { ReturnPc: not null } returnAtOnce)
+                    {
+                        EmitCallMark(returnAtOnce);
+                    }
+
                     // A branch to (or past) the program's end is an exit — the
                     // pattern sprite alpha-kill shaders use to skip their tail.
                     if (IsExitBranchTarget(instructions, instruction))
@@ -2042,7 +2055,12 @@ public static partial class Gen5MslTranslator
 
                 if (instruction.Opcode.StartsWith("SCbranch", StringComparison.Ordinal))
                 {
-                    if (!TryGetBranchCondition(instruction.Opcode, out var condition))
+                    string condition;
+                    if (instruction.Control is ShaderCallMatchControl callMatch)
+                    {
+                        condition = CallMismatchCondition(callMatch);
+                    }
+                    else if (!TryGetBranchCondition(instruction.Opcode, out condition))
                     {
                         error = $"unsupported conditional branch {instruction.Opcode}";
                         return false;
@@ -2237,6 +2255,12 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
             BeginInstruction(instruction);
+            if (instruction.Control is ShaderCallEntryControl callEntry)
+            {
+                EmitShaderCallEntry(callEntry);
+                return true;
+            }
+
             switch (instruction.Opcode)
             {
                 // No shader trap handler is installed, so S_TRAP has no effect.
@@ -5073,6 +5097,17 @@ public static partial class Gen5MslTranslator
             if (instruction.Control is ShaderLinkedBranchControl linked)
             {
                 targetPc = linked.TargetPc;
+                return true;
+            }
+            // A site's test of one target branches past the target's copy; a run-time-record fault returns from the call.
+            if (instruction.Control is ShaderCallMatchControl call)
+            {
+                targetPc = call.TargetPc;
+                return true;
+            }
+            if (instruction.Control is ShaderCallFaultControl { ReturnPc: { } returnPc })
+            {
+                targetPc = returnPc;
                 return true;
             }
             if (instruction.Encoding != Gen5ShaderEncoding.Sopp ||

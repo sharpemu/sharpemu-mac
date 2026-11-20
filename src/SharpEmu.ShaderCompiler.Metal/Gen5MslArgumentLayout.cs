@@ -37,6 +37,10 @@ public enum MslArgumentFieldKind
     // The bindless heap's feedback words (BindlessHeap.FeedbackWords): the mark bitsets the shader sets for every
     // element it reads, then the numeric class of every image element, which the host writes.
     BindlessHeapFeedback,
+    // The call fault report of a program linked with its shader calls (Gen5MslArgumentLayout.CallFaultWords): a call
+    // that finds no record of its target claims it and ends the wave, and the host reports it. Metal-only: the fault
+    // buffer binding carries the device-address reach feedback, so the report has a pointer of its own.
+    CallFaults,
 }
 
 // One field of the stage argument buffer: its binding kind, id range and byte range.
@@ -64,6 +68,14 @@ public sealed class Gen5MslArgumentLayout
     /// <summary>The bytes of one bindless heap element: a texture's or sampler's gpuResourceID.</summary>
     public const int HeapElementBytes = 8;
     public const string MipStatisticsName = "mip_stats";
+    public const string CallRecordsName = "call_records";
+    public const string CallRecordWordsName = "call_record_words";
+    public const string CallMarksName = "call_marks";
+    public const string CallFaultsName = "call_faults";
+    /// <summary>The words of the call fault report: a claim word (2 once a wave has reported), then the caller's hash
+    /// (low, high), the call's pc, the target (low, high), the stage and 1 — the record SPIR-V keeps at the end of its fault
+    /// buffer.</summary>
+    public const int CallFaultWords = 8;
 
     /// <summary>The bytes of one bindless table entry: gpuResourceID, variant, reserved.</summary>
     public const int BindlessEntryBytes = 16;
@@ -141,6 +153,15 @@ public sealed class Gen5MslArgumentLayout
                     // finest level, clamped and unclamped sample counts of each counter id.
                     Add(binding.Kind, MslArgumentFieldKind.Pointer, MipStatisticsName, 1, ResourceBytes);
                     break;
+                case DescriptorBindingKind.CallRecords:
+                    // The dispatch's call record rows and their fields' heap elements (BindlessHeap.CallRecordKeyWords).
+                    Add(binding.Kind, MslArgumentFieldKind.Pointer, CallRecordsName, 1, ResourceBytes);
+                    Add(binding.Kind, MslArgumentFieldKind.Word, CallRecordWordsName, 1, WordBytes);
+                    break;
+                case DescriptorBindingKind.CallMarks:
+                    // The call marks bitset (CallMarks.Bytes) a call to a callee the program lacks sets.
+                    Add(binding.Kind, MslArgumentFieldKind.Pointer, CallMarksName, 1, ResourceBytes);
+                    break;
                 default:
                     Add(binding.Kind, MslArgumentFieldKind.Textures, ImageClassName(binding.Kind), count, ResourceBytes);
                     break;
@@ -159,6 +180,13 @@ public sealed class Gen5MslArgumentLayout
         {
             Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.BindlessHeapElements, HeapElementsName, 1, ResourceBytes);
             Add(DescriptorBindingKind.Buffers, MslArgumentFieldKind.BindlessHeapFeedback, HeapFeedbackName, 1, ResourceBytes);
+        }
+
+        // A program linked with its shader calls reports a call that found no record (Gen5MslTranslator.ShaderCalls.cs).
+        // Only a layout that pushes call targets declares it, so no other program's fields move.
+        if (layout.CallTargetCount != 0 && layout.Find(DescriptorBindingKind.FaultBuffer) is not null)
+        {
+            Add(DescriptorBindingKind.FaultBuffer, MslArgumentFieldKind.CallFaults, CallFaultsName, 1, ResourceBytes);
         }
 
         // Always last, so adding them never moves a descriptor field.

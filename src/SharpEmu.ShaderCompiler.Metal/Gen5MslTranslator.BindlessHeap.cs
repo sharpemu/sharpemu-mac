@@ -123,9 +123,13 @@ public static partial class Gen5MslTranslator
         }
 
         // The element of one array at index, marked; its handle's validity goes to _heapImageValid.
-        private string HeapTexture(int slot, string textureType, string index)
+        private string HeapTexture(int slot, string textureType, string index, bool mark = true)
         {
-            MarkHeapElement(slot, index);
+            if (mark)
+            {
+                MarkHeapElement(slot, index);
+            }
+
             var element = Temp("uint", $"{HeapLiteral((uint)slot * BindlessHeap.Capacity)} + {index}");
             var elements = $"{ResourcesName}.{Gen5MslArgumentLayout.HeapElementsName}";
             _heapImageValid = Temp("bool", $"{elements}[{element}] != 0ul");
@@ -142,6 +146,17 @@ public static partial class Gen5MslTranslator
             var elements = $"{ResourcesName}.{Gen5MslArgumentLayout.HeapElementsName}";
             return Temp("sampler",
                 $"((device const {HeapSamplerStruct}*){elements})[{HeapLiteral((uint)slot * BindlessHeap.Capacity)} + {index}].state");
+        }
+
+        // The sampler of a call record's field (Gen5MslTranslator.ShaderCalls.cs): the element the host resolved for the
+        // record the last entry found, unmarked.
+        private string CallRecordSampler(CallRecordFieldUse use)
+        {
+            var index = CallRecordElement(use.Field);
+            _usesHeapSamplers = true;
+            var elements = $"{ResourcesName}.{Gen5MslArgumentLayout.HeapElementsName}";
+            return Temp("sampler",
+                $"((device const {HeapSamplerStruct}*){elements})[{HeapLiteral((uint)use.Slot * BindlessHeap.Capacity)} + {index}].state");
         }
 
         // The float 2D-array class a 3D heap read takes for a record that holds a 2D texture.

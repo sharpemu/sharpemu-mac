@@ -2175,10 +2175,15 @@ public static partial class Gen5MslTranslator
             if (instruction.Opcode == "SGetpcB64")
             {
                 {
-                    // The shader base is pushed per draw; the program offset is added to it.
-                    var (baseLow, baseHigh) = ShaderBaseWords();
-                    var offset = unchecked(instruction.ProgramOffset + (ulong)(instruction.Words.Count * sizeof(uint)));
-                    var address = Temp("ulong", $"((ulong){baseLow} | ((ulong){baseHigh} << 32)) + {offset}ul");
+                    // The shader base is pushed per draw; the program offset is added to it. A linked function reads
+                    // its own address from the call targets (Gen5MslTranslator.ShaderCalls.cs).
+                    if (!TryGetFunctionProgramCounter(instruction, out var address))
+                    {
+                        var (baseLow, baseHigh) = ShaderBaseWords();
+                        var offset = unchecked(instruction.ProgramOffset + (ulong)(instruction.Words.Count * sizeof(uint)));
+                        address = Temp("ulong", $"((ulong){baseLow} | ((ulong){baseHigh} << 32)) + {offset}ul");
+                    }
+
                     StoreScalar(destination, $"(uint){address}");
                     StoreScalar(destination + 1, $"(uint)({address} >> 32)");
                     return true;
