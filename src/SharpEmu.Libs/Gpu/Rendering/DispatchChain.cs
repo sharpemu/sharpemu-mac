@@ -39,7 +39,7 @@ internal sealed class DispatchChain
     private bool _groupWroteImages;
     // The data each image the group's and this dispatch's shaders use covers (OverlapImageSpans), and whether one of them
     // has none the request builders resolve.
-    private readonly List<GuestSpan> _groupImageTouched = new();
+    private readonly List<GuestSpan> _groupImageRead = new();
     private readonly List<GuestSpan> _groupImageWritten = new();
     private bool _groupImagesUnresolved;
     // For the group's checks: the bytes read and written other than by atomics, and those of buffers every access of
@@ -50,7 +50,7 @@ internal sealed class DispatchChain
     private readonly List<GuestSpan> _recordRead = new();
     private readonly List<GuestSpan> _recordPlainWritten = new();
     private readonly List<GuestSpan> _recordAtomic = new();
-    private readonly List<GuestSpan> _recordImageTouched = new();
+    private readonly List<GuestSpan> _recordImageRead = new();
     private readonly List<GuestSpan> _recordImageWritten = new();
     private bool _recordImagesUnresolved;
     private GuestSpan _recordIndirect;
@@ -63,8 +63,8 @@ internal sealed class DispatchChain
     /// finishing before its consumer reads) becomes a race here. A marked dispatch that touches what one of them wrote,
     /// writes what one of them touched, or whose accesses (or theirs) are not all known is ordered after them instead,
     /// and counted (<see cref="DispatchChainTally.OverlapsOrdered"/>, by cause in the report). An image meets another
-    /// only where their data does (<see cref="OverlapImageSpans"/>), and two writes of the same buffer bytes that neither
-    /// reads are not ordered (<see cref="OverlapWritesApart"/>), nor atomics against atomics on buffers both sides access
+    /// only where their data does (<see cref="OverlapImageSpans"/>), and two writes of the same buffer or image bytes that
+    /// neither reads are not ordered (<see cref="OverlapWritesApart"/>), nor atomics against atomics on buffers both sides access
     /// solely through atomics (<see cref="OverlapAtomicsApart"/>). SHARPEMU_DISPATCH_OVERLAP_HAZARDS=0 runs every
     /// marked dispatch beside the ones before it again.
     /// </summary>
@@ -128,10 +128,13 @@ internal sealed class DispatchChain
 
         if (cause == OverlapCause.None && imagesMeet)
         {
-            // Two images meet only where their data does; one whose data is not resolved meets every other.
+            // Two images meet only where their data does; one whose data is not resolved meets every other. Images both
+            // sides only write meet as two buffer writes do (OverlapWritesApart).
             cause = !OverlapImageSpans || _recordImagesUnresolved || _groupImagesUnresolved ? OverlapCause.ImageUnresolved
-                : Overlaps(_recordImageTouched, _groupImageWritten) || Overlaps(_recordImageWritten, _groupImageTouched)
-                    ? OverlapCause.Image : OverlapCause.None;
+                : Overlaps(_recordImageRead, _groupImageWritten) || Overlaps(_recordImageWritten, _groupImageRead)
+                    ? OverlapCause.Image
+                : Overlaps(_recordImageWritten, _groupImageWritten) && !OverlapWritesApart ? OverlapCause.ImageWriteAfterWrite
+                : OverlapCause.None;
             if (cause == OverlapCause.None)
             {
                 DispatchChainTally.NoteOverlapImagesApart();
@@ -183,7 +186,7 @@ internal sealed class DispatchChain
         _groupConservative = false;
         _groupReadImages = false;
         _groupWroteImages = false;
-        _groupImageTouched.Clear();
+        _groupImageRead.Clear();
         _groupImageWritten.Clear();
         _groupImagesUnresolved = false;
     }
@@ -198,7 +201,7 @@ internal sealed class DispatchChain
         _groupConservative |= _recordConservative;
         _groupReadImages |= _recordReadsImages;
         _groupWroteImages |= _recordWritesImages;
-        _groupImageTouched.AddRange(_recordImageTouched);
+        _groupImageRead.AddRange(_recordImageRead);
         _groupImageWritten.AddRange(_recordImageWritten);
         _groupImagesUnresolved |= _recordImagesUnresolved;
     }
@@ -273,7 +276,7 @@ internal sealed class DispatchChain
         _recordConservative = false;
         _recordReadsImages = false;
         _recordWritesImages = false;
-        _recordImageTouched.Clear();
+        _recordImageRead.Clear();
         _recordImageWritten.Clear();
         _recordImagesUnresolved = false;
         _recordIndirect = default;
@@ -371,7 +374,12 @@ internal sealed class DispatchChain
             if (shapes is not null && index < shapes.Count &&
                 RenderExecutor.TryGetImageData(program, shapes[index], words, index, out var data))
             {
-                _recordImageTouched.Add(data);
+                // An image the shader only stores to is not read (ImageResource.Read: loads, samples and atomics).
+                if (!written || shapes[index].Read || shapes[index].Atomic)
+                {
+                    _recordImageRead.Add(data);
+                }
+
                 if (written)
                 {
                     _recordImageWritten.Add(data);
@@ -455,6 +463,7 @@ internal enum OverlapCause
     BufferWriteAfterWrite,
     BufferAtomics,
     Image,
+    ImageWriteAfterWrite,
     ImageUnresolved,
     Count,
 }
@@ -518,7 +527,7 @@ public static class DispatchChainTally
         FormattableString.Invariant($"overlap_ordered=[hazard:{Interlocked.Exchange(ref _overlapsOrderedHazard, 0)},unknown:{Interlocked.Exchange(ref _overlapsOrderedUnknown, 0)}] ") +
         FormattableString.Invariant($"overlap_by=[indirect:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.Indirect], 0)},raw:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.BufferReadAfterWrite], 0)},") +
         FormattableString.Invariant($"war:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.BufferWriteAfterRead], 0)},waw:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.BufferWriteAfterWrite], 0)},") +
-        FormattableString.Invariant($"image:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.Image], 0)},image_unresolved:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.ImageUnresolved], 0)},") +
+        FormattableString.Invariant($"image:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.Image], 0)},image_waw:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.ImageWriteAfterWrite], 0)},image_unresolved:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.ImageUnresolved], 0)},") +
         FormattableString.Invariant($"images_apart:{Interlocked.Exchange(ref _overlapImagesApart, 0)},writes_apart:{Interlocked.Exchange(ref _overlapWritesApart, 0)},atomics:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.BufferAtomics], 0)},atomics_apart:{Interlocked.Exchange(ref _overlapAtomicsApart, 0)}]");
 
     public static string TakeReport() =>

@@ -246,10 +246,35 @@ public sealed class DispatchChainTests : IDisposable
         }
     }
 
-    private void DispatchImage(ulong submitId, ulong address, bool store)
+    // Two marked dispatches storing to the same image, neither reading it (tile classes of one lighting pass), stay beside
+    // each other; one that also loads the image it stores to is ordered after a store to it.
+    [Theory]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, false)]
+    public void MarkedStoresToOneImageThatNeitherReadsStayBesideEachOther(bool secondLoads, bool apart, bool overlaps)
+    {
+        var saved = DispatchChain.OverlapWritesApart;
+        DispatchChain.OverlapWritesApart = apart;
+        try
+        {
+            const ulong written = 0x1_7000_0000;
+            DispatchImage(1, written, store: true);
+            DispatchImage(2, written, store: true, load: secondLoads);
+
+            Assert.Equal([true, overlaps], _host.DispatchOverlaps);
+        }
+        finally
+        {
+            DispatchChain.OverlapWritesApart = saved;
+        }
+    }
+
+    private void DispatchImage(ulong submitId, ulong address, bool store, bool load = false)
     {
         var image = new ImageResource
         {
+            Read = !store || load,
             ResourceClass = store ? SharpEmu.ShaderCompiler.Resources.ImageResourceClass.Storage : SharpEmu.ShaderCompiler.Resources.ImageResourceClass.Sampled,
             NumericClass = ImageNumericClass.Float,
             Dimension = ImageDimension.Dim2D,
