@@ -273,6 +273,14 @@ internal sealed partial class MetalRenderHost :
 
     public uint MaxPushDescriptors => 0;
 
+    // Each stage has its own argument buffer, so compute and graphics stages share one per-stage budget
+    // (MetalStableImageLimits). The prewarm answers the same (MetalShaderPrewarm.ComputeImageLimits).
+    public SharpEmu.ShaderCompiler.Resources.StableImageDescriptorLimits ComputeImageDescriptorLimits =>
+        MetalStableImageLimits.Of(_device);
+
+    public SharpEmu.ShaderCompiler.Resources.StableImageDescriptorLimits GraphicsImageDescriptorLimits =>
+        MetalStableImageLimits.Of(_device);
+
     // Metal threadgroups are always 32-wide on Apple silicon; a wave64 compute
     // program is emitted as two wave32 halves by the translator.
     public bool ComputeWave64Supported => false;

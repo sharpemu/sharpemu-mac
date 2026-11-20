@@ -27,6 +27,11 @@ public sealed record ShaderCorpusHostFlags
     public bool ComputeRunsOn32LaneSubgroups { get; init; }
     public bool DrawParameters { get; init; }
     public bool RuntimeImageSwizzles { get; init; }
+    // The stable image budgets the planning host answered (IShaderPipelineHost.ComputeImageDescriptorLimits,
+    // GraphicsImageDescriptorLimits): a replay plans as the session did, so its specialization applies. A record
+    // without them was taken with none (compact bindings).
+    public StableImageDescriptorLimits ComputeImageLimits { get; init; }
+    public StableImageDescriptorLimits GraphicsImageLimits { get; init; }
 }
 
 // One program as the translator was about to see it. Options is null when the guest code did not
