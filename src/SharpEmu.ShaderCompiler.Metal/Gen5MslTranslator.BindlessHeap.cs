@@ -68,6 +68,19 @@ public static partial class Gen5MslTranslator
         // the table whatever the view's words say.
         private string HeapRecordIndex(HeapRecordUse use)
         {
+            // The same use's index, still in scope and unchanged, is the same value (HeapMarks).
+            if (TryKeptHeapRecordIndex(use, out var keptIndex))
+            {
+                return keptIndex;
+            }
+
+            var index = NewHeapRecordIndex(use);
+            KeepHeapRecordIndex(use, index);
+            return index;
+        }
+
+        private string NewHeapRecordIndex(HeapRecordUse use)
+        {
             var key = _indirectKeyScratch.TryGetValue(use.KeyMemoryIndex, out var scratch) ? scratch : "0u";
             var viewDword = _request.Bindings.HeapViewsDword + (uint)use.View * HeapView.DwordCount;
             var offset = Temp("uint", $"{key} + {HeapLiteral(use.Immediate)}");
@@ -102,15 +115,27 @@ public static partial class Gen5MslTranslator
                 return index;
             }
 
+            if (TryKeptHeapClassIndex(index, slot, numericClass, out var keptIndex))
+            {
+                return keptIndex;
+            }
+
             var elementClass = HeapElementClass(index);
-            return Temp("uint",
+            var classIndex = Temp("uint",
                 $"{elementClass} == {HeapLiteral(BindlessHeap.ClassCode(numericClass))} ? {index} : {HeapLiteral(BindlessHeap.CallRecordNullIndex)}");
+            KeepHeapClassIndex(index, slot, numericClass, classIndex);
+            return classIndex;
         }
 
         // Sets the element's bit in its array's mark words, for the lanes the guest runs; a plain read first keeps marked
-        // elements from repeating the atomic.
+        // elements from repeating the atomic. A mark an earlier one in the same block already covers is left out (HeapMarks).
         private void MarkHeapElement(int slot, string index)
         {
+            if (HeapMarkCovered(slot, index))
+            {
+                return;
+            }
+
             var word = Temp("uint", $"{HeapLiteral((uint)slot * BindlessHeap.FeedbackWordsPerArray)} + ({index} >> 5u)");
             var bit = Temp("uint", $"1u << ({index} & 31u)");
             var feedback = HeapFeedbackWord(word);

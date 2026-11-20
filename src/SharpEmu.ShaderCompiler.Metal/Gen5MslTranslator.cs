@@ -4748,6 +4748,7 @@ public static partial class Gen5MslTranslator
 
         private void Line(string text)
         {
+            NoteHeapLine(text);
             for (var index = 0; index < _indent; index++)
             {
                 _body.Append("    ");
