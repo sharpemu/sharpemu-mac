@@ -275,6 +275,8 @@ internal static partial class MetalV2Presenter
             _windowStarted = true;
             _requestedWidth = width;
             _requestedHeight = height;
+            // Before the prewarm and the game plan or translate a shader.
+            MetalTranslationCache.Start(_device);
             // Before the prewarm, whose libraries it may already hold.
             MetalBinaryArchive.Start(_device);
             MetalShaderPrewarm.Start(_device);

@@ -55,6 +55,12 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
         return true;
     }
 
+    // A translation the translation disk cache kept, for the request it is taken for; the payload names its request,
+    // so one made for another stage or program is a miss. Without the request (the two-argument form) nothing is
+    // taken: the shader could not be checked, nor drop its source and translate it again like a fresh one.
+    public IGuestCompiledShader? CreateCachedShader(byte[] payload, uint? inputLocationMask, ShaderCompileRequest request) =>
+        MetalCompiledGuestShader.FromCachePayload(payload, request);
+
     public IGuestCompiledShader GetDepthOnlyFragmentShader() => DepthOnlyFragmentShader;
 
     public void EnsureStarted(uint width, uint height) => MetalV2Presenter.EnsureStarted(width, height);

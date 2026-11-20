@@ -70,7 +70,7 @@ public sealed class Gen5MslArgumentLayout
     private const uint ResourceBytes = 8;
     private const uint WordBytes = 4;
 
-    private Gen5MslArgumentLayout(IReadOnlyList<MslArgumentField> fields, uint byteSize)
+    internal Gen5MslArgumentLayout(IReadOnlyList<MslArgumentField> fields, uint byteSize)
     {
         Fields = fields;
         ByteSize = byteSize;

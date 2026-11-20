@@ -88,6 +88,7 @@ internal static class TranslationDiskCache
     private static volatile string? _stamp;
     private static long _countedBytes = -1;
     private static int _reportedFailure;
+    private static long _rejectedEntries;
 
     // The running game's folder, beside its pipeline cache, and the device's translation stamp (the prewarm stamp); null stops.
     // Entries go to this build's folder inside it.
@@ -99,6 +100,10 @@ internal static class TranslationDiskCache
     }
 
     internal static string? Folder => _folder;
+
+    // Entries that were on disk under their key and were not taken (damaged, another format, or refused by the backend);
+    // each is translated again and its entry replaced.
+    internal static long RejectedEntries => Interlocked.Read(ref _rejectedEntries);
 
     // This build's folder, marked as used now. Other builds' folders but the newest KeptBuilds - 1 are deleted, and so are the
     // flat entries of the first layout.
@@ -248,7 +253,7 @@ internal static class TranslationDiskCache
             return compiler.TryCompileProgram(request, out compiled, out error);
         }
 
-        var cached = TryLoad(key, compiler);
+        var cached = TryLoad(key, compiler, request);
         if (cached is not null)
         {
             compiled = cached;
@@ -265,8 +270,8 @@ internal static class TranslationDiskCache
         return true;
     }
 
-    // The stored program for key as the backend's shader; null on a miss or a damaged entry.
-    internal static IGuestCompiledShader? TryLoad(string key, IGuestGpuBackend backend)
+    // The stored program for key as the backend's shader (for request, when given); null on a miss or a damaged entry.
+    internal static IGuestCompiledShader? TryLoad(string key, IGuestGpuBackend backend, ShaderCompileRequest? request = null)
     {
         if (_folder is not { } folder)
         {
@@ -285,13 +290,13 @@ internal static class TranslationDiskCache
             if (file.Length is <= 32 or > MaxEntryBytes ||
                 !CryptographicOperations.FixedTimeEquals(file.AsSpan(0, 32), SHA256.HashData(file.AsSpan(32))))
             {
-                return null;
+                return Rejected(key, "size or checksum");
             }
 
             using var reader = new BinaryReader(Inflate(file, 32));
             if (reader.ReadInt32() != Version || reader.ReadString() != key)
             {
-                return null;
+                return Rejected(key, "version or key");
             }
 
             uint? mask = reader.ReadBoolean() ? reader.ReadUInt32() : null;
@@ -299,21 +304,35 @@ internal static class TranslationDiskCache
             var payload = reader.ReadBytes(payloadLength);
             if (payload.Length != payloadLength)
             {
-                return null;
+                return Rejected(key, "short payload");
             }
 
-            var shader = backend.CreateCachedShader(payload, mask);
-            if (shader is not null)
+            var shader = request is null
+                ? backend.CreateCachedShader(payload, mask)
+                : backend.CreateCachedShader(payload, mask, request);
+            if (shader is null)
             {
-                MarkUsed(path);
+                return Rejected(key, $"the {backend.BackendName} backend refused the payload");
             }
 
+            MarkUsed(path);
             return shader;
         }
-        catch (Exception)
+        catch (Exception error)
         {
-            return null;
+            return Rejected(key, $"{error.GetType().Name}: {error.Message}");
         }
+    }
+
+    // A rejected entry is a miss: counted, and the first one of the process logged with its reason.
+    private static IGuestCompiledShader? Rejected(string key, string reason)
+    {
+        if (Interlocked.Increment(ref _rejectedEntries) == 1)
+        {
+            Console.Error.WriteLine($"[PERF][TRANSLATION_CACHE] entry {key[..Math.Min(16, key.Length)]} not taken ({reason}); translating again.");
+        }
+
+        return null;
     }
 
     internal static void Store(string key, IGuestCompiledShader shader)
@@ -332,8 +351,9 @@ internal static class TranslationDiskCache
                 writer.Write(key);
                 writer.Write(shader.InputLocationMask.HasValue);
                 if (shader.InputLocationMask is { } mask) writer.Write(mask);
-                writer.Write(shader.Payload.Length);
-                writer.Write(shader.Payload);
+                var payload = shader.CachePayload;
+                writer.Write(payload.Length);
+                writer.Write(payload);
             }
 
             using var compressed = new MemoryStream();
