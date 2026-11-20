@@ -36,9 +36,11 @@ public static partial class Gen5MslTranslator
         Gen5MslCodegenOptions? options = null)
     {
         shader = default!;
-        if (request.UsesBindlessHeap)
+        // Call records are the elements a linked callee's records hold (CallRecordSelector), which only linked shader
+        // calls produce; those are refused below. Guest heap records read the heap (Gen5MslTranslator.BindlessHeap.cs).
+        if (request.CallRecordImageByMemoryIndex.Count != 0 || request.CallRecordSamplerByMemoryIndex.Count != 0)
         {
-            error = "Metal does not support bindless heap descriptors.";
+            error = "Metal does not support call record descriptors.";
             return false;
         }
 
@@ -437,6 +439,11 @@ public static partial class Gen5MslTranslator
                 EmitBindlessEntryStructs(source);
             }
 
+            if (_argumentLayout!.Fields.Any(static field => field.FieldKind == MslArgumentFieldKind.BindlessHeapElements))
+            {
+                EmitHeapElementStructs(source);
+            }
+
             source.AppendLine($"struct {Gen5MslArgumentLayout.StructName}");
             source.AppendLine("{");
             foreach (var field in layout.Fields)
@@ -467,6 +474,8 @@ public static partial class Gen5MslTranslator
                     MslArgumentFieldKind.Pointer => $"{PointerType(field.Kind)} {field.Name}",
                     MslArgumentFieldKind.StepReport or MslArgumentFieldKind.PairLocks => $"device atomic_uint* {field.Name}",
                     MslArgumentFieldKind.BindlessImageTables => $"array<device const {BindlessEntryStruct}*, {field.Count}> {field.Name}",
+                    MslArgumentFieldKind.BindlessHeapElements => $"device const ulong* {field.Name}",
+                    MslArgumentFieldKind.BindlessHeapFeedback => $"device atomic_uint* {field.Name}",
                     _ => $"uint {field.Name}",
                 };
                 source.AppendLine($"    {declaration} [[id({field.FirstId})]];");
@@ -2335,7 +2344,9 @@ public static partial class Gen5MslTranslator
             out SamplerResource? samplerInfo,
             out string error,
             out int resourceIndex,
-            (uint Resource, uint Element)? fixedElement = null)
+            (uint Resource, uint Element)? fixedElement = null,
+            bool heapVolumeLayers = false,
+            ImageNumericClass heapNumericClass = ImageNumericClass.Float)
         {
             error = string.Empty;
             resourceIndex = -1;
@@ -2397,6 +2408,30 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            // A bindless heap image reads the element its key picks from the heap (Gen5MslTranslator.BindlessHeap.cs),
+            // not its null element in the class array: a 3D read of a 2D record reads the record's 2D-array element, and
+            // an integer element is read through the integer form of its class.
+            var heapSlot = bindingKind is { } heapKind ? BindlessHeap.ImageSlot(heapKind) : -1;
+            HeapRecordUse heapImage = default;
+            var fromHeap = fixedElement is null && heapSlot >= 0 && _heapRecordIndex is not null &&
+                request.HeapImageByMemoryIndex.TryGetValue(memoryIndex, out heapImage);
+            if (heapVolumeLayers)
+            {
+                if (!fromHeap || heapSlot != BindlessHeap.VolumeSlot)
+                {
+                    error = "only a 3D heap image read has a layered alternative";
+                    return false;
+                }
+
+                heapSlot = BindlessHeap.VolumeLayerSlot;
+                imageClass = HeapVolumeLayerClass();
+            }
+
+            if (fromHeap && heapNumericClass != ImageNumericClass.Float)
+            {
+                imageClass = HeapIntegerClass(imageClass, heapNumericClass);
+            }
+
             // A sampled mip load keeps its mip operand; a storage case is already its own mip view.
             // The mip is the address component right after the coordinates, so it moves with
             // the dimension (2 for 2D, 3 for a 2D array or a volume, 1 for 1D).
@@ -2405,7 +2440,11 @@ public static partial class Gen5MslTranslator
                 mipLevel = Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents));
             }
 
-            if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex)
+            if (fromHeap)
+            {
+                texture = HeapTexture(heapSlot, imageClass.TextureType, HeapImageIndex(_heapRecordIndex!, heapSlot, heapNumericClass));
+            }
+            else if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex)
             {
                 if (fixedElement is null || _bindlessAccess is not { } bindless)
                 {
@@ -2423,7 +2462,15 @@ public static partial class Gen5MslTranslator
             }
 
             resolved = imageClass;
-            if (UsesSampler(instruction.Opcode))
+            if (UsesSampler(instruction.Opcode) && fixedElement is null &&
+                request.HeapSamplerByMemoryIndex.TryGetValue(memoryIndex, out var heapSampler))
+            {
+                // A heap sampler is the element its key picks from the sampler array of its kind.
+                samplerName = HeapSampler(imageInfo.DepthCompare ? BindlessHeap.CompareSamplerSlot : BindlessHeap.SamplerSlot, heapSampler);
+                var heapSamplerIndex = request.Resources.SamplerByMemoryIndex.TryGetValue(memoryIndex, out var mapped) ? mapped : entry.Sampler;
+                samplerInfo = heapSamplerIndex < (uint)info.Samplers.Count ? info.Samplers[(int)heapSamplerIndex] : null;
+            }
+            else if (UsesSampler(instruction.Opcode))
             {
                 if (!_hasSamplers)
                 {
