@@ -68,6 +68,13 @@ public sealed class MslLinkedCallTests(ITestOutputHelper output)
             [Gen5Operand.Vector(0), Gen5Operand.Scalar(resourceRegister), Gen5Operand.Scalar(samplerRegister)], [Gen5Operand.Vector(4)], control);
     }
 
+    private static Gen5ShaderInstruction ImageLoad(uint pc, uint resourceRegister)
+    {
+        var control = new Gen5ImageControl(0xF, 0, [0u, 1u], 4, resourceRegister, 0, 1, false, Glc: false, Slc: false, A16: false, D16: false);
+        return new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Mimg, "ImageLoad", [0u, 0u],
+            [Gen5Operand.Vector(0), Gen5Operand.Scalar(resourceRegister)], [Gen5Operand.Vector(4)], control);
+    }
+
     private static Gen5ShaderInstruction BufferAccess(uint pc, string opcode, uint resourceRegister, uint dwords = 1, uint vectorData = 4,
         bool offsetEnabled = false, uint vectorAddress = 0)
     {
@@ -439,6 +446,59 @@ public sealed class MslLinkedCallTests(ITestOutputHelper output)
         for (var component = 0; component < 4; component++)
         {
             Assert.Equal(found ? texel[component] : 0u, run.Word(component * 4));
+        }
+
+        Assert.All(run.Faults, word => Assert.Equal(0u, word));
+    }
+
+    // A callee loads an integer image its record holds: the load branches on the class the host wrote for the record's
+    // element and reads it through the uint or sint declaration, bit for bit. The float branch would read the element
+    // null, as the class check refuses an element of another class.
+    [Theory]
+    [InlineData(ImageNumericClass.Uint)]
+    [InlineData(ImageNumericClass.Sint)]
+    public void ACalleeLoadsTheIntegerImageOfItsRecordThroughItsClass(ImageNumericClass numericClass)
+    {
+        var caller = Program(MoveScalar(0, 14, 0x2000), MoveScalar(4, 15, 0),
+            Vop2(8, "VAddU32", 8, Operand(0x40), Gen5Operand.Vector(0)),
+            new Gen5ShaderInstruction(16, Gen5ShaderEncoding.Vop1, "VReadfirstlaneB32", [0u], [Gen5Operand.Vector(8)], [Gen5Operand.Scalar(16)], null),
+            MoveScalar(20, 17, 0),
+            Sop1(24, "SSwappcB64", 14, Gen5Operand.Scalar(14)),
+            BufferAccess(28, "BufferStoreDwordx4", ResultRegister, dwords: 4, vectorData: 4), EndProgram(36));
+        var callee = Program(ScalarLoad(0, 16, 20, 8),
+            Vop1(8, "VMovB32", 0, Operand(0)), Vop1(16, "VMovB32", 1, Operand(0)),
+            ImageLoad(24, 20),
+            Sop1(32, "SSetpcB64", 0, Gen5Operand.Scalar(14)));
+        var linked = Gen5ShaderCallLinker.Link(caller, [new(24, 14, 16, 14, 28, [new ShaderCallTarget(0x2000, 0, callee)])],
+            runtimeArguments: true);
+        var request = Request(linked, bindlessHeap: true, callRecords: true);
+        var use = Assert.Single(request.CallRecordImageByMemoryIndex).Value;
+        Assert.True(BindlessHeap.HoldsIntegers(use.Slot), $"slot={use.Slot}");
+        var source = Compile(request).Source;
+        Assert.Contains("texture2d<uint", source, StringComparison.Ordinal);
+        Assert.Contains("texture2d<int", source, StringComparison.Ordinal);
+        if (SkipWithoutMetalDevice()) return;
+
+        const uint element = BindlessHeap.CallRecordFirstIndex;
+        uint[] texel = numericClass == ImageNumericClass.Uint ? [0x7, 0x80000001, 0x12345678, 0xFFFFFFFF] : [0xFFFFFFF9, 0x80000000, 0x42, 0x7FFFFFFF];
+        var format = numericClass == ImageNumericClass.Uint ? MetalNative.PixelFormatRgba32Uint : MetalNative.Rgba32SintPixelFormat;
+        var texture = MetalNative.CreateTexelTexture(format,
+            BindlessHeap.ImageClasses[use.Slot].Dimension == ImageDimension.Dim2D ? MetalNative.TextureType2D : MetalNative.TextureType2DArray, 1, texel);
+        var elements = new byte[BindlessHeap.ArrayCount * BindlessHeap.Capacity * Gen5MslArgumentLayout.HeapElementBytes];
+        BinaryPrimitives.WriteUInt64LittleEndian(elements.AsSpan((int)(((uint)use.Slot * BindlessHeap.Capacity + element) * 8)),
+            MetalNative.ResourceId(texture));
+        var feedbackWords = new uint[BindlessHeap.FeedbackWords];
+        feedbackWords[BindlessHeap.MarkWords + (element >> (int)BindlessHeap.ClassWordShift)] |=
+            BindlessHeap.ClassCode(numericClass) << (int)((element & (BindlessHeap.ClassesPerWord - 1)) * BindlessHeap.ClassBits);
+        var recordWords = new uint[] { 1, 0x40, 0, 0, 5, 0, 0, 0 };
+        recordWords[5 + use.Field] = element;
+        var records = MetalNative.CreateWordTable(DescriptorBindingKind.CallRecords, recordWords);
+        var run = new Run(linked, bindlessHeap: true, callRecords: true);
+        run.Dispatch(tables: [records],
+            heap: (MetalNative.CreateHeapElements(elements, [texture]), MetalNative.CreateHeapFeedback(feedbackWords)));
+        for (var component = 0; component < 4; component++)
+        {
+            Assert.Equal(texel[component], run.Word(component * 4));
         }
 
         Assert.All(run.Faults, word => Assert.Equal(0u, word));

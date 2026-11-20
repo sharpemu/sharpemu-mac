@@ -2450,7 +2450,7 @@ public static partial class Gen5MslTranslator
                 imageClass = HeapVolumeLayerClass();
             }
 
-            if (fromHeap && heapNumericClass != ImageNumericClass.Float)
+            if ((fromHeap || fromCallRecord) && heapNumericClass != ImageNumericClass.Float)
             {
                 imageClass = HeapIntegerClass(imageClass, heapNumericClass);
             }
@@ -2469,7 +2469,7 @@ public static partial class Gen5MslTranslator
             }
             else if (fromCallRecord)
             {
-                texture = HeapTexture(heapSlot, imageClass.TextureType, _callRecordElement!, mark: false);
+                texture = HeapTexture(heapSlot, imageClass.TextureType, HeapImageIndex(_callRecordElement!, heapSlot, heapNumericClass), mark: false);
             }
             else if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex)
             {

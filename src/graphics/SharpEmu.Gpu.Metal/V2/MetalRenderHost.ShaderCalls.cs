@@ -49,11 +49,15 @@ internal sealed partial class MetalRenderHost
 
     private readonly Dictionary<CallRecordKey, HeapEntry> _callRecordEntries = new();
     private readonly uint[] _callRecordNext = new uint[BindlessHeap.ArrayCount];
+    // The image arrays number their record elements in one sequence, so the class word of an element index
+    // (WriteHeapElementClass) holds the numeric class of the one record image there.
+    private uint _callRecordNextImage;
+    private readonly Dictionary<uint, HeapEntry> _callRecordImages = new();
     private readonly HeapRegionEntries _callRecordTextures = new();
     private MetalCallRecordPreparation? _callRecordPreparation;
     private int _callRecordReports;
 
-    internal long CallRecordElementsExhausted, CallRecordIntegerImages, UnlinkedCalls;
+    internal long CallRecordElementsExhausted, UnlinkedCalls;
 
     internal MetalCallRecordPreparation CallRecordPreparation => _callRecordPreparation ??= new MetalCallRecordPreparation(
         ReadCallRecordBytes, (address, size) => _memory.CanRead(address, size), CallRecordElement);
@@ -105,8 +109,8 @@ internal sealed partial class MetalRenderHost
     }
 
     // The heap element that holds the descriptor of one record field: one per distinct descriptor and array, resolved when
-    // it is first seen. A record's image is read through the float declaration of its class, so an integer texture is
-    // refused to the null element (warn + counter), never read through the wrong declaration.
+    // it is first seen. An integer image is resolved to its integer view and its element's class word names its class, so
+    // a load reads it through that class's declaration (Gen5MslTranslator.TryEmitCallRecordImage).
     private uint CallRecordElement(CallRecordField field, ReadOnlySpan<uint> words)
     {
         static ulong Pair(uint low, uint high) => low | ((ulong)high << 32);
@@ -117,7 +121,8 @@ internal sealed partial class MetalRenderHost
             return entry.Index;
         }
 
-        var next = _callRecordNext[field.Slot];
+        var image = field.Slot < BindlessHeap.ImageKinds.Length;
+        var next = image ? _callRecordNextImage : _callRecordNext[field.Slot];
         if (BindlessHeap.CallRecordFirstIndex + next >= BindlessHeap.CallRecordNullIndex)
         {
             CallRecordElementsExhausted++;
@@ -130,7 +135,10 @@ internal sealed partial class MetalRenderHost
             return BindlessHeap.CallRecordNullIndex;
         }
 
-        _callRecordNext[field.Slot] = next + 1;
+        if (image)
+            _callRecordNextImage = next + 1;
+        else
+            _callRecordNext[field.Slot] = next + 1;
         entry = new HeapEntry
         {
             Slot = field.Slot,
@@ -139,20 +147,8 @@ internal sealed partial class MetalRenderHost
         };
         _callRecordEntries.Add(key, entry);
         _callRecordTextures.Order.Add(entry);
-        if (entry.Slot < BindlessHeap.ImageKinds.Length &&
-            HeapRecordClass(entry, entry.Words) is not (ImageNumericClass.Float or ImageNumericClass.Unsupported))
-        {
-            CallRecordIntegerImages++;
-            if (_callRecordReports++ < 8)
-            {
-                Console.Error.WriteLine($"[METAL-V2][WARN] A call record holds an integer image, which the shader reads through its " +
-                    $"float declaration: slot={field.Slot} element={entry.Index}; it reads as null.");
-            }
-
-            WriteHeapImage(entry.Slot, entry.Index, 0);
-            return entry.Index;
-        }
-
+        if (image)
+            _callRecordImages.Add(entry.Index, entry);
         ResolveHeapEntry(entry);
         return entry.Index;
     }
@@ -275,6 +271,7 @@ internal sealed partial class MetalRenderHost
     private void DisposeShaderCalls()
     {
         _callRecordEntries.Clear();
+        _callRecordImages.Clear();
         _callRecordTextures.Order.Clear();
         foreach (ref var buffer in _callMarkBuffers.AsSpan())
         {

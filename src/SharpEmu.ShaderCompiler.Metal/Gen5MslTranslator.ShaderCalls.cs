@@ -232,14 +232,37 @@ public static partial class Gen5MslTranslator
                 _request.CallRecordImageByMemoryIndex.TryGetValue(memoryIndex, out use) && use.Slot >= 0;
         }
 
-        // A call record image read: the element of the record's field, read through the float declaration of its class
-        // with no mark (the host resolved it with the record); a null element reads zero.
+        // A call record image read: the element of the record's field, with no mark (the host resolved it with the
+        // record); a null element reads zero. A load or size query of a class with integer forms branches on the element's
+        // numeric class, which the host wrote with the element, and reads it through that class's declaration, as a heap
+        // record load does; any other read takes the float declaration, whose class check reads an integer element null.
         private bool TryEmitCallRecordImage(Gen5ShaderInstruction instruction, Gen5ImageControl image, CallRecordFieldUse use, out string error)
         {
             _callRecordElement = CallRecordElement(use.Field);
             try
             {
-                return TryEmitHeapRead(instruction, image, ImageNumericClass.Float, layers: false, out error);
+                if (!IsHeapLoad(instruction, use.Slot))
+                {
+                    return TryEmitHeapRead(instruction, image, ImageNumericClass.Float, layers: false, out error);
+                }
+
+                var elementClass = HeapElementClass(_callRecordElement);
+                foreach (var numericClass in new[] { ImageNumericClass.Float, ImageNumericClass.Uint, ImageNumericClass.Sint })
+                {
+                    Line($"if ({elementClass} == {HeapLiteral(BindlessHeap.ClassCode(numericClass))})");
+                    Line("{");
+                    _indent++;
+                    var emitted = TryEmitHeapRead(instruction, image, numericClass, layers: false, out error);
+                    _indent--;
+                    Line("}");
+                    if (!emitted)
+                    {
+                        return false;
+                    }
+                }
+
+                error = string.Empty;
+                return true;
             }
             finally
             {
