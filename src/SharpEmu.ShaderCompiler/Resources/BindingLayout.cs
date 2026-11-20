@@ -414,6 +414,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     // The store channel map (RuntimeImageSwizzle.StoreChannelMap) of every written image that takes its destination select
     // from shader data (ShaderResourceInfo.UsesRuntimeImageSwizzles), in image order, two to a dword (16 bits each).
     public uint StorageImageSwizzleCount { get; init; }
+
+    // The component width code of every other written integer storage image (ImageStoreWidth), 16 to a dword.
+    public uint StorageImageWidthCount { get; init; }
     // The program reads bindless heap records through descriptor set 1 (see BindlessHeap).
     public bool UsesBindlessHeap { get; init; }
 
@@ -458,7 +461,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint HeapViewsDword => StorageImageSwizzlesDword + (StorageImageSwizzleCount + 1) / 2;
 
-    public uint ShaderDataDwordCount => HeapViewsDword + HeapViewCount * HeapView.DwordCount;
+    public uint StorageImageWidthsDword => HeapViewsDword + HeapViewCount * HeapView.DwordCount;
+
+    public uint ShaderDataDwordCount => StorageImageWidthsDword + ImageStoreWidth.DwordCount(StorageImageWidthCount);
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
@@ -739,11 +744,13 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         usesBufferLengths &= memoryOffsetCount != 0 && !usesTableBlock;
         var bufferStrideCount = info.UsesIndexedBuffers ? (uint)info.Buffers.Count : 0u;
         var storageImageSwizzleCount = info.UsesRuntimeImageSwizzles ? RuntimeImageSwizzle.SlotCount(info.Images) : 0u;
+        var storageImageWidthCount = ImageStoreWidth.SlotCount(info.Images, info.UsesRuntimeImageSwizzles);
         var shaderDataDwords = memoryOffsetDword + (usesTableBlock ? 2u : (memoryOffsetCount + 3) / 4) + bufferWordCount +
             (usesBufferLengths ? memoryOffsetCount : 0) +
             (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u) +
             (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + callArgumentCount * 2 + callTargetCount * 2 +
-            (bufferStrideCount + 1) / 2 + (storageImageSwizzleCount + 1) / 2 + info.HeapViewCount * HeapView.DwordCount;
+            (bufferStrideCount + 1) / 2 + (storageImageSwizzleCount + 1) / 2 + info.HeapViewCount * HeapView.DwordCount +
+            ImageStoreWidth.DwordCount(storageImageWidthCount);
         var pushStart = usesTessellationData ? PushData.NoStart
             : pushDataAtTop ? PushData.TopFor(pushDataStartDword, shaderDataDwords)
             : PushData.StartFor(pushDataStartDword, shaderDataDwords);
@@ -858,6 +865,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             CallTargetCount = callTargetCount,
             BufferStrideCount = bufferStrideCount,
             StorageImageSwizzleCount = storageImageSwizzleCount,
+            StorageImageWidthCount = storageImageWidthCount,
             UsesBindlessHeap = info.UsesBindlessHeap,
             HeapViewCount = info.HeapViewCount,
             UserDataRegisters = userDataRegisters,
@@ -893,6 +901,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             CallTargetCount != other.CallTargetCount ||
             BufferStrideCount != other.BufferStrideCount ||
             StorageImageSwizzleCount != other.StorageImageSwizzleCount ||
+            StorageImageWidthCount != other.StorageImageWidthCount ||
             UsesBindlessHeap != other.UsesBindlessHeap ||
             HeapViewCount != other.HeapViewCount ||
             !SameValues(UserDataRegisters, other.UserDataRegisters))

@@ -14,7 +14,7 @@ public static partial class Gen5MslTranslator
 
     /// <summary>
     /// The width code of an image store's components for a T# format, which the host puts in the image's store channel map
-    /// (MetalRenderHost.WriteStoreComponentWidths): 1 for 8-bit, 2 for 16-bit, 3 for 10_10_10_2 (X, Y, Z 10, W 2)
+    /// (WriteStoreWidths): 1 for 8-bit, 2 for 16-bit, 3 for 10_10_10_2 (X, Y, Z 10, W 2)
     /// components; 0 for any other format, whose components the store passes whole.
     /// </summary>
     public static uint StoreComponentWidthCode(uint imageFormat)
@@ -206,17 +206,23 @@ public static partial class Gen5MslTranslator
                 }
                 else
                 {
+                    // An integer store with the select in the module narrows each channel to the width its image's
+                    // slot gives (Gen5MslTranslator.StoreWidths.cs), as the run-time select's store does.
+                    string? width = null;
+                    if (kind is "uint" or "int" && (width = StoreWidthCode(resourceIndex, out error)) is null)
+                    {
+                        return false;
+                    }
+
                     for (var component = 0; component < 4; component++)
                     {
                         var sourceIndex = Gen5ShaderTranslator.GetImageStoreSourceIndex(
                             dstSelect,
                             image.Dmask,
                             component);
-                        components[component] = sourceIndex >= 0
-                            ? ImageTexelComponent(
-                                kind,
-                                ImageStoreComponent(image, kind, (uint)sourceIndex))
-                            : kind == "float" ? "0.0f" : "0";
+                        components[component] = sourceIndex < 0 ? kind == "float" ? "0.0f" : "0"
+                            : width is null ? ImageTexelComponent(kind, ImageStoreComponent(image, kind, (uint)sourceIndex))
+                            : NarrowStoreComponent(kind, ImageStoreComponent(image, kind, (uint)sourceIndex), width, (uint)component);
                     }
                 }
 
@@ -813,18 +819,7 @@ public static partial class Gen5MslTranslator
             {
                 var code = Temp("uint", $"((({map}) >> {channel * 3}u) & 7u) ^ {channel}u");
                 var raw = $"({code} < 4u ? {words}[{code} & 3u] : 0u)";
-                if (width is null)
-                {
-                    components[channel] = ImageTexelComponent(kind, raw);
-                    continue;
-                }
-
-                var bits = Temp("uint",
-                    $"{width} == 1u ? 8u : {width} == 2u ? 16u : {width} == 3u ? {(channel == 3 ? 2 : 10)}u : 32u");
-                var value = Temp("uint", raw);
-                components[channel] = kind == "int"
-                    ? $"({bits} == 32u ? as_type<int>({value}) : extract_bits(as_type<int>({value}), 0u, {bits}))"
-                    : $"({bits} == 32u ? {value} : extract_bits({value}, 0u, {bits}))";
+                components[channel] = width is null ? ImageTexelComponent(kind, raw) : NarrowStoreComponent(kind, raw, width, channel);
             }
         }
 
