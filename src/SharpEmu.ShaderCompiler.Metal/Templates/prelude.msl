@@ -17,12 +17,14 @@ static inline uint sharpemu_load_tail(device uint* b, uint bytes, uint aligned)
 
 // A dword a format access may straddle, assembled from the two it spans. Only the
 // format path needs this: a descriptor's stride is a byte count, so a component can
-// start at any byte.
+// start at any byte. A component address wraps at 2^32 (a component past the top of the byte
+// space reads the binding's first bytes), so the in-range test of an aligned dword is
+// (addr | 3) < bytes, its last byte: addr + 4 would wrap to 0 for the last dword of the space.
 static inline uint sharpemu_load_word(device uint* b, uint bytes, uint addr)
 {
     if ((addr & 3u) == 0u)
     {
-        return addr + 4u <= bytes ? b[addr >> 2] : sharpemu_load_tail(b, bytes, addr);
+        return (addr | 3u) < bytes ? b[addr >> 2] : sharpemu_load_tail(b, bytes, addr);
     }
     uint shift = (addr & 3u) * 8u;
     uint aligned = addr & ~3u;

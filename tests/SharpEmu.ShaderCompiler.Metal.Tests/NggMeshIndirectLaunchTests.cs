@@ -90,6 +90,26 @@ public sealed class NggMeshIndirectLaunchTests(ITestOutputHelper output)
         }
     }
 
+    // A non-indexed draw counts its vertices from its first vertex: the draw-info block's base
+    // vertex (word 5) carries it for every program, amplified or not, as [[base_vertex]] carries
+    // vertexStart on the vertex path; an indexed draw keeps its own base vertex there.
+    [Fact]
+    public void ANonIndexedDrawCarriesItsFirstVertexAsTheBaseVertex()
+    {
+        foreach (var (name, mesh) in Meshes())
+        {
+            var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
+            Gen5MslMeshLaunch.FillDrawInfo(
+                mesh, Gen5MslMeshInputTopology.TriangleList, words, 36, 1, indexed: false, 0, firstIndex: 100, baseVertex: 0, 0);
+            Assert.True(words[5] == 100u, $"[{name}] non-indexed base vertex {words[5]}");
+            Assert.Equal(0u, words[4]);
+            Gen5MslMeshLaunch.FillDrawInfo(
+                mesh, Gen5MslMeshInputTopology.TriangleList, words, 36, 1, indexed: true, IndexType32, firstIndex: 100, baseVertex: -5, 0);
+            Assert.True(words[5] == unchecked((uint)-5), $"[{name}] indexed base vertex {words[5]}");
+            Assert.Equal(100u, words[4]);
+        }
+    }
+
     [Fact]
     public void TheLaunchKernelWritesARectangleListsPatchDraw()
     {
@@ -151,9 +171,10 @@ public sealed class NggMeshIndirectLaunchTests(ITestOutputHelper output)
         Array.Fill(guestIndices, 3u);
         drawn.CopyTo(guestIndices, (int)firstIndex);
 
-        // The CPU draw: the counts read back, the indices bound from the first index on.
+        // The CPU draw: the counts read back, the indices bound from the first index on; a non-indexed draw counts
+        // its vertices from the record's first vertex, which the CPU draw passes as its own.
         var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
-        Gen5MslMeshLaunch.FillDrawInfo(mesh, input, words, count, 1, indexed, IndexType32, 0, 0, 0);
+        Gen5MslMeshLaunch.FillDrawInfo(mesh, input, words, count, 1, indexed, IndexType32, indexed ? 0 : firstIndex, 0, 0);
         var subgroups = Gen5MslMeshLaunch.SubgroupCount(mesh, input, count);
         var cpu = Render(library, shader, mesh, Bytes(words), Bytes(drawn), subgroups, indirect: null);
 

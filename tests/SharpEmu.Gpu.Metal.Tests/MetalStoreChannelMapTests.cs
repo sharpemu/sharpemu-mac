@@ -53,7 +53,12 @@ public sealed class MetalStoreChannelMapTests
 
         var shaderData = new uint[layout.ShaderDataDwordCount];
         Assert.True(MetalRenderHost.WriteStageShaderData(shaderData, program, layout, info, snapshot, 0));
-        var expected = RuntimeImageSwizzle.StoreChannelMap(ZyxW) | (RuntimeImageSwizzle.StoreChannelMap(X001) << 16);
+        // Bits 12-13 of each map carry the image's component width code (1: every component 8 bits for RGBA8), which
+        // the store narrows integer channels by before Metal's saturating integer texture write.
+        var width = SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.StoreComponentWidthCode(GuestImageFormat.FormatOf(snapshot.Images[0]));
+        Assert.Equal(1u, width);
+        var expected = (RuntimeImageSwizzle.StoreChannelMap(ZyxW) | (width << SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.StoreWidthCodeShift)) |
+            ((RuntimeImageSwizzle.StoreChannelMap(X001) | (width << SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.StoreWidthCodeShift)) << 16);
         Assert.Equal(expected, shaderData[layout.StorageImageSwizzlesDword]);
         Assert.NotEqual(RuntimeImageSwizzle.StoreChannelMap(ZyxW), RuntimeImageSwizzle.StoreChannelMap(X001));
         Assert.Equal(7u, shaderData[0]);

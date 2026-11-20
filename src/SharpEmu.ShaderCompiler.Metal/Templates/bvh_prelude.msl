@@ -53,11 +53,13 @@ static inline float sharpemu_bvh_min(float a, float b)
 }
 
 // The node's dwords, resolved once when the node sits inside one page and dword by
-// dword (each through the page table) when it straddles one. An unmapped dword reads
-// zero and records the page in the fault bitmap, like every device-address read. A node
-// is 64-byte aligned, so one inside a page is read 16 bytes at a time: the dword-wise
-// loads took a sixth of GTA V's traversal time.
-static inline void sharpemu_bvh_fetch(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint count, thread uint* words)
+// dword (each through the page table) when it straddles one. Whether every dword is
+// mapped: a node with a unit on an unmapped page is not loaded (upstream 7cf0ac568
+// resolves a node's 64-byte units and loads only when all are mapped), and its words
+// read zero; the page is recorded in the fault bitmap, like every device-address read.
+// A node is 64-byte aligned, so one inside a page is read 16 bytes at a time: the
+// dword-wise loads took a sixth of GTA V's traversal time.
+static inline bool sharpemu_bvh_fetch(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, thread Gen5RangeCache& cache, ulong address, uint count, thread uint* words)
 {
     bool valid = false;
     device uint* span = sharpemu_resolve_device_span(ranges, range_count, faults, fault_words, cache, address, count * 4u, valid);
@@ -72,12 +74,22 @@ static inline void sharpemu_bvh_fetch(device const Gen5AddressRange* ranges, uin
             words[quad * 4u + 2u] = value.z;
             words[quad * 4u + 3u] = value.w;
         }
-        return;
+        return true;
     }
+    bool mapped = true;
     for (uint index = 0u; index < count; index++)
     {
-        words[index] = valid ? span[index] : sharpemu_load_device_dword(ranges, range_count, faults, fault_words, cache, address + (ulong)index * 4ul);
+        if (valid)
+        {
+            words[index] = span[index];
+            continue;
+        }
+        bool word_valid = false;
+        device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, cache, address + (ulong)index * 4ul, word_valid);
+        words[index] = word_valid ? *word : 0u;
+        mapped = mapped && word_valid;
     }
+    return mapped;
 }
 
 // GPURT fast_intersect_bbox: the slab interval of one child box, clipped to [0, extent].
@@ -293,19 +305,29 @@ static inline uint4 sharpemu_bvh_intersect_ray(device const Gen5AddressRange* ra
     if (type <= 1u && index <= last)
     {
         uint node[16];
-        sharpemu_bvh_fetch(ranges, range_count, faults, fault_words, cache, base + (index << 6), 16u, node);
+        // An unmapped triangle node returns no hit: t = +inf over 1, an invalid id.
+        if (!sharpemu_bvh_fetch(ranges, range_count, faults, fault_words, cache, base + (index << 6), 16u, node))
+        {
+            return uint4(0x7F800000u, 0x3F800000u, 0xFFFFFFFFu, 0u);
+        }
         return sharpemu_bvh_triangle(node, type, barycentrics, origin, dir, inv_dir);
     }
     if (type == 4u && index <= last)
     {
         uint node[16];
-        sharpemu_bvh_fetch(ranges, range_count, faults, fault_words, cache, base + (index << 6), 16u, node);
+        if (!sharpemu_bvh_fetch(ranges, range_count, faults, fault_words, cache, base + (index << 6), 16u, node))
+        {
+            return uint4(0xFFFFFFFFu);
+        }
         return sharpemu_bvh_box(node, true, grow, sort, extent, origin, inv_dir);
     }
     if (type == 5u && index < last)
     {
         uint node[28];
-        sharpemu_bvh_fetch(ranges, range_count, faults, fault_words, cache, base + (index << 6), 28u, node);
+        if (!sharpemu_bvh_fetch(ranges, range_count, faults, fault_words, cache, base + (index << 6), 28u, node))
+        {
+            return uint4(0xFFFFFFFFu);
+        }
         return sharpemu_bvh_box(node, false, grow, sort, extent, origin, inv_dir);
     }
     return uint4(0xFFFFFFFFu);

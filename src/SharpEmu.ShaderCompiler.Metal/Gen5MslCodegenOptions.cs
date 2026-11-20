@@ -237,6 +237,13 @@ public sealed record Gen5MslCodegenOptions(
     /// SHARPEMU_MSL_PACKED_FORMAT_LOADS=0 restores component loads; partial trailing elements retain the decoder.</summary>
     public bool PackedFormatLoads { get; init; } = true;
 
+    /// <summary>A BUFFER_LOAD_FORMAT_* whose word 3 is known at translate time bounds each selected component
+    /// at its own 32-bit address (elementAddress + offset, wrapping at 2^32) when the selected run does not
+    /// fit as a whole, as the hardware and upstream's SPIR-V do (7cf0ac568): a component past the top of the
+    /// byte space reads the binding's first bytes. The run that fits stays one compare.
+    /// SHARPEMU_METAL_FORMAT_LOAD_COMPONENT_BOUNDS=0 bounds the whole run again.</summary>
+    public bool FormatLoadComponentBounds { get; init; } = true;
+
     /// <summary>A program with at least this many BUFFER_LOAD_FORMAT_* decodes the formats only known on the device
     /// through one helper (format_load_prelude.msl) instead of inline at every load, which Metal compiles in seconds
     /// instead of minutes for a program with hundreds. The whole-dword fast path stays inline. Below it the program is
@@ -370,6 +377,7 @@ public sealed record Gen5MslCodegenOptions(
         LaneExactUnobservedWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_LANES") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
+        FormatLoadComponentBounds = Environment.GetEnvironmentVariable("SHARPEMU_METAL_FORMAT_LOAD_COMPONENT_BOUNDS") != "0",
         FormatFetch = Environment.GetEnvironmentVariable("SHARPEMU_MSL_FORMAT_FETCH") != "0",
         DecodedFormatLoadThreshold = int.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_DECODED_FORMAT_LOADS"), out var decodedLoads)
