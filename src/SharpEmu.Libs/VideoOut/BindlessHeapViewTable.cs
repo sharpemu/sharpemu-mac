@@ -12,9 +12,10 @@ namespace SharpEmu.Libs.VideoOut;
 // Otherwise it takes free elements, then the elements of the views no pending command reads, least recently used first,
 // and at last shares the run of a view of its shape that is still read, as one heap that moved (a title's whole texture
 // heap, kept in two copies, is larger than half of set 1).
-internal sealed class BindlessHeapViewTable(uint capacity)
+// Public: the Vulkan and Metal backends both keep their heap views in it.
+public sealed class BindlessHeapViewTable(uint capacity)
 {
-    internal sealed class Region
+    public sealed class Region
     {
         // The heap whose records the run's elements hold now.
         public required BindlessHeapDescriptor Heap { get; set; }
