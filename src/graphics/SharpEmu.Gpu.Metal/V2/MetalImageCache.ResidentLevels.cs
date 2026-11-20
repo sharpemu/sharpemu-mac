@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Gpu.Metal.V2;
@@ -50,6 +51,13 @@ internal sealed partial class MetalImageCache
 
     // The staged read of image bytes: ResidentImageBacking's policy, or the binding's prefix read with the switch off.
     private MetalGuestMemory.StagingRead? ImageRead => PartialMipChains ? _imageRead ??= _guestMemory.ReadImageBacking : null;
+
+    /// <summary>
+    /// Whether the texels of an image over this range could be read from the guest: the range is valid and its first
+    /// page is mapped (upstream's GuestImageCache.IsBackedImageRange). A descriptor read from a table the guest no longer
+    /// uses may name memory it has unmapped since.
+    /// </summary>
+    public bool IsBackedImageRange(GuestSpan data) => ImageDescription.IsValidRange(data) && _backing.IsBackedRange(data.Address, 1);
 
     // A request described from its first resident level, as the whole guest chain it is part of: the same image as every
     // other request for those bytes, viewed from the same guest level (BaseLevel.cs holds the texture from there).

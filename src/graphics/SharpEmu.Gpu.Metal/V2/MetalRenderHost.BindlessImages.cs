@@ -370,6 +370,20 @@ internal sealed partial class MetalRenderHost
             {
                 lookedUp = true;
                 var resolution = ResolveBindlessTexture(words, shape);
+                // A table entry whose T# names no mapped guest memory - one the title has not filled, one whose
+                // memory it uses for other data by now, the T# of a texture it has unloaded - is no image for now, as
+                // upstream's heap records are (VulkanVideoPresenter.BindlessHeap.cs, GuestImageCache.IsBackedImageRange):
+                // it reads the null texture instead of making an image whose upload has no guest bytes to read
+                // (MetalGuestMemory.ReadImageBacking stops the GPU there). It is looked at again at every bind
+                // (device.Images stays Invalid), so it takes its texture as soon as the guest maps it.
+                var unmapped = BindlessUnmappedNull && !ImageDescription.IsEmptyRange(resolution.Request.Description.Data) &&
+                    !_imageCache.IsBackedImageRange(resolution.Request.Description.Data);
+                if (unmapped)
+                {
+                    BindlessUnmappedEntries++;
+                    resolution = resolution with { Request = ImageRequestBuilders.NullTexture(in shape) };
+                }
+
                 request = resolution.Request;
                 pagesBefore = _imageCache.RequestPageVersions(in request);
                 identifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
@@ -378,11 +392,11 @@ internal sealed partial class MetalRenderHost
                 identifier = ImageRequestBuilders.ValidateTextureOwner(
                     _imageCache.GetImage(identifier).Description, ResourceSlotIdentifier.Invalid, identifier, resolution);
                 // A DCC surface's lookup materializes a clear the GPU may have left since.
-                device.Images[index] = request.Description.Metadata.Kind == MetadataKind.Dcc
+                device.Images[index] = request.Description.Metadata.Kind == MetadataKind.Dcc || unmapped
                     ? ResourceSlotIdentifier.Invalid
                     : identifier;
                 device.Requests[index] = request;
-                if (BindlessLookupMemo)
+                if (BindlessLookupMemo && !unmapped)
                 {
                     memo = NoteBindlessLookup(words, in shape, identifier, in request, imageSet);
                 }
@@ -462,6 +476,14 @@ internal sealed partial class MetalRenderHost
     }
 
     private readonly Dictionary<TextureMemoKey, BindlessLookup> _bindlessLookupMemo = new();
+
+    // SHARPEMU_METAL_V2_BINDLESS_UNMAPPED_NULL=0 makes an image for a table entry whose memory is not mapped, as before
+    // the upstream f1af467a6 port (its upload then stops the GPU unless the bytes are PRT/AMM or holes are allowed).
+    internal static bool BindlessUnmappedNull { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_BINDLESS_UNMAPPED_NULL") != "0";
+
+    /// <summary>Table entries bound as the null texture because their T# names unmapped memory.</summary>
+    internal long BindlessUnmappedEntries;
     private readonly List<(ulong Start, ulong End)>[] _lookupChanges = [new(), new(), new(), new()];
     private readonly long[] _lookupChangesSince = [-1, -1, -1, -1];
     private long _lookupChangesUntil = -1;
