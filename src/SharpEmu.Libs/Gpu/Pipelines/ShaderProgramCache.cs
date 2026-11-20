@@ -818,6 +818,20 @@ internal sealed partial class ShaderProgramCache
         }
     }
 
+    // The worker a pending program waits on: its deferred link, else its deferred translation; null when neither runs
+    // (the program is ready, refused, or a per-record link starts at its next request). Callers hold the pipeline gate
+    // that serializes TryGetProgram, so the translations are not changed meanwhile.
+    public Task? PendingPreparation(ulong hash)
+    {
+        lock (_callGate)
+        {
+            if (_pendingLinks.TryGetValue(hash, out var link))
+                return link.Link;
+        }
+
+        return _pendingTranslations.TryGetValue(hash, out var translation) ? translation.Translation : null;
+    }
+
     // False with no rejection while the program's link runs on a worker (DeferLinking).
     public bool TryGetProgram(ShaderSource source, StageCompileOptions options, bool strictShaders,
         ref uint pushDataCursor, out ShaderProgram program, out ShaderStageResources stage, out string rejection)
