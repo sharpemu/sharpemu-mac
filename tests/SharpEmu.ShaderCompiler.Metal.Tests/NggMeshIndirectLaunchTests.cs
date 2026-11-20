@@ -205,6 +205,87 @@ public sealed class NggMeshIndirectLaunchTests(ITestOutputHelper output)
         Assert.Equal(words, block);
     }
 
+    // The draw upstream launches from a task stage (MeshTaskLaunch, 7cf0ac568): an automatic indirect draw of a
+    // mesh-style primitive shader, one input point per subgroup, whose (vertexCount, instanceCount, firstVertex,
+    // firstInstance) a GPU pass wrote. Upstream's task stage reads the record and emits one mesh group per point with
+    // the first vertex in its payload. Here the launch kernel reads it and launches one amplified subgroup per point,
+    // with the first vertex in the draw-info block's base vertex, which numbers the point (its ES vertex index). Only
+    // point 1 puts the fixture's triangle through the center, so a record of one point from vertex 1 lights it and one
+    // from vertex 0 does not, on the GPU launch exactly as on the CPU draw of the same counts. A second instance draws
+    // the same triangle again; zero instances draw nothing.
+    [Theory]
+    [InlineData(1u, 1u, true)]
+    [InlineData(0u, 1u, false)]
+    [InlineData(1u, 2u, true)]
+    [InlineData(1u, 0u, false)]
+    public void AnAmplifiedAutomaticDrawLaunchesItsPointsFromTheGpuRecord(uint firstVertex, uint instances, bool lit)
+    {
+        if (SkipWithoutMetalDevice("the amplified indirect mesh draw")) return;
+
+        var shader = Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.AmplifiedWave64Triangle(), Gen5NggFixtures.AmplifiedStageInfo);
+        var mesh = shader.MeshInfo!;
+        Assert.True(mesh.Amplified);
+        Assert.True(MetalNative.TryCompileLibrary(shader.Source + FragmentSource, out var library, out var compileError), compileError);
+        const Gen5MslMeshInputTopology input = Gen5MslMeshInputTopology.PointList;
+        const uint points = 1;
+
+        var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
+        Gen5MslMeshLaunch.FillDrawInfo(mesh, input, words, points, instances, false, 0, firstVertex, 0, 0);
+        var subgroups = Gen5MslMeshLaunch.SubgroupCount(mesh, input, points);
+        Assert.Equal(points, subgroups);
+        // The direct draw of the test rig launches one grid row, so the CPU draw is compared for one instance.
+        var cpu = instances == 1 ? RenderAmplified(library, shader, mesh, Bytes(words), subgroups, null) : null;
+
+        var slot = new byte[Gen5MslMeshLaunch.SlotBytes];
+        Gen5MslMeshLaunch.WriteMeshParameters(Parameters(slot, 0), mesh, input, 0, false, 0, 0, MaxThreadgroups);
+        var launch = new MeshIndirectLaunch(Bytes([points, instances, firstVertex, 0]), slot, mesh.DrawInfoBufferIndex);
+        var gpu = RenderAmplified(library, shader, mesh, new byte[Gen5MslMeshInfo.DrawInfoByteSize], 0, launch);
+
+        var written = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(launch.Written);
+        var grid = written.Slice((int)Gen5MslMeshLaunch.GridByteOffset / 4, 3).ToArray();
+        Assert.Equal(instances == 0 ? [0u, 0u, 1u] : [subgroups, instances, 1u], grid);
+        Assert.Equal(firstVertex, written[5]);
+        var center = Green(gpu, TargetSize / 2, TargetSize / 2);
+        output.WriteLine($"first vertex {firstVertex}, {instances} instance(s): center green {center}");
+        Assert.Equal(lit ? 1.0f : 0.0f, center, 3);
+        Assert.Equal(0.0f, Green(gpu, 1, 1), 3);
+        if (cpu is not null)
+        {
+            Assert.Equal(cpu, gpu);
+        }
+    }
+
+    // The amplified program also binds the meshlet slot (DrawMesh binds the null buffer there for any program without a
+    // GS half) and reads its draw from the block, or from the launch the kernel wrote.
+    private float[] RenderAmplified(
+        nint library, Gen5MslShader shader, Gen5MslMeshInfo mesh, byte[] drawInfo, uint threadgroups, MeshIndirectLaunch? indirect)
+    {
+        Assert.True(
+            MetalNative.TryRenderMesh(
+                library,
+                shader.EntryPoint,
+                "gen5_mesh_test_fs",
+                [
+                    (new byte[Math.Max(shader.ArgumentLayout?.ByteSize ?? 0, 8)], 0u),
+                    (new byte[64], 1u),
+                    (drawInfo, mesh.DrawInfoBufferIndex),
+                    (new byte[16], mesh.IndexBufferIndex),
+                    (new byte[16], Gen5MslMeshInfo.MeshletBufferIndex),
+                ],
+                threadgroups,
+                mesh.ThreadsPerThreadgroup,
+                TargetSize,
+                TargetSize,
+                out var pixels,
+                out var error,
+                indirect: indirect),
+            $"the amplified mesh draw failed: {error}");
+        return pixels;
+    }
+
+    private static float Green(float[] pixels, uint x, uint y) => pixels[(int)(((y * TargetSize) + x) * 4) + 1];
+
     private float[] Render(
         nint library,
         Gen5MslShader shader,
@@ -306,6 +387,9 @@ public sealed class NggMeshIndirectLaunchTests(ITestOutputHelper output)
             VerticesPerPrimitive: 3, Topology: Gen5MslMeshTopology.Triangle, ThreadgroupMemoryBytes: 4096,
             DrawInfoBufferIndex: 2, IndexBufferIndex: 3, ReadsIndexBuffer: true, GeometryVerticesOut: 24,
             Wave64: true, GeometryInputVertices: 24, GeometryInputPrimitives: 4));
+        // A mesh-style subgroup (one input point, PRIM_AMP_FACTOR primitives out): one subgroup per point.
+        yield return ("amplified wave64", Gen5NggFixtures.CompileOrThrow(
+            Gen5NggFixtures.AmplifiedWave64Triangle(), Gen5NggFixtures.AmplifiedStageInfo).MeshInfo!);
         yield return ("points", new Gen5MslMeshInfo(
             ThreadsPerThreadgroup: 32, WavesPerThreadgroup: 1, MaxVertices: 32, MaxPrimitives: 32,
             VerticesPerPrimitive: 1, Topology: Gen5MslMeshTopology.Point, ThreadgroupMemoryBytes: 4096,
