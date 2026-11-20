@@ -26,11 +26,13 @@ public sealed class MetalGraphicsWaitOffCacheTests(ITestOutputHelper output)
     public void ADrawThatWaitsSharesTheCompileAndTheReaskTakesIt(bool compilerThreadRuns)
     {
         if (!RequireDevice()) return;
+        // Declared before the rig, so it is disposed after it: a compiler thread may still reach this gate until the
+        // rig's host has joined its threads, and waiting on a disposed gate throws on that thread and ends the process.
+        using var gate = new ManualResetEventSlim(false);
         using var rig = new MetalPassRig(Device.Value, 1024 * 1024);
         var host = rig.Host;
         host.AsynchronousGraphics = true;
         Assert.True(((IShaderPipelineHost)host).WaitsForGraphicsPipelines);
-        using var gate = new ManualResetEventSlim(false);
         host.PipelineCompiler.Gate = gate;
         _ = host.PipelineCompiler.TakeCounters();
 
