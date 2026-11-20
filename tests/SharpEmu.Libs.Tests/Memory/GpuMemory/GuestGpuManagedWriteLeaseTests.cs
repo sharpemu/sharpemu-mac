@@ -160,6 +160,8 @@ public sealed class GuestGpuManagedWriteLeaseTests
         memory.AttachStores(store, null);
         if (lazy) memory.RegisterLazyRange(0x10000, 0x4000);
         else memory.Register(0x10000, 0x4000, GuestPageProtection.Read | GuestPageProtection.Write);
+        // The claims below are a claiming backend's: writes take the lease from the start (GuestWriteReservations.Gate.cs).
+        memory.Pages.ManagedWrites.RegisterClaimant();
         store.Calls.Clear();
         var attempts = 0;
         memory.BeforeManagedWriteReservationForTest = retry =>
@@ -220,6 +222,8 @@ public sealed class GuestGpuManagedWriteLeaseTests
         var store = new Store();
         memory.AttachStores(store, null);
         memory.Register(0x10000, 0x4000, GuestPageProtection.Read | GuestPageProtection.Write);
+        // The claim below is a claiming backend's: writes take the lease from the start (GuestWriteReservations.Gate.cs).
+        memory.Pages.ManagedWrites.RegisterClaimant();
         // Registration reports the span to the store; arm the failure and count calls from the write on.
         store.Calls.Clear();
         store.ThrowOnLanded = failLanded;

@@ -439,6 +439,9 @@ public static partial class AmprExports
             }
 
             _ammAreaReserved = true;
+            // The GPU process of the split has no kernel to ask (ContainsAmmRange): it is told instead.
+            SharpEmu.HLE.GpuMemory.PartiallyResidentRanges.Publish(
+                SharpEmu.HLE.GpuMemory.PartiallyResidentRanges.AmmArea, AmmAreaStart, AmmAreaEnd - AmmAreaStart, lazilyBacked: false);
             return true;
         }
     }

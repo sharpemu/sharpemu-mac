@@ -208,7 +208,7 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
-        var source = _guestMemory.Resolve(description.Data.Address + runStart, runEnd - runStart);
+        var source = _guestMemory.Resolve(description.Data.Address + runStart, runEnd - runStart, whole: false, ImageRead);
         return source.IsValid && source.Size >= runEnd - runStart;
     }
 }

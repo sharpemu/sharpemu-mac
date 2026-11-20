@@ -224,8 +224,8 @@ public static partial class ImageRequestBuilders
     }
 
     // Set by a backend whose image cache understands ImageDescription.FirstLevel (an image of the
-    // resident levels only, WithWholeMipChain). The Metal cache keeps its own base-level state
-    // (MetalImageCache.BaseLevel) and reads every texture request as a whole chain.
+    // resident levels only, WithWholeMipChain): Vulkan, and Metal unless SHARPEMU_METAL_V2_PARTIAL_MIP_CHAINS=0
+    // (MetalImageCache.ResidentLevels takes the request as its whole chain and holds the texture from its level).
     // Requests cached under the other setting describe other images: a change drops every thread's cache at its next
     // lookup (_textureCacheSetting).
     public static bool PartialMipChains

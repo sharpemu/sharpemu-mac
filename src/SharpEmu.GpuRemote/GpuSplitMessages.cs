@@ -473,6 +473,21 @@ public struct SpanRequest
     public ulong BracketId;
 }
 
+/// <summary>
+/// A guest range whose unmapped pages GPU reads see as zero (a PRT aperture or the AMM area), set, moved or dropped
+/// (<see cref="Size"/> 0) by the guest process's kernel: <c>PartiallyResidentRanges</c>.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct ResidencyRangeRequest
+{
+    public ulong Address;
+    public ulong Size;
+    public int Id;
+
+    /// <summary>1: the kernel also registered the range as lazily backed GPU memory (GuestGpuMemoryHook.NoteLazyRange).</summary>
+    public uint LazilyBacked;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct QueryRequest
 {

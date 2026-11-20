@@ -12,8 +12,9 @@ public static class GpuRemoteProtocol
     /// <remarks>2: the B → A call table, the application block and the split's messages (GpuSplitMessages.cs).
     /// 3: <see cref="GpuRemoteMessage.TessellationRings"/>.
     /// 4: frame-boundary messages. 5: input-change and display reservations.
-    /// 6: pending-writeback pages. 7: combined frame, input and writeback layout.</remarks>
-    public const uint Version = 7;
+    /// 6: pending-writeback pages. 7: combined frame, input and writeback layout.
+    /// 8: <see cref="GpuRemoteSyncOpcode.ResidencyRange"/>.</remarks>
+    public const uint Version = 8;
 
 }
 
@@ -136,6 +137,9 @@ public enum GpuRemoteSyncOpcode : uint
 
     /// <summary><see cref="FrameBoundaryWaitRequest"/> → <see cref="IdleOutcomeResponse"/>: the waiting half of a split <c>SubmitDone</c>.</summary>
     WaitFrameBoundary = 11,
+
+    /// <summary><see cref="ResidencyRangeRequest"/> → nothing: a PRT aperture or the AMM area changed in A.</summary>
+    ResidencyRange = 12,
 }
 
 /// <summary>Opcodes of the B → A synchronous call table: what B's GPU code asks of A's video-out state.</summary>

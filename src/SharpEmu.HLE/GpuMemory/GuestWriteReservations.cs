@@ -23,7 +23,7 @@ namespace SharpEmu.HLE.GpuMemory;
 // marks a chunk first makes every thread either see the mark or show its record (Interlocked.MemoryBarrierProcessWide)
 // and waits out every recorded write in the chunk. Writes on unmarked chunks do not exclude each other; each landed
 // notification marks its pages again.
-public sealed class GuestWriteReservations
+public sealed partial class GuestWriteReservations
 {
     private readonly object _gate = new();
     private readonly List<CpuReservation> _cpu = [];
@@ -305,6 +305,8 @@ public sealed class GuestWriteReservations
     public GpuClaim BeginGpuClaim(ulong address, ulong size)
     {
         if (size == 0) return default;
+        // Managed writes take leases only once a claimant registered (GuestWriteReservations.Gate.cs).
+        RegisterClaimant();
         var (start, end) = Pages(address, size);
         var thread = Environment.CurrentManagedThreadId;
         RejectFastReservedReentry();

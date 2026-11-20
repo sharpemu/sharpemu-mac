@@ -447,6 +447,23 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         private bool Contains(ulong address, ulong length) => address >= GuestBase && address - GuestBase + length <= Size;
 
+        // Guest ranges the guest has not mapped (a streamed texture's finer levels): not backed, not readable, no
+        // window. Writes still land, so a test lays its bytes out before it unmaps them.
+        public List<(ulong Start, ulong Bytes)> Unmapped { get; } = [];
+
+        private bool Mapped(ulong address, ulong length)
+        {
+            foreach (var (start, bytes) in Unmapped)
+            {
+                if (address < start + bytes && start < address + length)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         // Guest memory the GPU has no window onto: nothing can be written back into it.
         public bool NoWindows { get; set; }
 
@@ -490,14 +507,14 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
         public bool TryMapBacked(ulong address, ulong size, ulong backingOffset, GuestPageProtection protection, out HostViewFailure failure) { failure = HostViewFailure.None; return false; }
         public bool TryUnmapBacked(ulong address, ulong size) => false;
         public bool TryClearBacking(ulong offset, ulong size) => false;
-        public bool IsBackedView(ulong address) => Contains(address, 1);
-        public bool IsBackedRange(ulong address, ulong size) => Contains(address, size);
+        public bool IsBackedView(ulong address) => Contains(address, 1) && Mapped(address, 1);
+        public bool IsBackedRange(ulong address, ulong size) => Contains(address, size) && Mapped(address, size);
         public (ulong Base, ulong Size) BackingAliasRange => ((ulong)_block, Size);
 
         public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias)
         {
             var hole = HoleBytes != 0 && address < HoleStart + HoleBytes && HoleStart < address + size;
-            alias = !NoWindows && !hole && Contains(address, size) && size <= SpanAt(address)
+            alias = !NoWindows && !hole && Contains(address, size) && Mapped(address, size) && size <= SpanAt(address)
                 ? (ulong)_block + Offset(address)
                 : 0;
             return alias != 0;
@@ -521,7 +538,7 @@ public sealed unsafe partial class MetalImageBudgetTests(ITestOutputHelper outpu
 
         public bool TryReadBacking(ulong address, Span<byte> data)
         {
-            if (!Contains(address, (ulong)data.Length)) return false;
+            if (!Contains(address, (ulong)data.Length) || !Mapped(address, (ulong)data.Length)) return false;
             for (var done = 0; done < data.Length;)
             {
                 var length = (int)Math.Min((ulong)(data.Length - done), SpanAt(address + (ulong)done));
