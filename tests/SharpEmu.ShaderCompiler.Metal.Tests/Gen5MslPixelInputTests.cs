@@ -16,7 +16,7 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests;
 /// </summary>
 public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
 {
-    private const uint PerspCenter = 1u << 1;
+    internal const uint PerspCenter = 1u << 1;
     private const uint PullModel = 1u << 3;
     private const uint PosW = 1u << 11;
     private const uint FrontFace = 1u << 12;
@@ -25,11 +25,11 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
     private const uint PosFixedPoint = 1u << 15;
 
     // VINTRP op: 0 = V_INTERP_P1_F32, 1 = V_INTERP_P2_F32, 2 = V_INTERP_MOV_F32.
-    private static uint Interp(uint vdst, uint op, uint attribute, uint channel, uint vsrc) =>
+    internal static uint Interp(uint vdst, uint op, uint attribute, uint channel, uint vsrc) =>
         0xC8000000u | (vdst << 18) | (op << 16) | (attribute << 10) | (channel << 8) | vsrc;
 
     // exp mrt0 v(a), v(b), v(c), v(d) done vm, then s_endpgm.
-    private static uint[] ExportAndEnd(uint a, uint b, uint c, uint d) =>
+    internal static uint[] ExportAndEnd(uint a, uint b, uint c, uint d) =>
         [0xF800180F, a | (b << 8) | (c << 16) | (d << 24), 0xBF810000];
 
     [Theory]
@@ -983,7 +983,7 @@ public sealed class Gen5MslPixelInputTests(ITestOutputHelper output)
         Assert.True(compiled, $"Metal rejected the emitted pixel MSL: {error}\n{shader.Source}");
     }
 
-    private static Gen5MslShader Compile(
+    internal static Gen5MslShader Compile(
         uint[] words,
         uint inputs,
         uint? enable = null,

@@ -154,7 +154,7 @@ public sealed class Gen5MslLoadElisionTests
 
     // ---- programs ----
 
-    private static Gen5ShaderProgram PresentQuad()
+    internal static Gen5ShaderProgram PresentQuad()
     {
         var instructions = new List<Gen5ShaderInstruction>();
         void Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] sources, Gen5Operand[] destinations,

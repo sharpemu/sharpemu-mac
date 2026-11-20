@@ -150,6 +150,27 @@ public sealed unsafe class MetalShaderSourceReleaseTests(ITestOutputHelper outpu
         Assert.Equal(expected, metal.PayloadHash);
     }
 
+    // A shader the translation disk cache rebuilt (MetalCompiledGuestShader.FromCachePayload) builds its library and
+    // pipeline as the translation does, drops its source like it, and translates its request again to the same text.
+    [Fact]
+    public void AShaderFromTheTranslationCacheBuildsItsModuleAndDropsItsSourceLikeATranslation()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var request = Gen5ComputeFixtures.CreateComputeRequest(Gen5ComputeFixtures.ExecStore);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var original, out var error), error);
+        var fresh = new MetalCompiledGuestShader(original, request);
+        var rebuilt = MetalCompiledGuestShader.FromCachePayload(fresh.CachePayload, request);
+        Assert.NotNull(rebuilt);
+
+        var pipeline = Pipeline(rig.Host, rebuilt, 1);
+
+        Assert.NotEqual(default, pipeline);
+        Assert.True(rebuilt.SourceReleased);
+        Assert.Equal(original.Source, rebuilt.AcquireShader().Source);
+        Assert.Equal(fresh.PayloadHash, rebuilt.PayloadHash);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

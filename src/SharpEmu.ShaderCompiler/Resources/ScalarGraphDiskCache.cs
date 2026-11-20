@@ -35,8 +35,8 @@ internal static class ScalarGraphDiskCache
 
     internal static void UseGameFolder(string folder) => _gameFolder = folder;
 
-    // A host that names no game folder (the Metal host does not yet) keeps the one folder every game shared before the
-    // per-game folders, at the cap it had then.
+    // A host that names no game folder (both hosts name one once their device is up) keeps the one folder every game
+    // shared before the per-game folders, at the cap it had then.
     private static readonly string SharedCachePath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SharpEmu", "shader-analysis");
     private const long SharedMaxCacheBytes = 256L * 1024 * 1024;

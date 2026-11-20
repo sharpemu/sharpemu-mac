@@ -67,6 +67,34 @@ public sealed class MetalRuntimeImageSwizzleExecutionTests(ITestOutputHelper out
         output.WriteLine($"Compared {stores} baked and runtime-select stores of format {guestFormat} (d16={d16}).");
     }
 
+    // A shader the translation disk cache rebuilt from its payload (Gen5MslShaderPayload) compiles to a library and
+    // stores, through the runtime select, the texel the fresh translation stores.
+    [Theory]
+    [MemberData(nameof(Formats))]
+    public void AShaderRebuiltFromItsCachePayloadStoresTheTexelTheTranslationStores(uint guestFormat, uint pixelFormat,
+        uint texelBytes, bool d16)
+    {
+        var device = DeviceGate();
+        var rebuilt = 0;
+        foreach (var select in new[] { 0xF2Eu, 0x204u, 0x12Eu })
+        {
+            var fresh = Store(guestFormat, pixelFormat, texelBytes, d16, 0xF, select, runtime: true, device);
+            var cached = Store(guestFormat, pixelFormat, texelBytes, d16, 0xF, select, runtime: true, device, shader =>
+            {
+                Assert.True(Gen5MslShaderPayload.TryRead(Gen5MslShaderPayload.Write(shader, ShaderStage.Compute, 0x5EED),
+                    out var read, out _, out _, out var error), error);
+                Assert.NotSame(shader, read);
+                rebuilt++;
+                return read;
+            });
+            Assert.Equal(fresh.Source, cached.Source);
+            Assert.Equal(Convert.ToHexString(fresh.Texel), Convert.ToHexString(cached.Texel));
+        }
+
+        Assert.Equal(3, rebuilt);
+        output.WriteLine($"Compared 3 fresh and rebuilt stores of format {guestFormat} (d16={d16}, device={device}).");
+    }
+
     // The 24 orderings of X, Y, Z and W.
     private static IEnumerable<uint> Permutations()
     {
@@ -131,7 +159,7 @@ public sealed class MetalRuntimeImageSwizzleExecutionTests(ITestOutputHelper out
     }
 
     private static (byte[] Texel, string Source) Store(uint guestFormat, uint pixelFormat, uint texelBytes, bool d16,
-        uint dmask, uint select, bool runtime, bool device)
+        uint dmask, uint select, bool runtime, bool device, Func<Gen5MslShader, Gen5MslShader>? rebuild = null)
     {
         BindingLayout? layout = null;
         ResourceSnapshot? snapshot = null;
@@ -141,6 +169,7 @@ public sealed class MetalRuntimeImageSwizzleExecutionTests(ITestOutputHelper out
             storeValues: Data(guestFormat, d16), runtimeImageSwizzles: runtime,
             inspect: (compiled, resources) => (request, layout, snapshot) = (compiled, compiled.Bindings, resources)), error);
         Assert.Equal(runtime ? 1u : 0u, layout!.StorageImageSwizzleCount);
+        shader = rebuild is null ? shader : rebuild(shader!);
         if (!device)
         {
             return ([], shader!.Source);

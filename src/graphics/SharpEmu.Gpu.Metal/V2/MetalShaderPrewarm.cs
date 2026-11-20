@@ -820,7 +820,7 @@ internal static class MetalShaderPrewarm
 
     // The translators decide the MSL; the device and the OS decide what the driver's
     // compiler makes of it.
-    private static string Stamp(IGuestGpuBackend compiler, nint device) =>
+    internal static string Stamp(IGuestGpuBackend compiler, nint device) =>
         string.Join(
             '|',
             StampPart(typeof(Gen5ShaderTranslator)),
