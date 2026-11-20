@@ -334,11 +334,15 @@ internal sealed partial class RenderRecorder
             }
             else if (threadDispatch is not null)
             {
+                // Its pass is ordered by the host, not by the mark: it joins the group, so a later marked dispatch
+                // is checked against it as well.
+                chain.JoinOverlapGroup();
                 threadDispatch.Dispatch();
                 dispatched = true;
             }
             else if (record.ThreadsOnGpu)
             {
+                chain.JoinOverlapGroup();
                 if (!TryDispatchThreadsIndirect(input, record.IndirectArgumentsAddress))
                 {
                     throw _host.Fatal(
@@ -349,7 +353,7 @@ internal sealed partial class RenderRecorder
             }
             else
             {
-                _host.NextDispatchMayOverlap = record.MayOverlap;
+                _host.NextDispatchMayOverlap = chain.KeepsOverlap(record.MayOverlap);
                 if (record.IndirectArgumentsAddress == 0 || !TryDispatchIndirect(record, arguments, input))
                 {
                     _host.Dispatch(groupsX, groupsY, groupsZ);
@@ -463,7 +467,7 @@ internal sealed partial class RenderRecorder
             record.GroupsX, record.GroupsY, record.GroupsZ, record.IndirectArgumentsAddress);
         _host.BeginCheckedDispatch();
         _host.BindPipeline(GpuBindPoint.Compute, in pipeline);
-        _host.NextDispatchMayOverlap = record.MayOverlap;
+        _host.NextDispatchMayOverlap = chain.KeepsOverlap(record.MayOverlap);
         _host.Dispatch(groupsX, groupsY, groupsZ);
         _host.EndCheckedDispatch();
         chain.Commit(_host.TryDeferShaderAccessBarrier(), _host.DeferredBarrierPromotions);

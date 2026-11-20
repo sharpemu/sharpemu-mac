@@ -1341,6 +1341,18 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                     return true;
                 }
 
+                if (TryReadPendingCommandProcessorBytesConcurrent(address, bytes, assumptions))
+                {
+                    assumptions.Forget(ConcurrentQuery.Word, address, sizeof(uint), answers);
+                    word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+                    if ((address & 3) == 0 && ConcurrentWordLines)
+                    {
+                        FillOverlayLine(assumptions, address & ~lineMask);
+                    }
+
+                    return true;
+                }
+
                 // The source tests overwrote the owner; the abandon is the word's.
                 _lastConcurrentOwner = owner;
             }
@@ -1433,6 +1445,13 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             return true;
         }
 
+        if (TryReadPendingCommandProcessorBytesConcurrent(address, bytes, assumptions))
+        {
+            assumptions.Forget(ConcurrentQuery.Resident, address, sizeof(uint), answers);
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            return true;
+        }
+
         _lastConcurrentOwner = owner;
         Interlocked.Increment(ref _cleanReadsAbandoned);
         NoteAbandonCause(address, sizeof(uint));
@@ -1521,7 +1540,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // (IsConcurrentResolveStillCurrent) tests every word compared here as it would the words read. A range a GPU write
     // owns is read through the pending copy that writes all of it, as TryReadGuestWordConcurrentTested reads each of its
     // words (TryReadThroughPendingCopyConcurrent: that copy the latest write over the range, its source owned by
-    // nothing, the source's answers recorded, the range's owned answer dropped), and compared there: any word of the
+    // nothing, the source's answers recorded, the range's owned answer dropped), or as the pending command-processor
+    // write that covers all of it (TryReadPendingCommandProcessorBytesConcurrent, likewise), and compared there: any word of the
     // range read alone finds that same copy, since a later write over it would be the range's latest. Any other owned
     // range refuses the compare, its owned answer dropped: the caller then reads the words itself, recording their own
     // answers. Then the other ranges' bytes, where they lie.
@@ -1556,7 +1576,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 {
                     var before = assumptions.Answers.Count;
                     var bytes = through[..length];
-                    if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions))
+                    if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions) ||
+                        TryReadPendingCommandProcessorBytesConcurrent(address, bytes, assumptions))
                     {
                         if (owned)
                         {

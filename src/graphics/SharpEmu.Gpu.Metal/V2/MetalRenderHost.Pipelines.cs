@@ -2047,7 +2047,8 @@ internal sealed partial class MetalRenderHost
         }
 
         // A recorded GPU write still landing in the word is ahead of the draw being resolved, which on the GPU reads the
-        // word after it: read through the write's copy, or after waiting for it (TryReadGuestCore), the value the draw
+        // word after it: read as the command-processor write that owes it, through the write's copy, or after waiting
+        // for it (TryReadPendingCommandProcessorBytes, then TryReadGuestCore), the value the draw
         // sees. Neither the stale backing (one resource branch kept on the worker, both on the resolver: bd5c2009a) nor a
         // refusal (both paths kept: the path the shader does not take had its descriptor read from whatever that memory
         // held, floats in Demon's Souls, which fataled as an invalid image) is that value. The resolving thread reads it
@@ -2061,7 +2062,7 @@ internal sealed partial class MetalRenderHost
             }
 
             Interlocked.Increment(ref _cleanReadsLanded);
-            if (!TryReadGuestCore(address, bytes))
+            if (!TryReadPendingCommandProcessorBytes(address, bytes) && !TryReadGuestCore(address, bytes))
             {
                 return false;
             }
