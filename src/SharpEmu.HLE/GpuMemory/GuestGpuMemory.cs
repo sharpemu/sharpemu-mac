@@ -242,7 +242,7 @@ public sealed class GuestGpuMemory : IDisposable
     internal Action? ManagedWriteReservedForTest;
 
     internal readonly ref struct ManagedWriteLease(GuestGpuMemory memory, ulong address, ulong size,
-        GuestWriteReservations.CpuAttempt? attempt, bool emulatorWrite)
+        GuestWriteReservations.CpuAttempt? attempt, bool emulatorWrite, bool unleased = false)
     {
         public void Dispose()
         {
@@ -254,7 +254,8 @@ public sealed class GuestGpuMemory : IDisposable
             }
             finally
             {
-                attempt?.Dispose();
+                if (unleased) GuestWriteReservations.ExitUnleasedWrite();
+                else attempt?.Dispose();
             }
         }
     }
@@ -264,9 +265,25 @@ public sealed class GuestGpuMemory : IDisposable
     internal ManagedWriteLease BeginManagedWrite(ulong address, ulong size, bool emulatorWrite = false)
     {
         var valid = address != 0 && size != 0 && new GuestSpan(address, size).IsValid;
+        // No backend makes GPU claims over these pages (GuestWriteReservations.Gate.cs): the write marks the stores before
+        // and after it lands, as it did before the lease, and its thread's depth lets a claimant that registers meanwhile
+        // wait for it to land.
+        var reservations = _pages.ManagedWrites;
+        if (valid && !reservations.LeasesWrites)
+        {
+            GuestImageWriteTracker.NotifyManagedWrite(address, size);
+            MarkManagedWriteParts(address, size, landed: false, emulatorWrite);
+            if (reservations.TryEnterUnleasedWrite())
+            {
+                return new ManagedWriteLease(this, address, size, null, emulatorWrite, unleased: true);
+            }
+
+            // A claimant registered after the check: the write takes the lease, and its premark repeats.
+        }
+
         for (var retry = 0; ; retry++)
         {
-            GuestWriteReservations.CpuAttempt? attempt = valid ? _pages.ManagedWrites.BeginCpuAttempt(address, size) : null;
+            GuestWriteReservations.CpuAttempt? attempt = valid ? reservations.BeginCpuAttempt(address, size) : null;
             try
             {
                 // Recovery can relay to the GPU; no reservation is held yet.

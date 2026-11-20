@@ -107,6 +107,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
         _tracker = new GuestPageTracker(pages);
         _managedWrites = pages.ManagedWrites;
+        // This cache makes GPU claims: managed writes over these pages take the lease from now on.
+        _managedWrites.RegisterClaimant();
         _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
         // Up to three helper threads copy a large sweep's guest bytes with the render thread, and a large upload's.
         _sweepCopy = new ParallelGuestCopy(guest, Math.Clamp(Environment.ProcessorCount - 1, 0, 3));
