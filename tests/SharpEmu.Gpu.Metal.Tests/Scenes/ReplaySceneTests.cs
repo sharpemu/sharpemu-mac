@@ -16,6 +16,22 @@ namespace SharpEmu.Gpu.Metal.Tests.Scenes;
 /// </summary>
 public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(output)
 {
+    // The engine reads the same switches once (RenderRecorder); with either off there is nothing of it to test here.
+    private static readonly bool EngineReplayOff =
+        Environment.GetEnvironmentVariable("SHARPEMU_DRAW_REPLAY") == "0" ||
+        Environment.GetEnvironmentVariable("SHARPEMU_DISPATCH_REPLAY") == "0";
+
+    private SceneRig? CreateReplayRig()
+    {
+        if (EngineReplayOff)
+        {
+            Output.WriteLine("SHARPEMU_DRAW_REPLAY=0 or SHARPEMU_DISPATCH_REPLAY=0: the engine replays nothing.");
+            return null;
+        }
+
+        return CreateRig();
+    }
+
     private const uint Width = 16;
     private const uint Rgba8 = 56;
     private const uint TextureSize = 8;
@@ -160,7 +176,7 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
 
     private byte[] DrawStripes(bool replay, out long replays)
     {
-        using var rig = CreateRig()!;
+        using var rig = CreateReplayRig()!;
         rig.Host.DrawReplayEnabled = replay;
         rig.Host.DispatchReplayEnabled = replay;
         var stripes = new Stripes(rig);
@@ -189,7 +205,7 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
     [Fact]
     public void RepeatedDrawsReplayWithTheirOwnUserDataAndRenderAsWithout()
     {
-        if (CreateRig() is not { } probe) return;
+        if (CreateReplayRig() is not { } probe) return;
         probe.Dispose();
         var with = DrawStripes(replay: true, out var replays);
         var without = DrawStripes(replay: false, out var none);
@@ -204,7 +220,7 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
     [Fact]
     public void ATextureWrittenBetweenDrawsRefusesTheReplayAndIsSampledNew()
     {
-        using var rig = CreateRig();
+        using var rig = CreateReplayRig();
         if (rig is null) return;
         const uint red = 0xFF0000FF;
         const uint green = 0xFF00FF00;
@@ -241,7 +257,7 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
     [Fact]
     public void AReadBindingTheMemoNoLongerAnswersRefusesTheReplay()
     {
-        using var rig = CreateRig();
+        using var rig = CreateReplayRig();
         if (rig is null) return;
         var stripes = new Stripes(rig);
         var probed = false;
@@ -277,7 +293,7 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
     [Fact]
     public void ACommandBufferCommittedBetweenDrawsRefusesTheReplay()
     {
-        using var rig = CreateRig();
+        using var rig = CreateReplayRig();
         if (rig is null) return;
         var stripes = new Stripes(rig);
         var probed = false;
@@ -310,7 +326,7 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
 
     private uint[] StoreWords(bool replay, Action<SceneRig>? probe, out long replays, out long imagesMisses)
     {
-        using var rig = CreateRig()!;
+        using var rig = CreateReplayRig()!;
         rig.Host.DrawReplayEnabled = replay;
         rig.Host.DispatchReplayEnabled = replay;
         var probed = probe is null;
@@ -356,7 +372,7 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
     [Fact]
     public void RepeatedDispatchesReplayWithTheirOwnUserDataAndWriteAsWithout()
     {
-        if (CreateRig() is not { } probe) return;
+        if (CreateReplayRig() is not { } probe) return;
         probe.Dispose();
         var with = StoreWords(replay: true, probe: null, out var replays, out _);
         var without = StoreWords(replay: false, probe: null, out var none, out _);
@@ -372,7 +388,7 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
     [Fact]
     public void AnEpochMovedBetweenDispatchesRefusesTheReplay()
     {
-        if (CreateRig() is not { } probe) return;
+        if (CreateReplayRig() is not { } probe) return;
         probe.Dispose();
         var with = StoreWords(replay: true, rig => rig.Host.ImageCache.Epochs.NoteShapeChanged(), out var replays, out var imagesMisses);
         Assert.True(imagesMisses >= 1, "the moved epoch did not refuse the replay");
