@@ -1641,6 +1641,19 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    /// <summary>
+    /// The compile TryCreateComputePipeline left running for this program, as upstream's host hands out its in-flight
+    /// compile (IShaderPipelineHost.GetComputePipelineCompletion): a dispatch that may not be left out
+    /// (RenderRecorder.Compute) and a linked module's bounded wait (RenderExecutor.WaitForLinkedModule) then wake when
+    /// it finishes instead of polling every millisecond. Null when nothing compiles for it.
+    /// SHARPEMU_METAL_COMPUTE_COMPILE_WAIT=0 answers null always, so those waits poll as before.
+    /// </summary>
+    public Task? GetComputePipelineCompletion(ShaderProgram program) =>
+        ComputeCompileWait && !SynchronousPipelines ? Compiler.Completion(program.Id) : null;
+
+    internal static bool ComputeCompileWait { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_COMPUTE_COMPILE_WAIT") != "0";
+
     // Set on the worker while it asks for the pipeline of a dispatch it has read ahead to.
     [ThreadStatic]
     private static bool _prefetchingPipeline;
