@@ -74,6 +74,89 @@ public sealed unsafe partial class MetalClearFoldingTests
         Assert.Equal(0x5EC0DD00u, BitConverter.ToUInt32(after));
     }
 
+    // A command-processor write recorded outside a pass (a posted word copy, in Demon's Souls the 3 KB table its draws
+    // read) is a pending GPU write over its bytes. A draw resolved ahead of the worker reads them as written, as the worker
+    // does, instead of abandoning; the worker's clean read takes them without waiting for the GPU. A GPU write recorded
+    // after the resolution began over those bytes refuses it at the take.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void OwedBytesUnderAPendingWriteAreReadAsWrittenAheadOfTheWorkerAndOnIt(bool overlayReads)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        host.ConcurrentOverlayReads = overlayReads;
+        rig.WriteBacking32(TableAddress, 0x0BAD0BAD);
+        rig.WriteBacking32(TableAddress + 4, 0x0BAD0BAD);
+        rig.WriteBacking32(TableAddress + 8, 0x22222222);
+        host.RecordCommandProcessorWrite(TableAddress, BitConverter.GetBytes(0xC0FFEE22_C0FFEE11UL), "word copy");
+        var serial = host.SubmissionSerial;
+        Assert.Equal(0x0BAD0BADu, rig.ReadBacking32(TableAddress));
+
+        var concurrent = (IConcurrentResolveHost)host;
+        concurrent.BeginConcurrentResolve();
+        object assumptions;
+        try
+        {
+            if (!overlayReads)
+            {
+                // As before: the word's owner is the recorded write, which no pending copy explains.
+                Assert.Throws<SharpEmu.Libs.Gpu.Scheduling.GpuFatal.AbandonedWorkException>(() => host.TryReadGuestWord(TableAddress, out _));
+                Assert.Throws<SharpEmu.Libs.Gpu.Scheduling.GpuFatal.AbandonedWorkException>(() => host.TryReadCleanGuestWord(TableAddress, out _));
+                return;
+            }
+
+            Assert.True(host.TryReadGuestWord(TableAddress, out var word));
+            Assert.Equal(0xC0FFEE11u, word);
+            // The rest of the line: the write's other word as written (from the line read with the first), and a word
+            // no write owns as memory holds it.
+            Assert.True(host.TryReadGuestWord(TableAddress + 4, out var second));
+            Assert.Equal(0xC0FFEE22u, second);
+            Assert.True(host.TryReadGuestWord(TableAddress + 8, out var unowned));
+            Assert.Equal(0x22222222u, unowned);
+            // A proof's compare of the range sees the bytes as written too, not as memory holds them.
+            ulong[] addresses = [TableAddress];
+            int[] lengths = [8];
+            Assert.True(host.TryCompareGuestWords(addresses, lengths, BitConverter.GetBytes(0xC0FFEE22_C0FFEE11UL)));
+            Assert.False(host.TryCompareGuestWords(addresses, lengths, BitConverter.GetBytes(0x0BAD0BAD_0BAD0BADUL)));
+            Assert.True(host.TryReadCleanGuestWord(TableAddress, out var clean));
+            Assert.Equal(0xC0FFEE11u, clean);
+        }
+        finally
+        {
+            assumptions = concurrent.EndConcurrentResolve();
+            if (!overlayReads)
+            {
+                concurrent.ReleaseAssumptions(assumptions);
+            }
+        }
+
+        try
+        {
+            // The owned answers are dropped, as for a copy read; the take stands while nothing is written over the word.
+            Assert.DoesNotContain(((MetalRenderHost.ConcurrentAssumptions)assumptions).Answers, answer => answer.Owned);
+            Assert.True(concurrent.IsStillCurrent(assumptions));
+
+            // The worker reads the same bytes, without waiting for the write to land.
+            Assert.True(host.TryReadCleanGuestWord(TableAddress, out var worker));
+            Assert.Equal(0xC0FFEE11u, worker);
+            Assert.True(host.CompletedSerial < serial, "the worker's clean read waited for the GPU");
+
+            // A store recorded after the resolution began over the word is the draw's value instead: refused.
+            host.NoteGuestMemoryWrite(TableAddress, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
+            Assert.False(concurrent.IsStillCurrent(assumptions));
+        }
+        finally
+        {
+            concurrent.ReleaseAssumptions(assumptions);
+        }
+
+        host.FlushAndWaitForGpu();
+        Assert.Equal(0xC0FFEE11u, rig.ReadBacking32(TableAddress));
+        Assert.Equal(0xC0FFEE22u, rig.ReadBacking32(TableAddress + 4));
+    }
+
     [Fact]
     public void AGpuWriteRecordedAfterTheOwedBytesIsWhatAReadWaitsFor()
     {
