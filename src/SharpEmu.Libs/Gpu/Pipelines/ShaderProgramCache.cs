@@ -779,6 +779,7 @@ internal sealed partial class ShaderProgramCache
         ComputeRunsOn32LaneSubgroups = options?.ComputeInfo is { } compute && _host.ComputeRunsOn32LaneSubgroups(compute),
         DrawParameters = _host.ShaderDrawParametersSupported,
         RuntimeImageSwizzles = _host.RuntimeImageSwizzlesSupported,
+        PixelSubgroupArithmetic = _host.PixelSubgroupArithmetic,
     };
 
     // What the code bytes held when they failed, and any command-processor write into
@@ -3077,6 +3078,7 @@ internal sealed partial class ShaderProgramCache
         public bool ClipDistanceEnabled => flags.ClipDistance;
         public bool ShaderDrawParametersSupported => flags.DrawParameters;
         public bool RuntimeImageSwizzlesSupported => flags.RuntimeImageSwizzles;
+        public bool PixelSubgroupArithmetic => flags.PixelSubgroupArithmetic;
         public RenderHostLimits Limits => default;
         public GpuSampleCount NoAttachmentSampleCounts => default;
 

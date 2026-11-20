@@ -172,6 +172,8 @@ internal sealed partial class MetalRenderHost :
         _relay = relay;
         PerVertexPixelInputsSupported = SupportsApple10Features(device);
         DepthBoundsTestSupported = SupportsApple10Features(device);
+        PixelSubgroupArithmetic = PixelSubgroupArithmeticRequested && GraphicsSubgroupOperationsEnabled &&
+            SupportsSimdgroupReductions(device);
         GuestPixelFormats.NarrowSrgbFormats = SupportsNarrowSrgb(device);
         _sharedEvent = MetalNative.Send(device, SelNewSharedEvent);
         if (_sharedEvent == 0)
@@ -335,6 +337,26 @@ internal sealed partial class MetalRenderHost :
     public bool RuntimeImageSwizzlesSupported => PrewarmRuntimeImageSwizzles;
 
     public GpuSampleCount NoAttachmentSampleCounts => GpuSampleCount.Count1Bit;
+
+    // A pixel shader's wave32 row scan read at lane 15 or 31 becomes a SIMD-group reduction over the row
+    // (Gen5MslTranslator.WaveReductions): a fragment simdgroup can hold only some of the guest wave's lanes, and a
+    // row with none of them read another row's scan. The translator emits simd_sum/min/max/and/or/xor, which MSL
+    // offers fragment functions from Metal 2.1 (MSL spec 6.10.2) and the feature set tables list as "SIMD-scoped
+    // reduction operations" for Apple7 and later; pixel shaders have real lanes only with graphics subgroups on.
+    // SHARPEMU_METAL_PIXEL_SUBGROUP_ARITHMETIC=0 keeps the scan's own lane reads.
+    public bool PixelSubgroupArithmetic { get; }
+
+    internal static readonly bool PixelSubgroupArithmeticRequested =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_PIXEL_SUBGROUP_ARITHMETIC") != "0";
+
+    private const nint GpuFamilyApple7 = 1007;
+
+    private static bool SupportsSimdgroupReductions(nint device)
+    {
+        var supportsFamily = MetalNative.Selector("supportsFamily:");
+        return MetalNative.SendBool(device, MetalNative.Selector("respondsToSelector:"), supportsFamily) &&
+            MetalNative.SendBool(device, supportsFamily, GpuFamilyApple7);
+    }
 
     // Per-vertex pixel inputs are MSL 4.0's metal::vertex_value (macOS 26). The feature set
     // tables list "pre-raster per-vertex values" for Apple10 (M5) only; an M4 compiles the
