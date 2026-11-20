@@ -30,7 +30,8 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// </summary>
 internal static class MetalStableImageLimits
 {
-    internal static readonly bool Enabled =
+    /// <summary>The switch, read once; tests set it to compare both policies in one process.</summary>
+    internal static bool Enabled { get; set; } =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_STABLE_IMAGE_BINDINGS") != "0";
 
     internal const uint TexturesPerStage = 1_000_000;
