@@ -57,6 +57,8 @@ public sealed class BufferResource
     public bool Read { get; set; }
     public bool Written { get; set; }
     public bool Atomic { get; set; }
+    // A load or a store through the buffer that is not an atomic: without one, every access is an atomic.
+    public bool PlainAccess { get; set; }
     public bool Formatted { get; set; }
     public bool Scalar { get; set; }
 

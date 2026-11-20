@@ -36,7 +36,9 @@ public readonly record struct BufferResourceInfo(
     uint MaxByteExtent,
     // The specialization's packed stride word (BufferResource.PackedStride): the executor matches a known write's
     // descriptor against it. Zero for a program the SPIR-V translator compiled with strides in shader data.
-    uint PackedStride = 0);
+    uint PackedStride = 0,
+    // Every access the program makes through the buffer is an atomic (BufferResource.PlainAccess unset).
+    bool AtomicOnly = false);
 
 // How a compiled program uses one image resource.
 public readonly record struct ImageResourceInfo(ImageResourceClass Class, bool Written);

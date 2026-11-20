@@ -1094,6 +1094,7 @@ public sealed partial class ResourceTracker
         resource.Read |= !write || atomic;
         resource.Written |= write;
         resource.Atomic |= atomic;
+        resource.PlainAccess |= !atomic;
         resource.Formatted |= memory.Formatted;
         resource.Scalar |= memory.Kind == MemoryResourceKind.ScalarBuffer;
     }
