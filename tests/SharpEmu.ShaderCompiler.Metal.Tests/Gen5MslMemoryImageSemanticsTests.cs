@@ -316,13 +316,18 @@ kernel void buffer_offset_test(device uint* b [[buffer(0)]], uint t [[thread_pos
     // ---- S_MEMTIME / S_MEMREALTIME and SMEM cache maintenance ----
 
     [Theory]
-    [InlineData(0x24u)] // s_memtime
-    [InlineData(0x25u)] // s_memrealtime
-    public void ShaderClockReadsAreNonZeroAndAdvanceAcrossACacheInvalidate(uint opcode)
+    [InlineData(0x24u, true)] // s_memtime
+    [InlineData(0x25u, true)] // s_memrealtime
+    [InlineData(0x24u, false)]
+    [InlineData(0x25u, false)]
+    public void ShaderClockReadsAreNonZeroAndAdvanceAcrossACacheInvalidate(uint opcode, bool wideStep)
     {
         // MSL has no shader clock, so the 64-bit counter advances on every read: a later
-        // read is larger, never the hardcoded zero a missing clock would leave.
-        var fixture = new Gen5ComputeFixture($"smem-clock-{opcode:X2}",
+        // read is larger, never the hardcoded zero a missing clock would leave. The wide step
+        // (default) moves it 2^32 + 1 per read, as upstream's SPIR-V fallback moves its high
+        // dword: a wait on the 64-bit difference ends at the next read, one on the low dword
+        // still sees it move by one. SHARPEMU_METAL_SHADER_CLOCK_STEP=0 steps by one.
+        var fixture = new Gen5ComputeFixture($"smem-clock-{opcode:X2}-{wideStep}",
         [
             0xF4000000u | opcode << 18 | 4u << 6, 0u, // s_memtime s[4:5]
             0xF4800000u, 0u,                          // s_dcache_inv
@@ -332,13 +337,19 @@ kernel void buffer_offset_test(device uint* b [[buffer(0)]], uint t [[thread_pos
             0x7E060204,                               // v_mov_b32 v3, s4
             0x7E080206,                               // v_mov_b32 v4, s6
             0x7E0A0207,                               // v_mov_b32 v5, s7
+            0x7E0C0205,                               // v_mov_b32 v6, s5
             0xE0700000, 0x80020300,                   // buffer_store_dword v3, off, s[8:11], 0
             0xE0700004, 0x80020400,                   // buffer_store_dword v4, off, s[8:11], 0 offset:4
             0xE0700008, 0x80020500,                   // buffer_store_dword v5, off, s[8:11], 0 offset:8
+            0xE070000C, 0x80020600,                   // buffer_store_dword v6, off, s[8:11], 0 offset:12
             SEndpgm,
         ], 8, 16);
-        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        var before = Gen5MslTranslator.StandInClockPrograms;
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture,
+            options: Gen5MslCodegenOptions.FromEnvironment with { ShaderClockWideStep = wideStep });
         Assert.Contains("sharpemu_shader_clock", shader.Source);
+        Assert.Equal(wideStep, shader.Source.Contains("sharpemu_shader_clock += 0x100000001ul;", StringComparison.Ordinal));
+        Assert.True(Gen5MslTranslator.StandInClockPrograms > before);
         if (!RequireDevice()) return;
 
         Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError),
@@ -347,9 +358,15 @@ kernel void buffer_offset_test(device uint* b [[buffer(0)]], uint t [[thread_pos
             new byte[PushData.ByteSize], shader.ArgumentLayout!, 1, out var result, out var runError), runError);
         var first = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(0));
         var second = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(4));
+        var secondHigh = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(8));
+        var firstHigh = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(12));
         Assert.NotEqual(0u, first);
         Assert.True(second > first, $"{second} <= {first}");
-        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(8)));
+        Assert.Equal(1u, second - first);
+        // The 64-bit difference of the two reads: 2^32 + 1 with the wide step, which ends any wait for fewer
+        // than 2^32 ticks; 1 without it.
+        var difference = (((ulong)secondHigh << 32) | second) - (((ulong)firstHigh << 32) | first);
+        Assert.Equal(wideStep ? 0x1_0000_0001ul : 1ul, difference);
     }
 
     // ---- image sampling: LOD clamp, A16, UNRM ----
