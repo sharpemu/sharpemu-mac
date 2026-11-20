@@ -887,7 +887,8 @@ internal static class Gen5ComputeFixtures
         uint floatMode = ShaderCompileRequest.DefaultFloatMode, bool dx10Clamp = true, bool pixelGuestWave32 = false,
         uint meshPerVertexParameterMask = 0, IReadOnlyList<uint>? vertexInterpolants = null,
         Gen5TessellationLaunch? tessellation = null, bool pixelEarlyDepth = false, bool supportsDrawParameters = false,
-        int baseVertexUserData = -1, int startInstanceUserData = -1, bool? graphicsPartialSubgroupLanes = null)
+        int baseVertexUserData = -1, int startInstanceUserData = -1, bool? graphicsPartialSubgroupLanes = null,
+        bool subgroupArithmetic = false)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, userDataBase, UserDataCount,
             excludedUserDataRegisters: excludedUserDataRegisters);
@@ -937,6 +938,7 @@ internal static class Gen5ComputeFixtures
             // Unset keeps the request's own default (SHARPEMU_GRAPHICS_PARTIAL_LANES).
             GraphicsPartialSubgroupLanes = graphicsPartialSubgroupLanes ??
                 new ShaderCompileRequest(plan, resources, layout).GraphicsPartialSubgroupLanes,
+            SubgroupArithmetic = subgroupArithmetic,
         };
     }
 
