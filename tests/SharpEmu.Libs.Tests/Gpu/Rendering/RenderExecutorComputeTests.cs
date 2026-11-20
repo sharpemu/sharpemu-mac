@@ -210,8 +210,10 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [Fact]
     public void LinkedProgram_StillCompilingAfterTheRecordThreshold_IsRecordedSlowOnce()
     {
+        // The record threshold is 50 times the wait: the first dispatch returns before it even when a loaded machine
+        // stretches the 20 ms wait several times over (a CI runner took over 100 ms for it).
         _executor.LinkedCompileWait = System.Diagnostics.Stopwatch.Frequency / 50;
-        _executor.SlowLinkedCompileRecordTicks = System.Diagnostics.Stopwatch.Frequency / 10;
+        _executor.SlowLinkedCompileRecordTicks = System.Diagnostics.Stopwatch.Frequency;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _pipelines.PendingComputeCompletion = completion.Task;
         var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1239, Bindings = new BindingLayout { CallTargetCount = 1 } };
@@ -220,7 +222,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
         AssertNotDispatched();
         Assert.Empty(_pipelines.RecordedLinkedCompiles);
 
-        Thread.Sleep(150);
+        Thread.Sleep(1050);
         _executor.Dispatch(6, Banks(), 4, 2, 1, 0x41);
         _executor.Dispatch(7, Banks(), 4, 2, 1, 0x41);
         AssertNotDispatched();
