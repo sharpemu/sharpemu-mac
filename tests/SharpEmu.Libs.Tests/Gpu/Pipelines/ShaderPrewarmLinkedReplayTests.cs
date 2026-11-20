@@ -118,6 +118,43 @@ public sealed class ShaderPrewarmLinkedReplayTests : IDisposable
             replay.Program.Instructions.Select(instruction => instruction.Control));
     }
 
+    // A host with the bindless heap (Metal's MetalShaderPrewarm, through ShaderPrewarmCompiler) links its run-time record
+    // callers under the heap policy, which the record keeps: the replay through the shared prewarm entry point translates
+    // the same request when it passes the host's policy, and refuses the record loudly under another.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AHeapLinkedRecordReplaysThroughThePrewarmEntryPointUnderTheHostsPolicy(bool callMarks)
+    {
+        using var fatal = new FatalScope();
+        ShaderCompileRequest runtime;
+        using (var list = Open())
+        {
+            var guest = CreateGuest(list, linked: true);
+            guest.Host.SupportsBindlessHeap = true;
+            guest.Host.RuntimeCallRecordsSupported = true;
+            guest.Host.CallMarksSupported = callMarks;
+            UseIsolatedCallUnion(guest, withCallee: true);
+            Compile(guest, linked: true);
+            runtime = Assert.Single(guest.Compiler.Requests);
+        }
+
+        using var restored = Open();
+        var (record, code) = Assert.Single(restored.LoadedComputes());
+        Assert.True(record.Linked?.BindlessHeap);
+        var compiler = new FakeShaderCompiler(CompileSpirv);
+        Assert.True(ShaderPrewarmCompiler.TryCompilePrewarm(record, code, compiler, false, true, false,
+            out _, out var layout, out var error, bindlessHeap: true), error);
+        Assert.Equal(runtime.Bindings, layout);
+        var replay = Assert.Single(compiler.Requests);
+        Assert.Equal(runtime.Program.Instructions.Select(instruction => instruction.Control),
+            replay.Program.Instructions.Select(instruction => instruction.Control));
+
+        Assert.False(ShaderPrewarmCompiler.TryCompilePrewarm(record, code, new FakeShaderCompiler(CompileSpirv), false, true, false,
+            out _, out _, out error));
+        Assert.Contains("binding policy", error, StringComparison.Ordinal);
+    }
+
     private void UseIsolatedCallUnion(PipelineTestGuest guest, bool withCallee)
     {
         // Runtime linking loads kept callees before its first compile. Inject a store under this test's directory,

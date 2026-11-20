@@ -854,7 +854,10 @@ internal static class MetalShaderPrewarm
                 out var compiled,
                 out _,
                 out var error,
-                runtimeImageSwizzles: MetalRenderHost.PrewarmRuntimeImageSwizzles))
+                runtimeImageSwizzles: MetalRenderHost.PrewarmRuntimeImageSwizzles,
+                // As the live dispatch plans it (IShaderPipelineHost.SupportsBindlessHeap): a linked record holds the
+                // heap policy it was linked with and is refused under another.
+                bindlessHeap: MetalRenderHost.BindlessHeapEnabled))
         {
             NoteFailure(record, error);
             return;
