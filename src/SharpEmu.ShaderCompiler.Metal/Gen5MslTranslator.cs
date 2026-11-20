@@ -2441,14 +2441,23 @@ public static partial class Gen5MslTranslator
         private const string ShaderClockName = "sharpemu_shader_clock";
 
         // S_MEMTIME / S_MEMREALTIME write a 64-bit counter to the SDATA pair. A Metal shader
-        // has no clock to read: MSL declares none, and the AGX compiler fails the pipeline
-        // on llvm.readcyclecounter (__builtin_readcyclecounter; checked on an M4, macOS 27).
-        // The stand-in is the invocation's own tick counter, advanced by one on every read of
-        // either instruction: a read returns more than every earlier read in the invocation,
-        // so a delta between two reads is positive and a wait for the counter to pass a mark
-        // ends. It counts reads, not time, and is not comparable between invocations or with
-        // the 100 MHz reference clock the command processor's timestamps report. Every lane
-        // of a wave runs the same scalar instructions, so the value is wave-uniform.
+        // has no clock to read: MSL declares none (MSL 4.1 has no clock, timer or cycle-count
+        // function), and the AGX compiler fails the pipeline on llvm.readcyclecounter
+        // (__builtin_readcyclecounter; checked on an M4, macOS 27). Upstream reads
+        // OpReadClockKHR at device scope where Vulkan has shaderDeviceClock
+        // (IShaderPipelineHost.ShaderDeviceClockEnabled stays false on Metal).
+        // The stand-in is the invocation's own tick counter, advanced on every read of either
+        // instruction before it is stored: a read returns more than every earlier read in the
+        // invocation, so a delta between two reads is positive and a wait for the counter to
+        // pass a mark ends. With ShaderClockWideStep (default) each read moves it 2^32 + 1:
+        // the high dword by one, as upstream's fallback (2^32 per read) does, so a wait on the
+        // 64-bit difference for fewer than 2^32 ticks ends at its next read; the low dword by
+        // one, so a wait on the low dword alone still progresses one tick per read. It counts
+        // reads, not time: it is not comparable between invocations or with the 100 MHz
+        // reference clock the command processor's timestamps report, and a guest that
+        // measures elapsed time with it measures read counts. Every lane of a wave runs the
+        // same scalar instructions, so the value is wave-uniform. Each program translated
+        // with it is counted (StandInClockPrograms) and logged once per shader hash.
         private bool TryEmitShaderClock(Gen5ShaderInstruction instruction, out string error)
         {
             error = string.Empty;
@@ -2458,10 +2467,14 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            Line($"{ShaderClockName} += 1ul;");
+            Line(_options.ShaderClockWideStep
+                ? $"{ShaderClockName} += {ShaderClockWideStepLiteral};"
+                : $"{ShaderClockName} += 1ul;");
             StoreScalar64(low.Value, ShaderClockName);
             return true;
         }
+
+        private const string ShaderClockWideStepLiteral = "0x100000001ul";
 
         private bool TryEmitGlobalMemory(
             Gen5ShaderInstruction instruction,
