@@ -31,6 +31,21 @@ public sealed class ResourceTrackerTests
         Assert.Equal(wide, image.Atomic64);
     }
 
+    // A buffer accessed only by atomics has no plain access; a load beside the atomic gives it one.
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void ABufferWithOnlyAtomicsHasNoPlainAccess(bool load, bool plain)
+    {
+        var plan = load
+            ? Extract(Program(BufferAtomicAdd(0, 0), BufferLoad(8, 0, 4), EndProgram(16)))
+            : Extract(Program(BufferAtomicAdd(0, 0), EndProgram(8)));
+
+        var buffer = Assert.Single(plan.Info.Buffers);
+        Assert.True(buffer.Atomic);
+        Assert.Equal(plain, buffer.PlainAccess);
+    }
+
     // A descriptor word that 40 branches each change on both sides is a web with 2^40 paths. Planning and evaluating
     // it must look at each node once: walking every path did not finish.
     [Fact]

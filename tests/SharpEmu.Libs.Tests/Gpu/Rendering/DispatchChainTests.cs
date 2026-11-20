@@ -29,6 +29,11 @@ public sealed class DispatchChainTests : IDisposable
 
     private static BufferResourceInfo Read => new(true, false, false, false, false, 4);
 
+    private static BufferResourceInfo AtomicOnly => new(true, true, true, false, false, 4, AtomicOnly: true);
+
+    // Atomics beside a load or a store of the same buffer.
+    private static BufferResourceInfo AtomicAndPlain => new(true, true, true, false, false, 4);
+
     private void Dispatch(ulong submitId, BufferResourceInfo[] buffers, uint[][] descriptors)
     {
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: buffers), buffers: descriptors));
@@ -259,6 +264,32 @@ public sealed class DispatchChainTests : IDisposable
         var words = RegisterWords.Texture(address, GuestPixelFormat.Bits11_11_10Float, 256, 256, tile: GuestTileMode.RenderTarget);
         _pipelines.Compute = ComputeProgram(new ShaderStageResources(program, new ResourceSnapshot { Images = [words] }));
         _executor.Dispatch(submitId, Banks(), 1, 1, 1, 0x41 | RenderExecutor.DispatchMayOverlapBit);
+    }
+
+    // Two marked dispatches bumping the same counters, each through atomics alone, run beside each other as on the
+    // console (SHARPEMU_DISPATCH_OVERLAP_ATOMICS_APART=0 orders them). A load of the counters after their atomics, or a
+    // buffer the shader also loads or stores, is ordered either way.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void MarkedAtomicsOnTheSameBytesStayBesideEachOther(bool apart)
+    {
+        var saved = DispatchChain.OverlapAtomicsApart;
+        DispatchChain.OverlapAtomicsApart = apart;
+        try
+        {
+            DispatchMarked(1, [AtomicOnly], [BufferDescriptor(BufferA, 4, 16)]);
+            DispatchMarked(2, [AtomicOnly], [BufferDescriptor(BufferA + 0x10, 4, 4)]);
+            DispatchMarked(3, [Read], [BufferDescriptor(BufferA, 4, 16)]);
+            DispatchMarked(4, [AtomicAndPlain], [BufferDescriptor(BufferB, 4, 16)]);
+            DispatchMarked(5, [AtomicAndPlain], [BufferDescriptor(BufferB + 0x10, 4, 4)]);
+
+            Assert.Equal([true, apart, false, true, false], _host.DispatchOverlaps);
+        }
+        finally
+        {
+            DispatchChain.OverlapAtomicsApart = saved;
+        }
     }
 
     [Fact]
