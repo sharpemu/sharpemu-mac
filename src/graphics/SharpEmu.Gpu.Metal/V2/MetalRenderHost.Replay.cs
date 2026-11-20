@@ -52,9 +52,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// </list>
 /// A draw is also refused when the render pass it was sealed in has ended (upstream's scope rule): binding state is
 /// re-sent to whatever encoder is open, but a pass end can land copies and write-backs the captured state does not
-/// see. The item sequence counts the command thread's items (MetalRenderHost.CommandThread.cs): a batch boundary or
-/// relay commands between two items break the chain, and the slice mode (SHARPEMU_METAL_V2_COMMAND_THREAD=0) has
-/// no sequence, so nothing replays there.
+/// see. The item sequence counts the command thread's items (MetalRenderHost.CommandThread.cs) and the relay commands
+/// the worker ran: a relay command between two items breaks the chain. The slice mode
+/// (SHARPEMU_METAL_V2_COMMAND_THREAD=0) has no sequence, so nothing replays there.
 ///
 /// Replay lives wholly in the GPU process: the shared engine and this host both run there (SplitGpuHost composes
 /// MetalV2Backend in process B and runs the submitted command streams itself), so nothing of it crosses the split.
@@ -72,7 +72,7 @@ internal sealed partial class MetalRenderHost
     /// </summary>
     internal Action<bool>? ReplayProbe { get; set; }
 
-    // Moves with every command-thread item, every relay run between items and every batch (MetalRenderHost.CommandThread.cs).
+    // Moves when a command-thread item ends (MetalRenderHost.CommandThread.cs); see CurrentItemSequence.
     private long _replayItemSequence;
 
     // PrepareBindings calls per stage kind: a stage object is the captured one only while its count stands.
@@ -220,6 +220,9 @@ internal sealed partial class MetalRenderHost
     internal (long Draws, long Dispatches, long DispatchesRebound) ReplayCounts =>
         (_drawReplaysServed, _dispatchReplaysServed, _dispatchReplaysRebound);
 
+    /// <summary>Whether a draw (dispatch) is sealed and captured, for tests.</summary>
+    internal bool ReplaySealed(bool dispatch) => (dispatch ? _dispatchReplay : _drawReplay).Sealed;
+
     /// <summary>A refusal count by name (capture refusals and replay misses of draws or dispatches), for tests.</summary>
     internal long ReplayCount(bool dispatch, string name)
     {
@@ -260,8 +263,13 @@ internal sealed partial class MetalRenderHost
         return text;
     }
 
+    // The command-thread items that ended plus the relay commands the worker ran: two items are consecutive only when
+    // nothing another thread posted ran between them. What else the worker does between two batches either moves
+    // what the replay checks (a commit: the command buffer) or touches no binding (the counter report).
     public long CurrentItemSequence =>
-        (DrawReplayEnabled || DispatchReplayEnabled) && UsesCommandThread && _commandThread is not null ? _replayItemSequence : 0;
+        (DrawReplayEnabled || DispatchReplayEnabled) && UsesCommandThread && _commandThread is not null
+            ? 1 + _replayItemSequence + _relay.CommandsRun
+            : 0;
 
     /// <summary>
     /// Always 0. Upstream's buffer cache merges and unregisters buffer owners, retiring a binding made earlier in the

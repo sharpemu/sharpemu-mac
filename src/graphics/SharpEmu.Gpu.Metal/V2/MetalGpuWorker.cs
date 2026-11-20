@@ -112,6 +112,14 @@ internal sealed class MetalGpuWorkerRelay : IGpuQueueRelay
         return true;
     }
 
+    private long _commandsRun;
+
+    /// <summary>
+    /// Relay commands the worker has run so far. Read on the worker: a command that ran between two items breaks
+    /// draw and dispatch replay's item chain (MetalRenderHost.Replay.cs).
+    /// </summary>
+    internal long CommandsRun => _commandsRun;
+
     public void RunPendingCommands()
     {
         if (!IsGpuQueueThread)
@@ -128,6 +136,7 @@ internal sealed class MetalGpuWorkerRelay : IGpuQueueRelay
                 Interlocked.Decrement(ref _pendingCount);
             }
 
+            _commandsRun++;
             command();
         }
     }

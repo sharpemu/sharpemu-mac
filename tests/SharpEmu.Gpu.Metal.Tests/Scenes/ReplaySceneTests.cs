@@ -210,31 +210,29 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
         const uint green = 0xFF00FF00;
         var texture = SolidTexture(rig, red);
         var stripes = new Stripes(rig);
-        var calls = 0;
+        var probed = false;
         rig.Host.ReplayProbe = dispatch =>
         {
-            if (!dispatch && ++calls == 2)
+            // Once a draw was replayed, the next sealed one finds its texture rewritten.
+            if (!dispatch && !probed && rig.Host.ReplayCounts.Draws >= 1 && rig.Host.ReplaySealed(false))
             {
-                var before = rig.Host.ImageCache.Epochs.Binding;
+                probed = true;
                 FillTexture(rig, texture, green);
                 rig.Host.ImageCache.InvalidateMemory(texture, TextureBytes);
-                Output.WriteLine($"epoch {before} -> {rig.Host.ImageCache.Epochs.Binding}");
             }
         };
         var pm4 = new ScenePm4();
-        for (var stripe = 0; stripe < 4; stripe++)
+        for (var stripe = 0; stripe < 8; stripe++)
         {
-            stripes.Draw(pm4, stripe * 4, stripe * 4 + 4, Sample, TextureUserData(texture));
+            stripes.Draw(pm4, stripe * 2, stripe * 2 + 2, Sample, TextureUserData(texture));
         }
 
         rig.Submit(pm4);
         Report(rig, "texture written");
-        // Stripes 0 and 1 are not looked at: the CPU rewrote the texels under GPU work that was not finished.
-        AssertAbgr("stripe 2 (refused, full)", stripes.Pixel(10), green);
-        AssertAbgr("stripe 3", stripes.Pixel(14), green);
-        Assert.True(calls >= 2, $"the host was asked for {calls} replays");
+        Assert.True(probed, "no sealed draw followed a replayed one");
+        // The stripes before the write are not looked at: the CPU rewrote the texels under unfinished GPU work.
+        AssertAbgr("last stripe", stripes.Pixel(15), green);
         Assert.True(rig.Host.ReplayCount(false, "images") >= 1, "the moved epoch did not refuse the replay");
-        Assert.True(rig.Host.ReplayCounts.Draws >= 1, "the draw before the refused one was not replayed");
         Assert.Empty(rig.Fatals);
     }
 
@@ -246,28 +244,29 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
         using var rig = CreateRig();
         if (rig is null) return;
         var stripes = new Stripes(rig);
-        var calls = 0;
+        var probed = false;
         rig.Host.ReplayProbe = dispatch =>
         {
-            if (!dispatch && ++calls == 2)
+            if (!dispatch && !probed && rig.Host.ReplayCounts.Draws >= 1 && rig.Host.ReplaySealed(false))
             {
+                probed = true;
                 rig.Host.ReadBindingMemoEnabled = false;
             }
         };
         var pm4 = new ScenePm4();
-        for (var stripe = 0; stripe < 4; stripe++)
+        for (var stripe = 0; stripe < 8; stripe++)
         {
-            stripes.Draw(pm4, stripe * 4, stripe * 4 + 4, ConstantColor, Colour(0, stripe / 4f, 1));
+            stripes.Draw(pm4, stripe * 2, stripe * 2 + 2, ConstantColor, Colour(0, stripe / 8f, 1));
         }
 
         rig.Submit(pm4);
         Report(rig, "memo off");
-        for (var stripe = 0; stripe < 4; stripe++)
+        for (var stripe = 0; stripe < 8; stripe++)
         {
-            AssertColour($"stripe {stripe}", stripes.Pixel(stripe * 4 + 2), 0, stripe / 4f, 1);
+            AssertColour($"stripe {stripe}", stripes.Pixel(stripe * 2 + 1), 0, stripe / 8f, 1);
         }
 
-        Assert.Equal(1, rig.Host.ReplayCounts.Draws);
+        Assert.True(probed, "no sealed draw followed a replayed one");
         Assert.True(rig.Host.ReplayCount(false, "buffers") >= 1, "a read binding the memo did not answer was replayed");
         Assert.True(rig.Host.ReplayCount(false, "memo_off") >= 1, "a draw was captured with the memo off");
         Assert.Empty(rig.Fatals);
@@ -281,27 +280,29 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
         using var rig = CreateRig();
         if (rig is null) return;
         var stripes = new Stripes(rig);
-        var calls = 0;
+        var probed = false;
         rig.Host.ReplayProbe = dispatch =>
         {
-            if (!dispatch && ++calls == 2)
+            if (!dispatch && !probed && rig.Host.ReplayCounts.Draws >= 1 && rig.Host.ReplaySealed(false))
             {
+                probed = true;
                 rig.Host.FlushAndWaitForGpu();
             }
         };
         var pm4 = new ScenePm4();
-        for (var stripe = 0; stripe < 4; stripe++)
+        for (var stripe = 0; stripe < 8; stripe++)
         {
-            stripes.Draw(pm4, stripe * 4, stripe * 4 + 4, ConstantColor, Colour(stripe / 4f, 1, 0.5f));
+            stripes.Draw(pm4, stripe * 2, stripe * 2 + 2, ConstantColor, Colour(stripe / 8f, 1, 0.5f));
         }
 
         rig.Submit(pm4);
         Report(rig, "flushed");
-        for (var stripe = 0; stripe < 4; stripe++)
+        for (var stripe = 0; stripe < 8; stripe++)
         {
-            AssertColour($"stripe {stripe}", stripes.Pixel(stripe * 4 + 2), stripe / 4f, 1, 0.5f);
+            AssertColour($"stripe {stripe}", stripes.Pixel(stripe * 2 + 1), stripe / 8f, 1, 0.5f);
         }
 
+        Assert.True(probed, "no sealed draw followed a replayed one");
         Assert.True(rig.Host.ReplayCount(false, "serial") >= 1, "no replay was refused across a committed command buffer");
         Assert.True(rig.Host.ReplayCounts.Draws >= 1, "the draw before the refused one was not replayed");
         Assert.Empty(rig.Fatals);
@@ -312,13 +313,15 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
         using var rig = CreateRig()!;
         rig.Host.DrawReplayEnabled = replay;
         rig.Host.DispatchReplayEnabled = replay;
-        var calls = 0;
+        var probed = probe is null;
         if (probe is not null)
         {
             rig.Host.ReplayProbe = dispatch =>
             {
-                if (dispatch && ++calls == 2)
+                // Once a dispatch was replayed, the next sealed one finds the change.
+                if (dispatch && !probed && rig.Host.ReplayCounts.Dispatches >= 1 && rig.Host.ReplaySealed(true))
                 {
+                    probed = true;
                     probe(rig);
                 }
             };
@@ -343,6 +346,7 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
         Report(rig, $"dispatch replay={replay}");
         replays = rig.Host.ReplayCounts.Dispatches;
         imagesMisses = rig.Host.ReplayCount(true, "images");
+        Assert.True(probed, "no sealed dispatch followed a replayed one");
         Assert.Empty(rig.Fatals);
         return [.. rig.Read<uint>(first, 64), .. rig.Read<uint>(second, 64)];
     }

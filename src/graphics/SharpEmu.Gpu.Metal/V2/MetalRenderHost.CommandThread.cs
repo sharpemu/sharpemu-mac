@@ -67,9 +67,6 @@ internal sealed partial class MetalRenderHost
                 Console.Error.WriteLine($"[METAL-V2][QOS] command_stream requested=UserInteractive applied={_commandThread.HasHostQos}.");
         }
 
-        // Whatever the worker did since the last batch is not an item: the first item of this one does not follow the
-        // last of the batch before (MetalRenderHost.Replay.cs).
-        _replayItemSequence++;
         var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 100;
         int ran;
         using (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Measure(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandStream))
@@ -126,14 +123,12 @@ internal sealed partial class MetalRenderHost
     // held: they change the caches it reads.
     private void RunRelayBetweenCommandItems()
     {
-        // An item ended; relay commands run between items count as one more (MetalRenderHost.Replay.cs).
+        // An item ended (MetalRenderHost.Replay.cs: CurrentItemSequence).
         _replayItemSequence++;
         if (!_relay.HasPendingCommands)
         {
             return;
         }
-
-        _replayItemSequence++;
 
         var prefetch = _translation?.Prefetch;
         prefetch?.Pause();
