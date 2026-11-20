@@ -126,7 +126,7 @@ public sealed class Gen5MslTessellationLaunchTests(ITestOutputHelper output)
         return Regex.Replace(CompileShader(stage, tessellation, supportsDrawParameters).Source, @"\b([sv])\[(\d+)\]", "$1$2");
     }
 
-    private static Gen5MslShader CompileShader(ShaderStage stage, Gen5TessellationLaunch tessellation, bool supportsDrawParameters = false)
+    internal static Gen5MslShader CompileShader(ShaderStage stage, Gen5TessellationLaunch tessellation, bool supportsDrawParameters = false)
     {
         var program = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("tessellation", EndProgram, 0, 0));
         var request = Gen5ComputeFixtures.RequestOrThrow(program, stage,

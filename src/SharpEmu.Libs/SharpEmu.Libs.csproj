@@ -31,6 +31,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <InternalsVisibleTo Include="SharpEmu.Gpu.Vulkan" />
     <!-- The Metal host opens the translation disk cache for its game (TranslationDiskCache). -->
     <InternalsVisibleTo Include="SharpEmu.Gpu.Metal" />
+    <InternalsVisibleTo Include="SharpEmu.Gpu.Metal.Tests" />
     <!-- The runtime reads internal load-progress diagnostics. -->
     <InternalsVisibleTo Include="SharpEmu.Core" />
   </ItemGroup>

@@ -75,6 +75,8 @@ them for measurements or to isolate a problem.
 | `SHARPEMU_METAL_MESHLETS` | on | `0` disables the meshlet cache. |
 | `SHARPEMU_METAL_V2_BINARY_ARCHIVE` | on | `0` disables the on-disk library and pipeline archives. |
 | `SHARPEMU_METAL_V2_BINARY_ARCHIVE_BUDGET_MB` | `8192` | Size bound of the archives on disk. |
+| `SHARPEMU_TRANSLATION_CACHE` | on | `0` stops keeping translated shaders on disk. By default each translation (MSL and its reflection) is kept in `pipeline_cache/<title ID>/metal-v2/translations`, up to 8 GiB per game, and a later session of the same build takes it from there instead of translating the program again. A new build, translator switch, device or OS uses a new folder. |
+| `SHARPEMU_SHADER_ANALYSIS_CACHE_PATH` | per game | Folder of the scalar-graph cache of shader planning. By default `pipeline_cache/<title ID>/metal-v2/analysis`; `0` turns the cache off. |
 | `SHARPEMU_METAL_V2_ASYNC_PIPELINES` | on | `0` builds pipeline states on the GPU worker thread. |
 | `SHARPEMU_METAL_V2_ASYNC_LIBRARIES` | on | `0` compiles each shader library on the thread that needs it, not on the compile pool. |
 | `SHARPEMU_METAL_V2_GRAPHICS_WAIT_OFF_CACHE` | on | A draw that cannot be left out while its pipeline compiles waits for the compile outside the shared pipeline cache's lock, so other draws' programs keep resolving. `0` builds the pipeline under the lock, as before. Only with `SHARPEMU_METAL_V2_ASYNC_GRAPHICS` on. |
