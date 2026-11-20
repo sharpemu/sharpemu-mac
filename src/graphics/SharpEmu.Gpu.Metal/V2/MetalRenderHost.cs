@@ -768,6 +768,7 @@ internal sealed partial class MetalRenderHost :
         // every submission's status is read once it has finished.
         DrainFinishedSubmissions();
         ReportStepCaps();
+        ReportCallFaults();
         RetainInFlight(_commandBuffer, serial);
         // The host's own reference on the buffer it just committed, for the wait that reads
         // its timing after this flush (or after a later call that flushed nothing). The
@@ -3280,7 +3281,9 @@ internal sealed partial class MetalRenderHost :
             RetireUploadPreludes(CompletedSerial, all: true);
             ReleaseInFlightSubmissions();
             ReportStepCaps();
+            ReportCallFaults();
             DisposeStepReport();
+            DisposeShaderCalls();
         }
         catch (Exception exception)
         {

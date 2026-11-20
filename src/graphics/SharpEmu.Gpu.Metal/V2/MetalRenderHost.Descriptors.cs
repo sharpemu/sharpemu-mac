@@ -61,6 +61,9 @@ internal sealed partial class MetalRenderHost
         public MetalGuestRange[] Buffers = [];
         public uint[] BufferLengths = [];
         public uint[] ShaderData = [];
+        // A linked program's call record table and the memory its callees read through the records (MetalRenderHost.ShaderCalls.cs).
+        public uint[] CallRecordWords = [];
+        public DeviceAddressRange[] CallRecordRanges = [];
         public ulong[] BindlessTableAddresses = [];
         // The stage's heap views as shader data (MetalRenderHost.BindlessHeap.cs), found before its images.
         public uint[] HeapViews = [];
@@ -599,6 +602,7 @@ internal sealed partial class MetalRenderHost
 
         stage.WriteDispatchThreadLimits(shaderData.AsSpan(0, shaderDwords));
         stage.WriteCallData(shaderData.AsSpan(0, shaderDwords));
+        PrepareCallRecords(prepared, program, stage);
         if (packet is not null)
         {
             RecyclePacket(packet);
@@ -1258,13 +1262,17 @@ internal sealed partial class MetalRenderHost
     private void BindDeviceAddressRanges(
         MetalStageBindings stage, ShaderResourceInfo info, ResourceSnapshot snapshot)
     {
+        // A linked program's call records add the memory their callees read through the records (PrepareCallRecords).
+        var deviceRanges = stage.CallRecordRanges.Length == 0
+            ? snapshot.DeviceAddressRanges
+            : [.. snapshot.DeviceAddressRanges, .. stage.CallRecordRanges];
         var unplanned = false;
         var declaredWrite = false;
-        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled && (stage.Program.UsesDeviceAddresses || snapshot.DeviceAddressRanges.Length != 0))
+        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled && (stage.Program.UsesDeviceAddresses || deviceRanges.Length != 0))
         {
             // An encoder running a device-address program: its reach is evaluated only when every handle is planned.
             var planned = true;
-            foreach (var range in snapshot.DeviceAddressRanges)
+            foreach (var range in deviceRanges)
             {
                 planned &= range.Planned;
             }
@@ -1273,17 +1281,17 @@ internal sealed partial class MetalRenderHost
         }
 
         BeginDeviceRangeOrdering(stage);
-        if (snapshot.DeviceAddressRanges.Length != 0 && _singleCopy is { } singleCopy)
+        if (deviceRanges.Length != 0 && _singleCopy is { } singleCopy)
         {
             // Counted, and given back, only if the program got past BeforeDeviceAddressPreparation:
             // ranges it pinned are known and cost a lookup each.
             _mappedDeviceAddressBytes ??= MappedDeviceAddressBytes;
             singleCopy.BeforeDeviceAddressProgram(
-                info.WritesDeviceAddresses, snapshot.DeviceAddressRanges, DeviceAddressMappingVersion(),
+                info.WritesDeviceAddresses, deviceRanges, DeviceAddressMappingVersion(),
                 _mappedDeviceAddressBytes, late: true);
         }
 
-        foreach (var range in snapshot.DeviceAddressRanges)
+        foreach (var range in deviceRanges)
         {
             if (!range.Planned)
             {
@@ -1344,7 +1352,7 @@ internal sealed partial class MetalRenderHost
             {
                 Console.Error.WriteLine(
                     $"[METAL-V2][BIG-WRITEBACK-RANGE] stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} h{range.Handle} " +
-                    $"base=0x{range.Base:X} size=0x{size:X}{(range.Written ? " written" : string.Empty)} ranges={snapshot.DeviceAddressRanges.Length}");
+                    $"base=0x{range.Base:X} size=0x{size:X}{(range.Written ? " written" : string.Empty)} ranges={deviceRanges.Length}");
             }
             if (!range.Written)
             {
@@ -1380,8 +1388,8 @@ internal sealed partial class MetalRenderHost
             $"device-address-unbounded-{stage.Program.Hash:X16}",
             $"A shader stores through the device-address page table with no evaluated range, so every " +
             $"later guest read waits for its submission: hash=0x{stage.Program.Hash:X16} " +
-            $"unplanned={unplanned} ranges={snapshot.DeviceAddressRanges.Length} [" +
-            string.Join(", ", snapshot.DeviceAddressRanges.Select(static range =>
+            $"unplanned={unplanned} ranges={deviceRanges.Length} [" +
+            string.Join(", ", deviceRanges.Select(static range =>
                 $"h{range.Handle} {(range.Planned ? "planned" : "unplanned")} {(range.Written ? "written" : "read")} " +
                 $"0x{range.Base:X}+0x{range.Size:X}")) + "].");
     }
@@ -1862,6 +1870,9 @@ internal sealed partial class MetalRenderHost
                 case MslArgumentFieldKind.BindlessHeapFeedback:
                     BinaryPrimitives.WriteUInt64LittleEndian(span, RequireHeapAddress(_heapFeedbackAddress, stage));
                     break;
+                case MslArgumentFieldKind.CallFaults:
+                    BinaryPrimitives.WriteUInt64LittleEndian(span, CallFaultsAddress());
+                    break;
                 case MslArgumentFieldKind.BindlessImageTables:
                     for (var index = 0; index < field.Count; index++)
                     {
@@ -2062,6 +2073,10 @@ internal sealed partial class MetalRenderHost
                 return UploadDwords(stage.ShaderData.AsSpan(0, (int)stage.Program.Bindings!.ShaderDataDwordCount));
             case DescriptorBindingKind.MipStatistics:
                 return LodStatisticsAddress();
+            case DescriptorBindingKind.CallRecords:
+                return UploadDwords(stage.CallRecordWords);
+            case DescriptorBindingKind.CallMarks:
+                return CallMarksAddress();
             default:
                 throw Fatal($"The argument layout has a pointer field of an unknown kind: kind={kind}.");
         }
@@ -2075,6 +2090,7 @@ internal sealed partial class MetalRenderHost
         DescriptorBindingKind.FlattenedResourceTable =>
             (uint)stage.StageResources.Resources.FlattenedResourceTable.Length,
         DescriptorBindingKind.ShaderData => stage.Program.Bindings!.ShaderDataDwordCount,
+        DescriptorBindingKind.CallRecords => (uint)stage.CallRecordWords.Length,
         _ => throw Fatal($"The argument layout has a word field of an unknown kind: kind={kind}."),
     };
 

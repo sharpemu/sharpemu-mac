@@ -163,6 +163,8 @@ internal sealed partial class MetalRenderHost
     private void DisposeBindlessHeap()
     {
         _heapEntries.Clear();
+        _callRecordEntries.Clear();
+        _callRecordTextures.Order.Clear();
         _heapRegionEntries.Clear();
         _heapImageViews.ReleaseIdle(ulong.MaxValue, ulong.MaxValue, static _ => { });
         _heapSamplerViews.ReleaseIdle(ulong.MaxValue, ulong.MaxValue, static _ => { });
@@ -740,7 +742,8 @@ internal sealed partial class MetalRenderHost
             var textures = new List<nint>();
             _heapTextures.Declared.Clear();
             var signature = 0UL;
-            foreach (var entry in _heapEntries.Values)
+            // The heap's records, and the call records' (MetalRenderHost.ShaderCalls.cs).
+            foreach (var entry in _heapEntries.Values.Concat(_callRecordEntries.Values))
             {
                 if (entry.Texture == 0)
                 {

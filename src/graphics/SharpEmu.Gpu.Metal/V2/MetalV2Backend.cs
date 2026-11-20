@@ -29,6 +29,9 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
 
     public string BackendName => "Metal v2";
 
+    // Linked shader calls lower to MSL (Gen5MslTranslator.ShaderCalls.cs); SHARPEMU_METAL_SHADER_CALLS=0 compiles callers alone.
+    public bool LinkedShaderCallsSupported => MetalRenderHost.ShaderCallsEnabled;
+
     /// <summary>
     /// v2 builds MTLMeshRenderPipelineDescriptor pipelines and launches
     /// drawMeshThreadgroups, so the merged ES/GS stage runs as what it is.
