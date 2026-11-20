@@ -1943,13 +1943,16 @@ public static partial class Gen5MslTranslator
             terminator = BlockTerminator.Exit("active = false;");
             var block = blocks[blockIndex];
             var instructions = _request.Program.Instructions;
+            var waveReductions = FindWaveReductions(block);
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = instructions[index];
                 var isTerminator = index == block.EndIndex - 1;
+                // A reduction's V_CNDMASK stays out of an EXEC run: its kept result is read after the run would close.
                 var inExecRun = IsExecRunInstruction(instruction) &&
                     !IsUnobservedAluInstruction(instruction) &&
-                    !(!isTerminator && CanFuseWave64ReadLanes(instruction, instructions[index + 1]));
+                    !(!isTerminator && CanFuseWave64ReadLanes(instruction, instructions[index + 1])) &&
+                    waveReductions?.ContainsKey(index) != true;
                 if (!inExecRun)
                 {
                     CloseExecRun();
@@ -2140,6 +2143,10 @@ public static partial class Gen5MslTranslator
                 else
                 {
                     EmitInterpolationRewrites(instruction.Pc);
+                    if (waveReductions is not null)
+                    {
+                        ApplyWaveReduction(waveReductions, index);
+                    }
                 }
 
                 if (isTerminator)

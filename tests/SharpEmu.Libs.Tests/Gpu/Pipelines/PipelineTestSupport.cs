@@ -98,6 +98,8 @@ internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     // Off as on Metal (IShaderPipelineHost.RuntimeImageSwizzlesSupported); a test of the Vulkan plan turns it on.
     public bool RuntimeImageSwizzlesSupported { get; set; }
 
+    public bool PixelSubgroupArithmetic { get; set; }
+
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
 
     public bool TryResolveColorOutput(uint dataFormat, uint numberType, uint componentSwap, out Gen5PixelOutputKind outputKind, out Gen5ColorComponentMapping componentMapping)

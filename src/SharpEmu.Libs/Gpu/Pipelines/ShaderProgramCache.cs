@@ -781,6 +781,7 @@ internal sealed partial class ShaderProgramCache
         RuntimeImageSwizzles = _host.RuntimeImageSwizzlesSupported,
         ComputeImageLimits = _host.ComputeImageDescriptorLimits,
         GraphicsImageLimits = _host.GraphicsImageDescriptorLimits,
+        PixelSubgroupArithmetic = _host.PixelSubgroupArithmetic,
     };
 
     // What the code bytes held when they failed, and any command-processor write into
@@ -3094,6 +3095,7 @@ internal sealed partial class ShaderProgramCache
         public bool RuntimeImageSwizzlesSupported => flags.RuntimeImageSwizzles;
         public StableImageDescriptorLimits ComputeImageDescriptorLimits => flags.ComputeImageLimits;
         public StableImageDescriptorLimits GraphicsImageDescriptorLimits => flags.GraphicsImageLimits;
+        public bool PixelSubgroupArithmetic => flags.PixelSubgroupArithmetic;
         public RenderHostLimits Limits => default;
         public GpuSampleCount NoAttachmentSampleCounts => default;
 

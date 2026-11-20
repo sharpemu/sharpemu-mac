@@ -78,7 +78,8 @@ internal sealed partial class MetalRenderHost
     internal static string TranslationSwitchStamp =>
         $"portable={(PortableBuffers ? 1 : 0)},buffer_word_constants={(BufferWordConstants ? 1 : 0)}," +
         $"draw_parameters={(DrawParameters ? 1 : 0)}," +
-        $"runtime_image_swizzle={(RuntimeImageSwizzle.Enabled ? 1 : 0)}" +
+        $"runtime_image_swizzle={(RuntimeImageSwizzle.Enabled ? 1 : 0)}," +
+        $"pixel_subgroup_arithmetic={(PixelSubgroupArithmeticRequested ? 1 : 0)}" +
         // ShaderCompileRequest.GraphicsPartialSubgroupLanes takes its default from this variable.
         (Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_PARTIAL_LANES") == "1" ? ",graphics_partial_lanes=1" : "");
 
