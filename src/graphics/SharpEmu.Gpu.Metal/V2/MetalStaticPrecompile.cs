@@ -14,8 +14,11 @@ using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Gpu.Metal.V2;
+
+
 
 /// <summary>
 /// The static shader precompile: programs the game has not drawn or dispatched yet - those
@@ -273,7 +276,10 @@ internal static class MetalStaticPrecompile
         var titleDirectory = Path.GetDirectoryName(metalDirectory)!;
         _seedPath = StaticShaderPlanner.SeedPath(SharpEmuPaths.UserPath(), _titleId);
         var records = Recorded();
-        var planner = StaticShaderPlanner.Open(titleDirectory, records, _seedPath);
+        // Predicted under this host's stable image budget, whatever budget the recorded sessions answered, so a predicted
+        // specialization is the one Translate's plan (and the session) takes.
+        var imageLimits = MetalStableImageLimits.Of(device);
+        var planner = StaticShaderPlanner.Open(titleDirectory, records, _seedPath, imageLimits);
         if (planner is null)
         {
             StaticShaderPlanner.DisableCapture();
@@ -487,7 +493,7 @@ internal static class MetalStaticPrecompile
             return;
         }
 
-        foreach (var shader in Translate(build, compiler))
+        foreach (var shader in Translate(build, compiler, MetalStableImageLimits.Of(device)))
         {
             Interlocked.Increment(ref _translated);
             var key = MetalBinaryArchive.LibraryKey(shader.Source, shader.UsesPerVertexInputs);
@@ -525,17 +531,16 @@ internal static class MetalStaticPrecompile
     }
 
     /// <summary>The MSL a build translates to, through the request builders of recorded programs.</summary>
-    internal static List<Gen5MslShader> Translate(StaticShaderBuild build, IGuestGpuBackend compiler)
+    internal static List<Gen5MslShader> Translate(StaticShaderBuild build, IGuestGpuBackend compiler,
+        StableImageDescriptorLimits stableImageLimits)
     {
         var shaders = new List<Gen5MslShader>(2);
         try
         {
             if (build.Compute is { } compute)
             {
-                if (ShaderPrewarmCompiler.TryCompilePrewarm(compute, build.ComputeCode!, compiler,
-                        MetalRenderHost.PrewarmSharedInt64Atomics, MetalRenderHost.PrewarmExecGuardElision,
-                        MetalRenderHost.PrewarmSignedZeroInfNanPreserve, out var compiled, out _, out _,
-                        runtimeImageSwizzles: MetalRenderHost.PrewarmRuntimeImageSwizzles) &&
+                if (MetalShaderPrewarm.TryCompileCompute(compute, build.ComputeCode!, compiler, stableImageLimits,
+                        out var compiled, out _) &&
                     compiled is MetalCompiledGuestShader metal)
                 {
                     shaders.Add(metal.Shader);

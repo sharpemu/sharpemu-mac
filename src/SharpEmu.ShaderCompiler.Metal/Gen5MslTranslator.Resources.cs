@@ -142,8 +142,34 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        NoteStandInClock(request);
         Gen5MslDump.Write(request, shader);
         return true;
+    }
+
+    private static long _standInClockPrograms;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> StandInClockHashes = new();
+
+    /// <summary>Programs translated with the stand-in shader clock (TryEmitShaderClock): MSL has no clock, so their
+    /// S_MEMTIME / S_MEMREALTIME count reads, not time.</summary>
+    public static long StandInClockPrograms => Interlocked.Read(ref _standInClockPrograms);
+
+    // A program that reads the guest's clock gets a counter of its own reads instead: counted, and logged once per hash,
+    // so a title whose timing depends on it says so.
+    private static void NoteStandInClock(ShaderCompileRequest request)
+    {
+        if (!request.Program.Instructions.Any(static instruction => instruction.Opcode is "SMemtime" or "SMemrealtime"))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _standInClockPrograms);
+        if (StandInClockHashes.TryAdd(request.Hash, 0))
+        {
+            Console.Error.WriteLine(
+                $"[MSL][WARN][SHADER_CLOCK] 0x{request.Hash:X16} reads S_MEMTIME/S_MEMREALTIME: Metal has no shader clock, " +
+                "so each read advances a per-invocation counter (reads, not time).");
+        }
     }
 
     private sealed partial class CompilationContext

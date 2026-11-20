@@ -53,6 +53,17 @@ public sealed class TranslationDiskCacheTests : IDisposable
     public void OnlyTheTranslatorsAddressSwitchesPutTheAddressInTheKey(string name, bool selects) =>
         Assert.Equal(selects, TranslationDiskCache.AddressSelectsTranslation(name));
 
+    // A translation made with the row-scan reductions (PixelSubgroupArithmetic) is never served to a request without
+    // them, or the other way: the key writes every request field, SubgroupArithmetic among them.
+    [Fact]
+    public void TheKeyHoldsTheRequestsSubgroupArithmetic()
+    {
+        var properties = (System.Reflection.PropertyInfo[])typeof(TranslationDiskCache)
+            .GetField("RequestProperties", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .GetValue(null)!;
+        Assert.Contains(properties, property => property.Name == nameof(SharpEmu.ShaderCompiler.ShaderCompileRequest.SubgroupArithmetic));
+    }
+
     [Fact]
     public void AStoredTranslationLoadsAsTheSameShader()
     {

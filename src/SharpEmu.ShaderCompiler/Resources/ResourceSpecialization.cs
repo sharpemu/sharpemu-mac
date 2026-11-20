@@ -158,9 +158,11 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     };
 
     // The specialization of a plan before any draw: raw buffers and the tracked image classes.
-    public static ResourceSpecialization Default(ShaderResourceInfo info) => new()
+    // stableImageBindings: the plan's image binding policy (ShaderResourcePlan.StableImageBindings), which ApplyTo checks.
+    public static ResourceSpecialization Default(ShaderResourceInfo info, bool stableImageBindings = false) => new()
     {
         BaseBufferCount = info.Buffers.Count,
+        StableImageBindings = stableImageBindings,
         Buffers = info.Buffers.Select(_ => new BufferSpecialization(0, DescriptorConstants.InvalidFormat, DescriptorConstants.IdentityDestinationSelect)).ToList(),
         Images = info.Images.Select(image => new ImageSpecialization(
             image.NumericClass == ImageNumericClass.Unsupported

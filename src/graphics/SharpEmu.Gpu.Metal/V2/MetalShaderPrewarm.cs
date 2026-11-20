@@ -336,6 +336,7 @@ internal static class MetalShaderPrewarm
             "pipeline_cache", SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()), "metal-v2");
         var compiler = GuestGpu.Current;
         var stamp = Stamp(compiler, device);
+        _stableImageLimits = MetalStableImageLimits.Of(device);
         // Seeded before the compute prewarm or the game plans a shader.
         MetalDeviceDataLoadsStore.Open(directory, stamp);
         // Loaded before the gate lets the game go, so every module the game creates
@@ -564,8 +565,16 @@ internal static class MetalShaderPrewarm
     // slots, where the module the game creates for it takes it from.
     private static void PrewarmGraphicsLibrary(in GraphicsPrewarmList.Item item, IGuestGpuBackend compiler)
     {
-        if (!ShaderPrewarmCompiler.TryCompileGraphicsPrewarm(item, compiler, out var compiled, out var error))
+        if (!ShaderPrewarmCompiler.TryCompileGraphicsPrewarm(
+                item, compiler, _stableImageLimits, out var compiled, out var error, out var stale))
         {
+            if (stale)
+            {
+                // Recorded by a session under the other image binding policy; the session records this one's anew.
+                Interlocked.Increment(ref _graphicsStale);
+                return;
+            }
+
             NoteGraphicsFailure(error);
             return;
         }
@@ -583,6 +592,12 @@ internal static class MetalShaderPrewarm
             Interlocked.Increment(ref _graphicsCompiled);
         }
     }
+
+    // The stable image budget this start's live host answers (MetalStableImageLimits.Of of the prewarm's device).
+    private static SharpEmu.ShaderCompiler.Resources.StableImageDescriptorLimits _stableImageLimits;
+
+    // Graphics records made under another stable image budget, not translated.
+    private static int _graphicsStale;
 
     private static void NoteGraphicsFailure(string error)
     {
@@ -668,6 +683,7 @@ internal static class MetalShaderPrewarm
         return Precompile.Complete(
             $"computes={Volatile.Read(ref _compiled)} compute_failed={Volatile.Read(ref _failed)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
+            $"graphics_stale={Volatile.Read(ref _graphicsStale)} " +
             $"libraries_held={MetalLibraryPrewarm.HeldLibraries} {MetalStaticPrecompile.Describe()}");
     }
 
@@ -860,6 +876,8 @@ internal static class MetalShaderPrewarm
             // The switches decide the MSL as the translators do; what is stored under this stamp
             // and not keyed by source text (the static precompile's finished units) follows them.
             MetalRenderHost.TranslationSwitchStamp,
+            // The stable image budget decides which specializations a session asks for (MetalStableImageLimits).
+            MetalStableImageLimits.StampPart(MetalStableImageLimits.Of(device)),
             MetalNative.ReadNsString(MetalNative.Send(device, SelName)),
             RuntimeInformation.OSDescription);
 
@@ -868,26 +886,37 @@ internal static class MetalShaderPrewarm
     public static string Identity(MetalCompiledGuestShader shader) =>
         shader.PayloadHash.ToString("X16", System.Globalization.CultureInfo.InvariantCulture);
 
+    /// <summary>
+    /// A recorded compute program translated as the live host translates it: the compile flags the host answers
+    /// (MetalRenderHost.Prewarm*) and its stable image budget (MetalStableImageLimits.Of of the same device), so the
+    /// plan admits stable image bindings exactly when the session's did and the recorded specialization applies.
+    /// </summary>
+    internal static bool TryCompileCompute(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
+        SharpEmu.ShaderCompiler.Resources.StableImageDescriptorLimits stableImageLimits,
+        out IGuestCompiledShader? compiled, out string error) =>
+        ShaderPrewarmCompiler.TryCompilePrewarm(
+            record,
+            code,
+            compiler,
+            MetalRenderHost.PrewarmSharedInt64Atomics,
+            MetalRenderHost.PrewarmExecGuardElision,
+            MetalRenderHost.PrewarmSignedZeroInfNanPreserve,
+            out compiled,
+            out _,
+            out error,
+            stableImageLimits: stableImageLimits,
+            runtimeImageSwizzles: MetalRenderHost.PrewarmRuntimeImageSwizzles,
+            // As the live dispatch plans it (IShaderPipelineHost.SupportsBindlessHeap): a linked record holds the
+            // heap policy it was linked with and is refused under another.
+            bindlessHeap: MetalRenderHost.BindlessHeapEnabled);
+
     private static void PrewarmComputePipeline(
         ComputePrewarmRecord record,
         ShaderCodeCapture code,
         IGuestGpuBackend compiler,
         nint device)
     {
-        if (!ShaderPrewarmCompiler.TryCompilePrewarm(
-                record,
-                code,
-                compiler,
-                MetalRenderHost.PrewarmSharedInt64Atomics,
-                MetalRenderHost.PrewarmExecGuardElision,
-                MetalRenderHost.PrewarmSignedZeroInfNanPreserve,
-                out var compiled,
-                out _,
-                out var error,
-                runtimeImageSwizzles: MetalRenderHost.PrewarmRuntimeImageSwizzles,
-                // As the live dispatch plans it (IShaderPipelineHost.SupportsBindlessHeap): a linked record holds the
-                // heap policy it was linked with and is refused under another.
-                bindlessHeap: MetalRenderHost.BindlessHeapEnabled))
+        if (!TryCompileCompute(record, code, compiler, MetalStableImageLimits.Of(device), out var compiled, out var error))
         {
             NoteFailure(record, error);
             return;
@@ -1064,6 +1093,7 @@ internal static class MetalShaderPrewarm
             $"archived={Volatile.Read(ref _archived)} " +
             $"runtime_first={Volatile.Read(ref _runtimeFirst)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
+            $"graphics_stale={Volatile.Read(ref _graphicsStale)} " +
             $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
             $"yielded_ms={Interlocked.Read(ref _yieldedTicks) * 1000 / Stopwatch.Frequency} " +
             $"runtime_compute_modules={runtime.Count} matched={matched}";

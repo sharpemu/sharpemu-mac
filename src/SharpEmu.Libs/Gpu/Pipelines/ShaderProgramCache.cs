@@ -781,6 +781,9 @@ internal sealed partial class ShaderProgramCache
         ComputeRunsOn32LaneSubgroups = options?.ComputeInfo is { } compute && _host.ComputeRunsOn32LaneSubgroups(compute),
         DrawParameters = _host.ShaderDrawParametersSupported,
         RuntimeImageSwizzles = _host.RuntimeImageSwizzlesSupported,
+        ComputeImageLimits = _host.ComputeImageDescriptorLimits,
+        GraphicsImageLimits = _host.GraphicsImageDescriptorLimits,
+        PixelSubgroupArithmetic = _host.PixelSubgroupArithmetic,
     };
 
     // What the code bytes held when they failed, and any command-processor write into
@@ -3050,14 +3053,27 @@ internal sealed partial class ShaderProgramCache
     /// </summary>
     internal static bool TryPredictSpecialization(ShaderCorpusRecord record, out ResourceSpecialization? specialization, out string error)
     {
-        specialization = TryPlanResources(record, out var info, out error) ? ResourceSpecialization.Default(info!) : null;
-        return specialization is not null;
+        specialization = null;
+        if (!TryPlan(record, out var plan, out error))
+        {
+            return false;
+        }
+
+        // The plan's image binding policy (StableImageBindings): ApplyTo refuses a specialization of the other one.
+        specialization = ResourceSpecialization.Default(plan!.Info, plan.StableImageBindings);
+        return true;
     }
 
     /// <summary>The resource tables of the record's plan.</summary>
     internal static bool TryPlanResources(ShaderCorpusRecord record, out ShaderResourceInfo? info, out string error)
     {
-        info = null;
+        info = TryPlan(record, out var plan, out error) ? plan!.Info : null;
+        return info is not null;
+    }
+
+    private static bool TryPlan(ShaderCorpusRecord record, out ShaderResourcePlan? plan, out string error)
+    {
+        plan = null;
         error = string.Empty;
         var previousThrowOnFatal = GpuFatal.ThrowOnFatal;
         GpuFatal.ThrowOnFatal = true;
@@ -3070,7 +3086,7 @@ internal sealed partial class ShaderProgramCache
             }
 
             var cache = new ShaderProgramCache(record.Code.CreateContext(), null!, new CorpusReplayHost(record.Host));
-            info = cache.CreateEntry(record.CreateSource(), options).Plan.Info;
+            plan = cache.CreateEntry(record.CreateSource(), options).Plan;
             return true;
         }
         catch (Exception exception) when (exception is ShaderProgramRejectedException or GpuFatal.AbandonedWorkException or
@@ -3101,6 +3117,9 @@ internal sealed partial class ShaderProgramCache
         public bool ClipDistanceEnabled => flags.ClipDistance;
         public bool ShaderDrawParametersSupported => flags.DrawParameters;
         public bool RuntimeImageSwizzlesSupported => flags.RuntimeImageSwizzles;
+        public StableImageDescriptorLimits ComputeImageDescriptorLimits => flags.ComputeImageLimits;
+        public StableImageDescriptorLimits GraphicsImageDescriptorLimits => flags.GraphicsImageLimits;
+        public bool PixelSubgroupArithmetic => flags.PixelSubgroupArithmetic;
         public RenderHostLimits Limits => default;
         public GpuSampleCount NoAttachmentSampleCounts => default;
 
