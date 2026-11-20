@@ -307,6 +307,44 @@ public sealed class RenderExecutorDrawTests : IDisposable
         AssertOrder("preparation_begin", "prepare_bindings", "draw_mesh 6 2 1", "preparation_end");
     }
 
+    // A backend that runs primitive shaders as mesh pipelines of its own (Metal: SupportsPrimitiveShaderMeshPipelines
+    // without MeshShadersSupported) resolves an automatic indirect primitive-shader draw as an ordinary graphics draw and
+    // hands the guest record to its own indirect draw, which launches the mesh pipeline from it on the GPU. That holds
+    // while a task-launch device is present too (MeshTaskLaunch): the draw never asks for a mesh-execution or
+    // task-launched program and never prepares an indirect mesh conversion, and its record is not read here.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AutoIndirectPrimitiveShaderDraw_OnOwnMeshPipelines_IsNeverTaskLaunched(bool taskLaunchDevice)
+    {
+        var deviceSupported = MeshTaskLaunch.DeviceSupported;
+        MeshTaskLaunch.DeviceSupported = taskLaunchDevice;
+        try
+        {
+            _pipelines.SupportsPrimitiveShaderMeshPipelines = true;
+            _host.SupportsIndirectMeshDraw = true;
+            var banks = Banks();
+            ApplyGeometryStageDraw(banks, maxVerticesOut: 3);
+            // A stage mask upstream's mesh execution path takes (RequiresMeshExecution): not a plain vertex program.
+            Assert.False(RenderExecutor.RunsPlainVertexProgram(banks.Context.ShaderStages));
+            WriteIndirectArguments(6, 2, 4, 5);
+
+            _executor.DrawAuto(1, banks, Auto(0, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments });
+
+            Assert.Contains(_pipelines.Calls, c => c.StartsWith("get_graphics_programs", StringComparison.Ordinal));
+            Assert.DoesNotContain(_pipelines.Calls, c => c.StartsWith("get_mesh_programs", StringComparison.Ordinal));
+            Assert.Null(_host.IndirectMeshRequest);
+            Assert.Equal(0, _host.GuestReads);
+            Assert.Contains(_host.Calls, c => c.StartsWith("draw_indirect", StringComparison.Ordinal));
+            Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_mesh", StringComparison.Ordinal));
+            Assert.Empty(_pipelines.UnsupportedGraphics);
+        }
+        finally
+        {
+            MeshTaskLaunch.DeviceSupported = deviceSupported;
+        }
+    }
+
     private void WriteIndirectArguments(params uint[] words)
     {
         var bytes = new byte[words.Length * 4];
