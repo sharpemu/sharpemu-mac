@@ -100,7 +100,10 @@ public sealed class StaticShaderPlanner : IDisposable
     /// learns the palettes from <paramref name="recorded"/> and the seed at
     /// <paramref name="seedPath"/>. Null when the inventory cannot be opened.
     /// </summary>
-    public static StaticShaderPlanner? Open(string directory, IEnumerable<ShaderCorpusRecord> recorded, string? seedPath)
+    /// With <paramref name="imageLimits"/>, every state predicts under that stable image budget (the current host's)
+    /// instead of the one its recording session answered.
+    public static StaticShaderPlanner? Open(string directory, IEnumerable<ShaderCorpusRecord> recorded, string? seedPath,
+        StableImageDescriptorLimits? imageLimits = null)
     {
         if (ShaderInventoryFile.Open(directory) is not { } inventory)
         {
@@ -108,7 +111,16 @@ public sealed class StaticShaderPlanner : IDisposable
         }
 
         var records = recorded.Where(static record => record.Options is not null).ToList();
-        var host = records.FirstOrDefault()?.Host ?? new ShaderCorpusHostFlags();
+        if (imageLimits is { } limits)
+        {
+            records = records
+                .Select(record => record with { Host = record.Host with { ComputeImageLimits = limits, GraphicsImageLimits = limits } })
+                .ToList();
+        }
+
+        var host = records.FirstOrDefault()?.Host ??
+            (imageLimits is { } budget ? new ShaderCorpusHostFlags { ComputeImageLimits = budget, GraphicsImageLimits = budget }
+                : new ShaderCorpusHostFlags());
         var planner = new StaticShaderPlanner(inventory, host);
         var seed = seedPath is null ? null : ShaderSeedFile.Load(seedPath);
         planner.Learn(records, seed);
