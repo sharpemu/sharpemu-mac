@@ -33,9 +33,32 @@ public sealed class ResourceBranchWriteGuard : IDisposable
 
     private bool Record(ulong address, out uint word)
     {
-        if (!_clean(address, out word)) return false;
+        using (EnterReads())
+        {
+            if (!_clean(address, out word)) return false;
+        }
+
         _reads.Add(address);
         return true;
+    }
+
+    // Set on this thread while the guard reads a predicate or a written descriptor. A host whose clean reader waits for a
+    // GPU write still landing in the word (Metal: MetalRenderHost.TryReadCleanGuestWord) refuses such a word here instead:
+    // the selection of a plan that writes memory is an optimisation over keeping every source, which is what this plan
+    // did before it had blocks (SHARPEMU_BRANCHES_WITH_WRITES=0), so an unread predicate only keeps both of its paths.
+    [ThreadStatic] private static int _reading;
+
+    public static bool ReadingWords => _reading != 0;
+
+    public static ReadScope EnterReads()
+    {
+        _reading++;
+        return default;
+    }
+
+    public readonly struct ReadScope : IDisposable
+    {
+        public void Dispose() => _reading--;
     }
 
     // Whether the selection made through Evaluator stands for this dispatch.

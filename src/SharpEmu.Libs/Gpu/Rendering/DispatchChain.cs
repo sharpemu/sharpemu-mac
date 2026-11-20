@@ -37,6 +37,17 @@ internal sealed class DispatchChain
     private bool _groupConservative;
     private bool _groupReadImages;
     private bool _groupWroteImages;
+    // The data each image the group's and this dispatch's shaders use covers (OverlapImageSpans), and whether one of them
+    // has none the request builders resolve.
+    private readonly List<GuestSpan> _groupImageTouched = new();
+    private readonly List<GuestSpan> _groupImageWritten = new();
+    private bool _groupImagesUnresolved;
+    private readonly List<GuestSpan> _groupRead = new();
+    private readonly List<GuestSpan> _recordRead = new();
+    private readonly List<GuestSpan> _recordImageTouched = new();
+    private readonly List<GuestSpan> _recordImageWritten = new();
+    private bool _recordImagesUnresolved;
+    private GuestSpan _recordIndirect;
 
     /// <summary>
     /// Called after <see cref="NeedsHazardBarrier"/> for the same dispatch: whether it may still run beside the dispatches
@@ -45,7 +56,9 @@ internal sealed class DispatchChain
     /// host's dispatches do not take the console's time, and a dependency the console's timing hides (a small producer
     /// finishing before its consumer reads) becomes a race here. A marked dispatch that touches what one of them wrote,
     /// writes what one of them touched, or whose accesses (or theirs) are not all known is ordered after them instead,
-    /// and counted (<see cref="DispatchChainTally.OverlapsOrdered"/>). SHARPEMU_DISPATCH_OVERLAP_HAZARDS=0 runs every
+    /// and counted (<see cref="DispatchChainTally.OverlapsOrdered"/>, by cause in the report). An image meets another
+    /// only where their data does (<see cref="OverlapImageSpans"/>), and two writes of the same buffer bytes that neither
+    /// reads are not ordered (<see cref="OverlapWritesApart"/>). SHARPEMU_DISPATCH_OVERLAP_HAZARDS=0 runs every
     /// marked dispatch beside the ones before it again.
     /// </summary>
     public bool KeepsOverlap(bool marked)
@@ -58,12 +71,53 @@ internal sealed class DispatchChain
         }
 
         var unknown = _groupConservative || _recordConservative || _groupTouched.Count > MaxSpans;
-        var hazard = !unknown &&
-            ((_recordReadsImages && _groupWroteImages) || (_recordWritesImages && (_groupWroteImages || _groupReadImages)) ||
-             Overlaps(_recordTouched, _groupWritten) || Overlaps(_recordWritten, _groupTouched));
-        if (unknown || hazard)
+        var imagesMeet = (_recordReadsImages && _groupWroteImages) || (_recordWritesImages && (_groupWroteImages || _groupReadImages));
+        var cause = OverlapCause.None;
+        if (unknown)
         {
-            DispatchChainTally.NoteOverlapOrdered(unknown);
+            cause = OverlapCause.Unknown;
+        }
+        else if (_recordIndirect.Size != 0 && Overlaps(_recordIndirect, _groupWritten))
+        {
+            cause = OverlapCause.Indirect;
+        }
+        else if (Overlaps(_recordRead, _groupWritten))
+        {
+            cause = OverlapCause.BufferReadAfterWrite;
+        }
+        else if (Overlaps(_recordWritten, _groupRead))
+        {
+            cause = OverlapCause.BufferWriteAfterRead;
+        }
+        else if (Overlaps(_recordWritten, _groupWritten))
+        {
+            // Writes of the same bytes with no read of them between leave whichever lands last on the console as well:
+            // nothing reads a value the order decides, so they stay beside each other (OverlapWritesApart).
+            if (OverlapWritesApart)
+            {
+                DispatchChainTally.NoteOverlapWritesApart();
+            }
+            else
+            {
+                cause = OverlapCause.BufferWriteAfterWrite;
+            }
+        }
+
+        if (cause == OverlapCause.None && imagesMeet)
+        {
+            // Two images meet only where their data does; one whose data is not resolved meets every other.
+            cause = !OverlapImageSpans || _recordImagesUnresolved || _groupImagesUnresolved ? OverlapCause.ImageUnresolved
+                : Overlaps(_recordImageTouched, _groupImageWritten) || Overlaps(_recordImageWritten, _groupImageTouched)
+                    ? OverlapCause.Image : OverlapCause.None;
+            if (cause == OverlapCause.None)
+            {
+                DispatchChainTally.NoteOverlapImagesApart();
+            }
+        }
+
+        if (cause != OverlapCause.None)
+        {
+            DispatchChainTally.NoteOverlapOrdered(cause);
             ResetGroup();
             AddToGroup();
             return false;
@@ -79,22 +133,42 @@ internal sealed class DispatchChain
     internal static bool OverlapHazardsChecked { get; set; } =
         Environment.GetEnvironmentVariable("SHARPEMU_DISPATCH_OVERLAP_HAZARDS") != "0";
 
+    // SHARPEMU_DISPATCH_OVERLAP_IMAGE_SPANS (on by default, =0 off): an image read or written beside one written meets it
+    // only where their data meets (the span the request builders resolve, as RenderExecutor.MarkStageWrites marks for a
+    // storage image); off, any image a dispatch writes meets every image another one beside it uses, which orders most
+    // marked dispatches of a frame that writes images (Demon's Souls: ~290 of ~640 per frame).
+    // SHARPEMU_DISPATCH_OVERLAP_WRITES_APART (on by default, =0 off): a marked dispatch whose buffers meet the group's only
+    // where both write (no read on either side of the shared bytes) stays beside it; off, it is ordered after it.
+    internal static bool OverlapWritesApart { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_DISPATCH_OVERLAP_WRITES_APART") != "0";
+
+    internal static bool OverlapImageSpans { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_DISPATCH_OVERLAP_IMAGE_SPANS") != "0";
+
     private void ResetGroup()
     {
         _groupTouched.Clear();
         _groupWritten.Clear();
+        _groupRead.Clear();
         _groupConservative = false;
         _groupReadImages = false;
         _groupWroteImages = false;
+        _groupImageTouched.Clear();
+        _groupImageWritten.Clear();
+        _groupImagesUnresolved = false;
     }
 
     private void AddToGroup()
     {
         _groupTouched.AddRange(_recordTouched);
         _groupWritten.AddRange(_recordWritten);
+        _groupRead.AddRange(_recordRead);
         _groupConservative |= _recordConservative;
         _groupReadImages |= _recordReadsImages;
         _groupWroteImages |= _recordWritesImages;
+        _groupImageTouched.AddRange(_recordImageTouched);
+        _groupImageWritten.AddRange(_recordImageWritten);
+        _groupImagesUnresolved |= _recordImagesUnresolved;
     }
 
     public bool NeedsHazardBarrier(ResolvedDispatch record, in ShaderStageResources stage, long promotions)
@@ -161,9 +235,14 @@ internal sealed class DispatchChain
     {
         _recordTouched.Clear();
         _recordWritten.Clear();
+        _recordRead.Clear();
         _recordConservative = false;
         _recordReadsImages = false;
         _recordWritesImages = false;
+        _recordImageTouched.Clear();
+        _recordImageWritten.Clear();
+        _recordImagesUnresolved = false;
+        _recordIndirect = default;
         if (stage.Program is not { } program)
         {
             _recordConservative = true;
@@ -207,14 +286,23 @@ internal sealed class DispatchChain
             }
 
             var span = new GuestSpan(descriptor.Address, footprint);
+            var info = program.Buffers[index];
             _recordTouched.Add(span);
-            if (program.Buffers[index].Written)
+            if (info.Written)
             {
                 _recordWritten.Add(span);
+            }
+
+            // A buffer the shader neither reads nor writes per its info counts as read.
+            if (info.Read || info.Atomic || !info.Written)
+            {
+                _recordRead.Add(span);
             }
         }
 
         var images = resources.Images;
+        var shapes = program.Resources?.Info.Images;
+        var resolveImages = OverlapHazardsChecked && OverlapImageSpans;
         for (var index = 0; index < program.Images.Length && index < images.Length; index++)
         {
             var words = images[index];
@@ -223,10 +311,30 @@ internal sealed class DispatchChain
                 continue;
             }
 
+            var written = program.Images[index].Written;
             _recordReadsImages = true;
-            if (program.Images[index].Written)
+            if (written)
             {
                 _recordWritesImages = true;
+            }
+
+            if (!resolveImages)
+            {
+                continue;
+            }
+
+            if (shapes is not null && index < shapes.Count &&
+                RenderExecutor.TryGetImageData(program, shapes[index], words, index, out var data))
+            {
+                _recordImageTouched.Add(data);
+                if (written)
+                {
+                    _recordImageWritten.Add(data);
+                }
+            }
+            else
+            {
+                _recordImagesUnresolved = true;
             }
         }
 
@@ -240,6 +348,8 @@ internal sealed class DispatchChain
 
             var span = new GuestSpan(range.Base, range.Size);
             _recordTouched.Add(span);
+            // A device-address range does not say whether it is also read: it counts as read.
+            _recordRead.Add(span);
             if (range.Written)
             {
                 _recordWritten.Add(span);
@@ -253,8 +363,23 @@ internal sealed class DispatchChain
 
         if (record.IndirectArgumentsAddress != 0)
         {
-            _recordTouched.Add(new GuestSpan(record.IndirectArgumentsAddress, IndirectArgumentBytes));
+            _recordIndirect = new GuestSpan(record.IndirectArgumentsAddress, IndirectArgumentBytes);
+            _recordTouched.Add(_recordIndirect);
+            _recordRead.Add(_recordIndirect);
         }
+    }
+
+    private static bool Overlaps(GuestSpan span, List<GuestSpan> right)
+    {
+        foreach (var other in right)
+        {
+            if (span.Address < other.End && other.Address < span.End)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool Overlaps(List<GuestSpan> left, List<GuestSpan> right)
@@ -272,6 +397,19 @@ internal sealed class DispatchChain
 
         return false;
     }
+}
+
+internal enum OverlapCause
+{
+    None,
+    Unknown,
+    Indirect,
+    BufferReadAfterWrite,
+    BufferWriteAfterRead,
+    BufferWriteAfterWrite,
+    Image,
+    ImageUnresolved,
+    Count,
 }
 
 public enum ChainDecision
@@ -300,10 +438,25 @@ public static class DispatchChainTally
 
     private static long _overlapsOrderedHazard;
     private static long _overlapsOrderedUnknown;
+    private static readonly long[] _overlapCauses = new long[(int)OverlapCause.Count];
+    private static long _overlapImagesApart;
+    private static long _overlapWritesApart;
+
+    /// <summary>A marked dispatch kept beside the group although both write the same buffer bytes, neither reading them.</summary>
+    internal static void NoteOverlapWritesApart() => Interlocked.Increment(ref _overlapWritesApart);
 
     /// <summary>Overlap-marked dispatches ordered after the ones before them (DispatchChain.KeepsOverlap), always counted.</summary>
     public static void NoteOverlapOrdered(bool unknown) =>
         Interlocked.Increment(ref unknown ? ref _overlapsOrderedUnknown : ref _overlapsOrderedHazard);
+
+    internal static void NoteOverlapOrdered(OverlapCause cause)
+    {
+        NoteOverlapOrdered(cause == OverlapCause.Unknown);
+        Interlocked.Increment(ref _overlapCauses[(int)cause]);
+    }
+
+    /// <summary>A marked dispatch kept beside the group although both use images, their data apart.</summary>
+    internal static void NoteOverlapImagesApart() => Interlocked.Increment(ref _overlapImagesApart);
 
     /// <summary>Overlap-marked dispatches ordered for a shared range (Hazard) or for accesses not all known (Unknown).</summary>
     public static (long Hazard, long Unknown) OverlapsOrdered =>
@@ -311,7 +464,11 @@ public static class DispatchChainTally
 
     /// <summary>The overlap orderings since the last call, for a backend's report line.</summary>
     public static string TakeOverlapReport() =>
-        FormattableString.Invariant($"overlap_ordered=[hazard:{Interlocked.Exchange(ref _overlapsOrderedHazard, 0)},unknown:{Interlocked.Exchange(ref _overlapsOrderedUnknown, 0)}]");
+        FormattableString.Invariant($"overlap_ordered=[hazard:{Interlocked.Exchange(ref _overlapsOrderedHazard, 0)},unknown:{Interlocked.Exchange(ref _overlapsOrderedUnknown, 0)}] ") +
+        FormattableString.Invariant($"overlap_by=[indirect:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.Indirect], 0)},raw:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.BufferReadAfterWrite], 0)},") +
+        FormattableString.Invariant($"war:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.BufferWriteAfterRead], 0)},waw:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.BufferWriteAfterWrite], 0)},") +
+        FormattableString.Invariant($"image:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.Image], 0)},image_unresolved:{Interlocked.Exchange(ref _overlapCauses[(int)OverlapCause.ImageUnresolved], 0)},") +
+        FormattableString.Invariant($"images_apart:{Interlocked.Exchange(ref _overlapImagesApart, 0)},writes_apart:{Interlocked.Exchange(ref _overlapWritesApart, 0)}]");
 
     public static string TakeReport() =>
         FormattableString.Invariant($"chain_open={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Open], 0)} chain_start={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Start], 0)} ") +

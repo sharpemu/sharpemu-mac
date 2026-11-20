@@ -2052,7 +2052,9 @@ internal sealed partial class MetalRenderHost
         // sees. Neither the stale backing (one resource branch kept on the worker, both on the resolver: bd5c2009a) nor a
         // refusal (both paths kept: the path the shader does not take had its descriptor read from whatever that memory
         // held, floats in Demon's Souls, which fataled as an invalid image) is that value. The resolving thread reads it
-        // through the copy as well, or abandons (TryReadCleanGuestWordConcurrent).
+        // through the copy as well, or abandons (TryReadCleanGuestWordConcurrent). A branch write guard's read is refused
+        // instead of waited for (GuardReadsRefusePending): its plan writes memory and kept every source before it had
+        // blocks, so both paths of its predicate are what it materialized then.
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (_gpuWrites.MayCover(address, sizeof(uint)) && _gpuWrites.PendingSerial(address, sizeof(uint), CompletedSerial) != 0)
         {
@@ -2061,10 +2063,28 @@ internal sealed partial class MetalRenderHost
                 return false;
             }
 
-            Interlocked.Increment(ref _cleanReadsLanded);
-            if (!TryReadPendingCommandProcessorBytes(address, bytes) && !TryReadGuestCore(address, bytes))
+            if (RefusesPendingGuardRead)
             {
-                return false;
+                // A branch write guard's read: through the command processor or the copy, never after a wait
+                // (GuardReadsRefusePending; the resolving thread refuses the word the same way).
+                if (!TryReadPendingCommandProcessorBytes(address, bytes))
+                {
+                    if (!TryReadThroughPendingCopy(address, bytes))
+                    {
+                        Interlocked.Increment(ref _guardReadsRefused);
+                        return false;
+                    }
+
+                    NotePendingAnswer(address, bytes.Length);
+                }
+            }
+            else
+            {
+                Interlocked.Increment(ref _cleanReadsLanded);
+                if (!TryReadPendingCommandProcessorBytes(address, bytes) && !TryReadGuestCore(address, bytes))
+                {
+                    return false;
+                }
             }
         }
         else if (!_backing.TryReadBacking(address, bytes))

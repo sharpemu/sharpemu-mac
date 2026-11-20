@@ -174,7 +174,7 @@ public sealed partial class RenderExecutor
         }
     }
 
-    private static bool TryGetImageData(ShaderProgramInfo program, ImageResource image, uint[] words, int imageIndex, out GuestSpan data)
+    internal static bool TryGetImageData(ShaderProgramInfo program, ImageResource image, uint[] words, int imageIndex, out GuestSpan data)
     {
         data = default;
         if (new TextureDescriptorWords(words).BaseAddress == 0)
