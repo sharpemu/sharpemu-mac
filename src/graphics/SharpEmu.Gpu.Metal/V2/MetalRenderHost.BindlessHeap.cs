@@ -394,6 +394,13 @@ internal sealed partial class MetalRenderHost
     // The entries of one view, in record order, compared with their records now: a changed record is resolved again.
     private void RevalidateHeapRegion(HeapRegionEntries entries, ulong serial)
     {
+        if (HeapBulkReadsActive)
+        {
+            // Records read in runs (MetalRenderHost.HeapRuns.cs, SHARPEMU_HEAP_BULK_READS).
+            RevalidateHeapRegionInRuns(entries, serial);
+            return;
+        }
+
         entries.ValidatedSerial = serial;
         Span<uint> words = stackalloc uint[8];
         foreach (var entry in entries.Order.ToArray())

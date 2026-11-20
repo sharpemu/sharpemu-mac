@@ -599,6 +599,28 @@ internal static class MetalShaderPrewarm
     // Graphics records made under another stable image budget, not translated.
     private static int _graphicsStale;
 
+    // Compute records made under the other stable image binding policy (their specialization's StableImageBindings is
+    // not the plan's under this host's budget): refused before translation, like stale graphics records, and not counted
+    // as failures; the session records them anew under this policy.
+    private static int _computeStale;
+
+    internal static int ComputeStale => Volatile.Read(ref _computeStale);
+
+    internal static int ComputeFailed => Volatile.Read(ref _failed);
+
+    // A compute record the prewarm could not compile: stale when its specialization follows the other image binding
+    // policy (ResourceMaterializer.ImageBindingPolicyMismatch), a failure otherwise.
+    internal static void NoteComputeRefusal(ComputePrewarmRecord record, string error)
+    {
+        if (error == SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.ImageBindingPolicyMismatch)
+        {
+            Interlocked.Increment(ref _computeStale);
+            return;
+        }
+
+        NoteFailure(record, error);
+    }
+
     private static void NoteGraphicsFailure(string error)
     {
         if (Interlocked.Increment(ref _graphicsFailed) <= MaxLoggedPrewarmFailures)
@@ -683,7 +705,7 @@ internal static class MetalShaderPrewarm
         return Precompile.Complete(
             $"computes={Volatile.Read(ref _compiled)} compute_failed={Volatile.Read(ref _failed)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
-            $"graphics_stale={Volatile.Read(ref _graphicsStale)} " +
+            $"graphics_stale={Volatile.Read(ref _graphicsStale)} compute_stale={Volatile.Read(ref _computeStale)} " +
             $"libraries_held={MetalLibraryPrewarm.HeldLibraries} {MetalStaticPrecompile.Describe()}");
     }
 
@@ -918,7 +940,7 @@ internal static class MetalShaderPrewarm
     {
         if (!TryCompileCompute(record, code, compiler, MetalStableImageLimits.Of(device), out var compiled, out var error))
         {
-            NoteFailure(record, error);
+            NoteComputeRefusal(record, error);
             return;
         }
 
@@ -1093,7 +1115,7 @@ internal static class MetalShaderPrewarm
             $"archived={Volatile.Read(ref _archived)} " +
             $"runtime_first={Volatile.Read(ref _runtimeFirst)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
-            $"graphics_stale={Volatile.Read(ref _graphicsStale)} " +
+            $"graphics_stale={Volatile.Read(ref _graphicsStale)} compute_stale={Volatile.Read(ref _computeStale)} " +
             $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
             $"yielded_ms={Interlocked.Read(ref _yieldedTicks) * 1000 / Stopwatch.Frequency} " +
             $"runtime_compute_modules={runtime.Count} matched={matched}";

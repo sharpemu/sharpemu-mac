@@ -43,6 +43,11 @@ public sealed class MetalBindlessHeapTests(ITestOutputHelper output)
     // (s_lshl_b32 s100, s100, 4; s_buffer_load_dwordx4 s[28:31], s[8:11], s100).
     private static uint[] HeapSampler() => Patch(Sample, (4, 0xF40C0300), (5, 0xFA000040), (24, 0x8F648464), (26, 0xF4280704), (27, 0xC8000000));
 
+    // The sample twice in the waterfall's block (the image_sample_l at 29-30 repeated after it, the loop's
+    // s_cbranch_execnz moved back two words: -15), reading the same record under the same EXEC.
+    private static uint[] DoubleSample() =>
+        [.. Sample[..31], Sample[29], Sample[30], .. Patch(Sample, (33, 0xBF89FFF1))[31..]];
+
     private static uint[] Patch(uint[] words, params (int Index, uint Word)[] patches)
     {
         var patched = words.ToArray();
@@ -245,14 +250,31 @@ public sealed class MetalBindlessHeapTests(ITestOutputHelper output)
         }
     }
 
-    // Record e holds texture (e * 37) % 64, except every seventh, whose element is null; keys past the view read the null
-    // element. Every read element is marked, and nothing else.
+    // A record read twice in one block under the same EXEC is marked once, as the SPIR-V translator's MarkHeapRecord
+    // leaves out a repeated mark within a block (HeapMarks): the second read reuses the first one's record index.
     [Fact]
-    public void EveryLaneReadsTheElementOfItsRecordAndMarksIt()
+    public void ARecordReadTwiceInABlockIsMarkedOnce()
+    {
+        static int Count(string source, string text) => (source.Length - source.Replace(text, string.Empty, StringComparison.Ordinal).Length) / text.Length;
+        const string Mark = "atomic_fetch_or_explicit(&sharpemu_resources.heap_feedback[";
+        Assert.True(Gen5MslTranslator.TryCompileProgram(Request(Sample, bindlessHeap: true, out _), out var single, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(Request(DoubleSample(), bindlessHeap: true, out _), out var twice, out error), error);
+        Assert.Equal(1, Count(single!.Source, Mark));
+        Assert.Equal(1, Count(twice!.Source, Mark));
+        Assert.Equal(2 * Count(single.Source, ".sample("), Count(twice.Source, ".sample("));
+    }
+
+    // Record e holds texture (e * 37) % 64, except every seventh, whose element is null; keys past the view read the null
+    // element. Every read element is marked, and nothing else; also when the block reads each record twice and marks it
+    // once (ARecordReadTwiceInABlockIsMarkedOnce).
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EveryLaneReadsTheElementOfItsRecordAndMarksIt(bool twice)
     {
         if (!DeviceGate()) return;
 
-        var request = Request(Sample, bindlessHeap: true, out var snapshot);
+        var request = Request(twice ? DoubleSample() : Sample, bindlessHeap: true, out var snapshot);
         var slot = BindlessHeap.ImageSlot(ImageDescriptorBinding.ForImage(request.Resources.Info.Images[0])!.Value);
         Assert.Equal(BindlessHeap.VolumeLayerSlot, slot);
         var textures = Enumerable.Range(0, 64)

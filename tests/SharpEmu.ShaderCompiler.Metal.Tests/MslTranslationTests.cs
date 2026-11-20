@@ -1064,10 +1064,13 @@ public sealed class MslTranslationTests
             "texture2d<uint, access::write>",
             shader.Source,
             StringComparison.Ordinal);
-        Assert.Contains(
-            ".write(vec<uint, 4>(v6, v5, v4, v7),",
-            shader.Source,
-            StringComparison.Ordinal);
+        // Each channel's register, in the inverse select's order, is narrowed to the width its image's width slot gives
+        // before the write (an integer store keeps the low bits, Gen5MslTranslator.StoreWidths.cs).
+        var channels = new[] { "v6", "v5", "v4", "v7" }
+            .Select(register => shader.Source.IndexOf($" = {register};", StringComparison.Ordinal)).ToArray();
+        Assert.All(channels, at => Assert.True(at >= 0, shader.Source));
+        Assert.Equal(channels.Order(), channels);
+        Assert.Contains(".write(vec<uint, 4>((", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]

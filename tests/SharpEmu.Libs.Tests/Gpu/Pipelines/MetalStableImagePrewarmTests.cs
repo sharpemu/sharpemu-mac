@@ -217,4 +217,46 @@ public sealed class MetalStableImagePrewarmTests : IDisposable
         Assert.Contains("image binding policy", error);
         Assert.Empty(other.Requests);
     }
+
+    // The Metal compute prewarm (MetalShaderPrewarm.TryCompileCompute, then NoteComputeRefusal) counts a record made under
+    // the other image binding policy as stale beside graphics_stale, never as a failure, and translates nothing for it.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheMetalComputePrewarmCountsARecordOfTheOtherPolicyAsStale(bool stable)
+    {
+        var limits = stable ? MetalLimits : default;
+        using (var list = ShaderPrewarmList.Open(_directory))
+        {
+            Assert.NotNull(list);
+            var guest = new PipelineTestGuest(Msl);
+            guest.Host.ShaderPrewarm = list;
+            guest.Host.ComputeImageDescriptorLimits = limits;
+            guest.Host.GraphicsImageDescriptorLimits = limits;
+            guest.RegisterProgram(CodeAddress, HeaderAddress, ImageBindingTestProgram.Code());
+            ImageBindingTestProgram.WriteDescriptors(guest, BufferAddress, ImageBindingTestProgram.Partitions[0]);
+            var cursor = 0u;
+            guest.Programs.GetOrCompile(guest.Source(CodeAddress, ShaderStage.Compute,
+                    [unchecked((uint)BufferAddress), (uint)(BufferAddress >> 32)]),
+                PipelineTestGuest.ComputeOptions(), ref cursor, out _);
+        }
+
+        using var reloaded = ShaderPrewarmList.Open(_directory);
+        Assert.NotNull(reloaded);
+        var (record, code) = Assert.Single(reloaded.LoadedComputes());
+        var other = new FakeShaderCompiler(Msl);
+        Assert.False(SharpEmu.Gpu.Metal.V2.MetalShaderPrewarm.TryCompileCompute(record, code, other, stable ? default : MetalLimits,
+            out _, out var error));
+        Assert.Empty(other.Requests);
+        var stale = SharpEmu.Gpu.Metal.V2.MetalShaderPrewarm.ComputeStale;
+        var failed = SharpEmu.Gpu.Metal.V2.MetalShaderPrewarm.ComputeFailed;
+        SharpEmu.Gpu.Metal.V2.MetalShaderPrewarm.NoteComputeRefusal(record, error);
+        Assert.Equal(stale + 1, SharpEmu.Gpu.Metal.V2.MetalShaderPrewarm.ComputeStale);
+        Assert.Equal(failed, SharpEmu.Gpu.Metal.V2.MetalShaderPrewarm.ComputeFailed);
+
+        // Any other refusal is still a failure.
+        SharpEmu.Gpu.Metal.V2.MetalShaderPrewarm.NoteComputeRefusal(record, "the record has no specialization");
+        Assert.Equal(stale + 1, SharpEmu.Gpu.Metal.V2.MetalShaderPrewarm.ComputeStale);
+        Assert.Equal(failed + 1, SharpEmu.Gpu.Metal.V2.MetalShaderPrewarm.ComputeFailed);
+    }
 }

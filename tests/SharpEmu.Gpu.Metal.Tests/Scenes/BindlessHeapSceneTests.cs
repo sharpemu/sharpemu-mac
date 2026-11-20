@@ -32,6 +32,34 @@ public sealed class BindlessHeapSceneTests(ITestOutputHelper output) : SceneTest
     // (s_lshl_b32 s100, s100, 4; s_buffer_load_dwordx4 s[28:31], s[8:11], s100): a heap sampler record.
     private static readonly uint[] SamplerProgram = Patch(Program, (4, 0xF40C0300), (5, 0xFA000040), (24, 0x8F648464), (26, 0xF4280704), (27, 0xC8000000));
 
+    // image_sample_l v[20:23], v[4:6], s[12:19], s[28:31] dmask:0xf dim:2D r128 (MIMG bit 15; lod v6 = 1.0, which a
+    // 1x1 texture clamps to level 0): the sample reads only the first four words of the eight the record load reads. An
+    // R128 T# has no array fields, so it names a 1D or 2D image only (ResourceMaterializer.ValidImageDescriptor); a
+    // table of 16-byte T#s loaded with s_buffer_load_dwordx4 is not planned as a heap (TryPlanHeapRecord takes an image
+    // handle of eight loaded words, as upstream's does).
+    private static readonly uint[] R128Program = Patch(Program, (29, 0xF0908F08));
+
+    // A depth-compare read: v4 = 0.35 (the reference), v5/v6 = 0.5, v7 = layer 1, v8 = lod 0 (the four v_movs replaced
+    // by five, two words longer before the loop, so the loop's branch keeps its offset), then
+    // image_sample_c_l v20, v[4:8], s[12:19], s[28:31] dmask:0x1 dim:2D_ARRAY.
+    private const float CompareReference = 0.35f;
+    private static readonly uint[] CompareProgram =
+    [
+        .. Program[..15], 0x7E0802FF, BitConverter.SingleToUInt32Bits(CompareReference), 0x7E0A02F0, 0x7E0C02F0, 0x7E0E02F2, 0x7E100280,
+        .. Patch(Program, (29, 0xF0B00128))[19..],
+    ];
+
+    // The waterfall in a pixel shader (wave64, assembled with llvm-mc for gfx1030): user data s[0:1] the block, every
+    // pixel's key the dword at +0x14000 of the V# at block + 0x20, the texel exported to mrt0.
+    private static readonly uint[] PixelProgram =
+    [
+        0xF4080200, 0xFA000010, 0xF4080600, 0xFA000020, 0xF4080700, 0xFA000030, 0xBF8CC07F, 0x7E0202FF,
+        0x00014000, 0xE0301000, 0x80060201, 0xBF8C3F70, 0x2C160484, 0x7E0802F0, 0x7E0A02F0, 0x7E0C02F2,
+        0x7E0E0280, 0xBE86047E, 0x7E260281, 0x7EC8050B, 0xBE94047E, 0x7DA41664, 0x8F648564, 0x7E260280,
+        0xF42C0304, 0xC8000000, 0xBF8CC07F, 0xF0900F28, 0x00E31404, 0xBEFE0414, 0x7DAA2680, 0xBF89FFF3,
+        0xBEFE0406, 0xBF8C3F70, 0xF800180F, 0x17161514, 0xBF810000,
+    ];
+
     private static uint[] Patch(uint[] words, params (int Index, uint Word)[] patches)
     {
         var patched = words.ToArray();
@@ -191,11 +219,16 @@ public sealed class BindlessHeapSceneTests(ITestOutputHelper output) : SceneTest
         }
     }
 
-    [Fact]
-    public void ResolvedElementsStayAcrossDispatchesAndARewrittenRecordTakesItsNewTexture()
+    // The same under both ways of reading the view's records when it is compared again: in runs
+    // (SHARPEMU_HEAP_BULK_READS, MetalRenderHost.HeapRuns.cs) and one record at a time.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ResolvedElementsStayAcrossDispatchesAndARewrittenRecordTakesItsNewTexture(bool bulkReads)
     {
         using var rig = CreateRig();
         if (rig is null) return;
+        rig.Host.HeapBulkReadsOverride = bulkReads;
         const int textures = 4;
         var heap = Build(rig, textures, records: 8, tableRecords: 8);
         var lowKeys = Enumerable.Range(0, Lanes).Select(lane => lane % 4).ToArray();
@@ -232,6 +265,9 @@ public sealed class BindlessHeapSceneTests(ITestOutputHelper output) : SceneTest
         {
             AssertTexel(last[lane], Expected(lowKeys[lane] == 1 ? 3 : lowKeys[lane] % textures), $"rewritten lane {lane} key {lowKeys[lane]}");
         }
+
+        // The comparison read the records in runs only when bulk reads are on.
+        Assert.Equal(bulkReads, rig.Host.HeapRunReads + rig.Host.HeapRunFallbacks > 0);
     }
 
     [Fact]
@@ -301,6 +337,124 @@ public sealed class BindlessHeapSceneTests(ITestOutputHelper output) : SceneTest
         for (var lane = 0; lane < Lanes; lane++)
         {
             AssertTexel(result[lane], keys[lane] % 2 == 0 ? point : linear, $"lane {lane} sampler record {keys[lane]}");
+        }
+    }
+    // Records of eight-word T#s of a one-layer 2D array.
+    [Fact]
+    public void AOneLayerRecordReadsItsTexture()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        const int textures = 4;
+        const int records = 8;
+        var heap = Build(rig, textures, records, tableRecords: records);
+        for (var record = 0; record < records; record++)
+        {
+            rig.Memory.Write<uint>(heap.Table + (ulong)record * RecordBytes,
+                Descriptors.Texture(heap.Textures[record % textures], Rgba8, 1, 1, type: Type2DArray));
+        }
+
+        var keys = Enumerable.Range(0, Lanes).Select(lane => lane * 3 % records).ToArray();
+        _ = Pass(rig, heap, keys);
+        var result = Pass(rig, heap, keys);
+        for (var lane = 0; lane < Lanes; lane++)
+        {
+            AssertTexel(result[lane], Expected(keys[lane] % textures), $"lane {lane} one-layer record {keys[lane]}");
+        }
+    }
+
+    // An R128 read of a heap record: the record's first four words name a 2D texture and the host takes the rest of the
+    // T# as zero, whatever the record's other four words hold (all ones: reserved bits set, a base array past the last
+    // one, so a host that read them would find no texture).
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AnR128RecordReadsTheTextureItsFourWordsName(bool onesAfter)
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        const int textures = 4;
+        const int records = 8;
+        var heap = Build(rig, textures, records, tableRecords: records);
+        for (var record = 0; record < records; record++)
+        {
+            rig.Memory.Write<uint>(heap.Table + (ulong)record * RecordBytes,
+                [.. Descriptors.Texture(heap.Textures[record % textures], Rgba8, 1, 1)[..4], .. Enumerable.Repeat(onesAfter ? 0xFFFFFFFFu : 0u, 4)]);
+        }
+
+        var keys = Enumerable.Range(0, Lanes).Select(lane => lane * 3 % records).ToArray();
+        _ = Pass(rig, heap, keys, R128Program);
+        var result = Pass(rig, heap, keys, R128Program);
+        for (var lane = 0; lane < Lanes; lane++)
+        {
+            AssertTexel(result[lane], Expected(keys[lane] % textures), $"lane {lane} R128 record {keys[lane]}");
+        }
+    }
+
+    // T# DST_SEL (R, 0, 0, 1), the swizzle a depth texture carries (ShadowSceneTests.DepthSwizzle).
+    private const uint DepthSwizzle = 4 | (0 << 3) | (0 << 6) | (1 << 9);
+
+    // A depth-compare read of a heap record: each record names a linear R32F texture of one depth (0.1, 0.3, 0.5, 0.7),
+    // which the host gives a depth view, and the sampler's Less compares the reference 0.35 with it: 1 where the
+    // reference is below the texel, 0 elsewhere.
+    [Fact]
+    public void ADepthCompareRecordComparesTheReferenceWithItsDepth()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        const int textures = 4;
+        const int records = 8;
+        var heap = Build(rig, textures, records, tableRecords: records);
+        static float Depth(int texture) => 0.1f + 0.2f * texture;
+        var depths = new ulong[textures];
+        for (var texture = 0; texture < textures; texture++)
+        {
+            depths[texture] = rig.Memory.Allocate(TextureBytes, TextureBytes);
+            rig.Memory.Write<float>(depths[texture], Enumerable.Repeat(Depth(texture), TextureBytes / 4).ToArray());
+        }
+
+        for (var record = 0; record < records; record++)
+        {
+            rig.Memory.Write<uint>(heap.Table + (ulong)record * RecordBytes,
+                Descriptors.Texture(depths[record % textures], 22, 1, 1, type: Type2DArray, depthOrLastLayer: 1, dstSelect: DepthSwizzle));
+        }
+
+        rig.Memory.Write<uint>(heap.Block + 0x30, Descriptors.Sampler(depthCompare: CompareFunc.Less));
+        var keys = Enumerable.Range(0, Lanes).Select(lane => lane * 5 % records).ToArray();
+        _ = Pass(rig, heap, keys, CompareProgram);
+        var result = Pass(rig, heap, keys, CompareProgram);
+        for (var lane = 0; lane < Lanes; lane++)
+        {
+            var expected = CompareReference < Depth(keys[lane] % textures) ? 1f : 0f;
+            Assert.True(result[lane][0] == expected, $"lane {lane} record {keys[lane]}: compared {result[lane][0]}, expected {expected}");
+        }
+    }
+    // A pixel shader reads a heap record: its first draw marks the record, and a later draw reads the record's texture
+    // into every pixel.
+    [Fact]
+    public void APixelShaderReadsTheTextureOfAHeapRecord()
+    {
+        using var rig = CreateRig();
+        if (rig is null) return;
+        const uint size = 8;
+        const int textures = 4;
+        const int key = 5;
+        var heap = Build(rig, textures, records: 8, tableRecords: 8);
+        rig.Memory.Write<uint>(heap.Output + KeyOffset, [key << 4]);
+        float[] Draw()
+        {
+            var target = rig.ColorTarget(size, size, 16);
+            var state = new SceneState(size, size).ColorTarget(0, target, size, size, format: 14, numberType: 7);
+            rig.Submit(rig.DrawMesh(new ScenePm4(), state, SceneDraws.Quad(0.5f, 0, 0, 0), PixelProgram,
+                [Descriptors.Lo(heap.Block), Descriptors.Hi(heap.Block)]));
+            return System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(rig.ReadImage(target, size, size, 16)).ToArray();
+        }
+
+        _ = Draw();
+        var pixels = Draw();
+        for (var pixel = 0; pixel < size * size; pixel++)
+        {
+            AssertTexel(pixels.AsSpan(pixel * 4, 4).ToArray(), Expected(key % textures), $"pixel {pixel}");
         }
     }
 }
