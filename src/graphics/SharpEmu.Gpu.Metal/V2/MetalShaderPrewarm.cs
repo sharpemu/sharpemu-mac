@@ -370,7 +370,12 @@ internal static class MetalShaderPrewarm
             return false;
         }
 
-        var ordered = HoldFirst(pending, HoldsForEveryCompute ? null : list.ReadFirstFrameComputes(), out var heldComputes);
+        var linkedDirectory = Path.Combine(directory, "linked");
+        // The hold-until-done and precompile modes hold the guest for every record, linked ones too (upstream's
+        // SHARPEMU_PREWARM_LINKED=all): their phase counts every record as held.
+        var ordered = HoldFirstLinkedLast(pending, HoldsForEveryCompute ? null : list.ReadFirstFrameComputes(),
+            HoldsForEveryCompute ? static _ => false : LinkedPrewarmOrder.IsLinked,
+            linked => LinkedPrewarmOrder.Order(linked, static item => item.Record, list, linkedDirectory), out var heldComputes);
         var orderedGraphics = HoldFirstGraphics(
             graphics, HoldsForEveryCompute ? null : _graphics?.ReadFirstFrame(), out var heldGraphics);
         var held = heldComputes + heldGraphics;
@@ -677,6 +682,31 @@ internal static class MetalShaderPrewarm
     /// held it for all of them, 126 s at the splash screen (run 20261017-075343-ds-base-boot),
     /// while the rest can compile behind the logos and the intro.
     /// </summary>
+    /// <summary>
+    /// HoldFirst over the records without linked callees, then the linked records (ComputePrewarmRecord with callees), which
+    /// the guest is never held for, in upstream's linked lane order (LinkedPrewarmOrder, as
+    /// VulkanVideoPresenter.StartLinkedPrewarm compiles them on its background lane): a linked permutation is a whole-module
+    /// compile that can take far longer than an ordinary compute (records x callee size), the session serves the caller's
+    /// dispatches from a ready permutation or links its kept callees itself meanwhile, and the permutation a session asks
+    /// for first goes first.
+    /// </summary>
+    internal static List<(ComputePrewarmRecord Record, ShaderCodeCapture Code, bool Held)> HoldFirstLinkedLast(
+        IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> pending,
+        IReadOnlyList<ulong>? firstFrame,
+        Func<ComputePrewarmRecord, bool> isLinked,
+        Func<IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>, IEnumerable<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>> orderLinked,
+        out int held)
+    {
+        var ordered = HoldFirst(pending.Where(item => !isLinked(item.Record)).ToList(), firstFrame, out held);
+        var linked = pending.Where(item => isLinked(item.Record)).ToList();
+        if (linked.Count != 0)
+        {
+            ordered.AddRange(orderLinked(linked).Select(static item => (item.Record, item.Code, false)));
+        }
+
+        return ordered;
+    }
+
     internal static List<(ComputePrewarmRecord Record, ShaderCodeCapture Code, bool Held)> HoldFirst(
         IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> pending,
         IReadOnlyList<ulong>? firstFrame,

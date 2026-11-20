@@ -38,6 +38,37 @@ public sealed class ShaderCallUnionStoreTests
         }
     }
 
+    // The linked prewarm lane's order as the Metal backend takes it (LinkedPrewarmOrder): each caller's kept library first,
+    // every caller's first record before any second, slow callers first within a round, the rest newest first.
+    [Fact]
+    public void TheLinkedPrewarmOrderPutsEachCallersKeptLibraryFirst()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"sharpemu-callees-{Guid.NewGuid():N}");
+        try
+        {
+            new ShaderCallUnionStore(Path.Combine(directory, "callees.bin")).Save(ShaderStage.Compute, Caller,
+                new Dictionary<uint, UnitedCallee[]> { [0] = [Callee(FunctionAddress)] });
+            const ulong Slow = 0x5104;
+            (ulong Caller, LinkedShaderPrewarm Library, string Name)[] records =
+            [
+                (Caller, Library((0, OtherAddress)), "a-old"),
+                (Slow, Library((0, OtherAddress)), "slow-old"),
+                (Caller, Library((0, FunctionAddress)), "a-kept"),
+                (Caller, Library((0, OtherAddress), (8, OtherAddress)), "a-new"),
+                (Slow, Library((0, FunctionAddress)), "slow-new"),
+            ];
+
+            var ordered = LinkedPrewarmOrder.Order(records, static record => record.Caller, static record => record.Library,
+                static caller => caller == Slow, directory);
+
+            Assert.Equal(["slow-old", "a-kept", "slow-new", "a-new", "a-old"], ordered.Select(static record => record.Name));
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static UnitedCallee Callee(ulong address)
     {
         uint[] words = [0xBF800000, 0xBE80200E];
