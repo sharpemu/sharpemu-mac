@@ -337,6 +337,11 @@ public sealed record Gen5MslCodegenOptions(
     /// keeps the cases.</summary>
     public bool IndexedImageCandidates { get; init; } = true;
 
+    /// <summary>The copies of one callee that a program linked per record holds at a call site share one body, entered
+    /// from each record's entry with the record's slot (Gen5MslTranslator.SharedCalls.cs), instead of one inlined copy
+    /// per record. SHARPEMU_METAL_SHARED_CALL_BODIES=0 inlines every copy.</summary>
+    public bool SharedCallBodies { get; init; } = true;
+
     /// <summary>The stand-in for S_MEMTIME / S_MEMREALTIME (MSL has no shader clock) moves 2^32 + 1 ahead per read
     /// instead of 1, as upstream's SPIR-V fallback moves 2^32 (Gen5SpirvTranslator.ReadShaderClock): a guest wait on
     /// the 64-bit difference of two reads for fewer than 2^32 ticks then ends at its next read, where a step of 1
@@ -404,6 +409,7 @@ public sealed record Gen5MslCodegenOptions(
         GroupUniformBarriers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GROUP_BARRIERS") != "0",
         HalfLocalWaveLoops = Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_LOOPS") != "0",
         IndexedImageCandidates = Environment.GetEnvironmentVariable("SHARPEMU_MSL_INDEXED_CANDIDATES") != "0",
+        SharedCallBodies = Environment.GetEnvironmentVariable("SHARPEMU_METAL_SHARED_CALL_BODIES") != "0",
         ShaderClockWideStep = Environment.GetEnvironmentVariable("SHARPEMU_METAL_SHADER_CLOCK_STEP") != "0",
         MeshDeviceLdsThresholdBytes = uint.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_THRESHOLD"), out var threshold)

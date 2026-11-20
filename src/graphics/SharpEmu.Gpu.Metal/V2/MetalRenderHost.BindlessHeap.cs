@@ -163,6 +163,9 @@ internal sealed partial class MetalRenderHost
     private void DisposeBindlessHeap()
     {
         _heapEntries.Clear();
+        _callRecordEntries.Clear();
+        _callRecordImages.Clear();
+        _callRecordTextures.Order.Clear();
         _heapRegionEntries.Clear();
         _heapImageViews.ReleaseIdle(ulong.MaxValue, ulong.MaxValue, static _ => { });
         _heapSamplerViews.ReleaseIdle(ulong.MaxValue, ulong.MaxValue, static _ => { });
@@ -658,10 +661,15 @@ internal sealed partial class MetalRenderHost
     }
 
     // The numeric class of the element at index: that of the integer view an array holds there (the arrays hold views of
-    // one record at an index), or float.
+    // one record at an index, and one call record image at a call record index), or float.
     private void WriteHeapElementClass(uint index)
     {
         var code = 0u;
+        if (index >= BindlessHeap.CallRecordFirstIndex && _callRecordImages.TryGetValue(index, out var record) && record.Resolved)
+        {
+            code = BindlessHeap.ClassCode(record.NumericClass);
+        }
+
         for (var slot = 0; slot < BindlessHeap.ImageKinds.Length && code == 0; slot++)
         {
             if (_heapEntries.TryGetValue((slot, index), out var entry) && entry.Resolved)
@@ -740,7 +748,8 @@ internal sealed partial class MetalRenderHost
             var textures = new List<nint>();
             _heapTextures.Declared.Clear();
             var signature = 0UL;
-            foreach (var entry in _heapEntries.Values)
+            // The heap's records, and the call records' (MetalRenderHost.ShaderCalls.cs).
+            foreach (var entry in _heapEntries.Values.Concat(_callRecordEntries.Values))
             {
                 if (entry.Texture == 0)
                 {

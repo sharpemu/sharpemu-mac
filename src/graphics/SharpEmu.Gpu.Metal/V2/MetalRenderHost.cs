@@ -798,6 +798,7 @@ internal sealed partial class MetalRenderHost :
         // every submission's status is read once it has finished.
         DrainFinishedSubmissions();
         ReportStepCaps();
+        ReportCallFaults();
         RetainInFlight(_commandBuffer, serial);
         // The host's own reference on the buffer it just committed, for the wait that reads
         // its timing after this flush (or after a later call that flushed nothing). The
@@ -2963,6 +2964,9 @@ internal sealed partial class MetalRenderHost :
             // (a miss it compiled itself, or a draw that could not be left out), and compiles
             // queued or running on the compiler threads now.
             $"draws_skipped_compiling={Interlocked.Exchange(ref _drawsSkippedCompiling, 0)} " +
+            // Calls that returned at once because their caller's linked program lacked the callee (MarkedCalls), and
+            // calls no link resolved at all.
+            $"call_marks={TakeMarkedCalls()} unlinked_calls={UnlinkedCalls} " +
             $"leave_out=[{FormatLeaveOutCounters()}] " +
             // Pipelines specialized for a draw's buffer words, and the draws on them (FormatBufferWordCounters).
             $"buffer_words=[{FormatBufferWordCounters()}] " +
@@ -3310,7 +3314,9 @@ internal sealed partial class MetalRenderHost :
             RetireUploadPreludes(CompletedSerial, all: true);
             ReleaseInFlightSubmissions();
             ReportStepCaps();
+            ReportCallFaults(shutdown: true);
             DisposeStepReport();
+            DisposeShaderCalls();
         }
         catch (Exception exception)
         {

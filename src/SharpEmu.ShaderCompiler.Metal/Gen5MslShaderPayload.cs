@@ -21,7 +21,8 @@ namespace SharpEmu.ShaderCompiler.Metal;
 public static class Gen5MslShaderPayload
 {
     /// <summary>The layout version; part of the translation cache's stamp.</summary>
-    public const int FormatVersion = 1;
+    /// <remarks>Version 2: argument layouts may hold the linked-call field kinds (call records, call marks, call faults).</remarks>
+    public const int FormatVersion = 2;
 
     // "MSLC", little-endian.
     private const uint Magic = 0x434C534D;

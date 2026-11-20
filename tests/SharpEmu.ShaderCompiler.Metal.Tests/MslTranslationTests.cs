@@ -16,7 +16,7 @@ public sealed class MslTranslationTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void ShaderCallsReportTheBackendLimitation(bool linked)
+    public void ShaderCallsCompileLinkedOrAlone(bool linked)
     {
         var program = new Gen5ShaderProgram(0x1000, [
             new(0, Gen5ShaderEncoding.Sop1, "SSwappcB64", [0xBE8E2100],
@@ -31,15 +31,14 @@ public sealed class MslTranslationTests
                 [new ShaderCallTarget(0x2000, 0, function)])]);
         }
         var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Compute);
-        // An unlinked S_SWAPPC_B64 is the caller compiled alone (the call is skipped): the
-        // pipeline cache only links calls for a backend that supports them, which Metal does not.
-        if (!linked)
+        // An unlinked S_SWAPPC_B64 is the caller compiled alone (the call is skipped, as before the port). A linked program
+        // compiles since Metal lowers the linker's call controls (Gen5MslTranslator.ShaderCalls.cs); this request pushes no
+        // call targets, so the test compares the link-time address (MslLinkedCallTests runs the pushed form).
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        if (linked)
         {
-            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var unlinkedError), unlinkedError);
-            return;
+            Assert.Contains("8192ul", shader.Source, StringComparison.Ordinal);
         }
-        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
-        Assert.Equal("Metal does not support linked shader calls.", error);
     }
 
     [Fact]

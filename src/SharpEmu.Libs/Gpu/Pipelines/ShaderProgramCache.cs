@@ -364,6 +364,8 @@ internal sealed partial class ShaderProgramCache
     // The callees each runtime-record caller's calls reach (ShaderCalleeTiers), when the host marks calls; without marks a
     // caller links every callee its tables name.
     private readonly Dictionary<ProgramKey, ShaderCalleeTiers> _calleeTiers = new(ProgramKeyComparer.Instance);
+    // The callers whose first calls to callees their program lacked have been logged ([CALLEE_TIERS]).
+    private readonly HashSet<ulong> _calleeTierReports = [];
 
     // The linked programs and the call-linking state above belong to the thread holding this lock. It is taken before _gate
     // and never inside it: a link, a pipeline poll and a fallback's recursion happen under it, a permutation compile does not.
@@ -819,6 +821,20 @@ internal sealed partial class ShaderProgramCache
         {
             throw GpuFatal.Fatal(exception.Message);
         }
+    }
+
+    // The worker a pending program waits on: its deferred link, else its deferred translation; null when neither runs
+    // (the program is ready, refused, or a per-record link starts at its next request). Callers hold the pipeline gate
+    // that serializes TryGetProgram, so the translations are not changed meanwhile.
+    public Task? PendingPreparation(ulong hash)
+    {
+        lock (_callGate)
+        {
+            if (_pendingLinks.TryGetValue(hash, out var link))
+                return link.Link;
+        }
+
+        return _pendingTranslations.TryGetValue(hash, out var translation) ? translation.Translation : null;
     }
 
     // False with no rejection while the program's link runs on a worker (DeferLinking).
@@ -1362,7 +1378,15 @@ internal sealed partial class ShaderProgramCache
                         {
                             if (runtimeFallback is null)
                             {
-                                tiers.Observe(library, programKey.Hash, _host);
+                                if (tiers.Observe(library, programKey.Hash, _host) != 0 && _calleeTierReports.Add(programKey.Hash))
+                                {
+                                    // Diagnostic only: until the program that holds them is ready, these calls keep returning
+                                    // at once (call marks) and the caller's dispatches run without the callees' effects.
+                                    Console.Error.WriteLine($"[GPU][INFO][CALLEE_TIERS] stage={source.Label} hash=0x{programKey.Hash:X16}: " +
+                                        $"calls reached {tiers.Called} callee(s) the caller's linked program lacks; they returned at once " +
+                                        "and the caller is linked again with them once its calls settle. Logged once per caller.");
+                                }
+
                                 var chosen = tiers.Choose(union, FallbackGeneration(programKey), _host.CallMarkSnapshots);
                                 library = _libraryMemo is { } chosenMemo
                                     ? chosenMemo.WithSiteCallees(library, caller.Address, chosen)

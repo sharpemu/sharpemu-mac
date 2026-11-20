@@ -2399,7 +2399,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 {
                     _computeRebound.Increment();
                     t_resolvePath = ResolvePath.ComputeRebound;
-                    var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+                    var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, ahead);
                     KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
                     return ahead
                         ? Ahead(rebound, kept.Kernel, kept.Source, out refusal)
@@ -2588,7 +2588,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // The kept program's entry with this dispatch's user data: its code is not read or hashed again.
     private ComputeProgram RebindComputeProgram(KeptComputeProgram kept, ProgramSourceEntry entry, ComputeStageRegisters compute, uint dispatchInitiator,
-        uint dimensionX, uint dimensionY, uint dimensionZ)
+        uint dimensionX, uint dimensionY, uint dimensionZ, bool ahead)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute", ref _computeUserData);
@@ -2606,10 +2606,18 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             options.ComputeSystemRegisters = kept.SystemRegisters;
             options.ComputeDispatch = CountedDispatch(input, kept.SystemRegisters, dimensionX, dimensionY, dimensionZ, kept.GpuThreadCounts);
             options.Tessellation = null;
-            if (!_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out handle, out stage, out var rejection))
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var cursor = pushDataCursor;
+            var idleRetries = 0;
+            while (!_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out handle, out stage, out var rejection))
             {
-                ReportShaderSkip(source, rejection);
-                return new ComputeProgram { Available = false };
+                if (rejection.Length != 0 || ahead || !HoldPendingPreparation(source, started, ref idleRetries))
+                {
+                    ReportShaderSkip(source, rejection);
+                    return new ComputeProgram { Available = false };
+                }
+
+                pushDataCursor = cursor;
             }
         }
 
@@ -2828,7 +2836,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     computeOptions,
                     ref pushDataCursor,
                     out handle,
-                    out stage))
+                    out stage,
+                    holdPending: !ahead))
                 {
                     return new ComputeProgram { Available = false };
                 }
@@ -2858,12 +2867,71 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             : null;
 
     private bool TryPrepareProgram(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
-        out ShaderProgram program, out ShaderStageResources stage)
+        out ShaderProgram program, out ShaderStageResources stage, bool holdPending = false)
     {
-        if (_programs.TryGetProgram(source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
-            return true;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var cursor = pushDataCursor;
+        var idleRetries = 0;
+        while (true)
+        {
+            pushDataCursor = cursor;
+            if (_programs.TryGetProgram(source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
+                return true;
+            if (rejection.Length != 0 || !holdPending)
+            {
+                ReportShaderSkip(source, rejection);
+                return false;
+            }
 
-        ReportShaderSkip(source, rejection);
+            if (!HoldPendingPreparation(source, started, ref idleRetries))
+                return false;
+        }
+    }
+
+    // A program with shader calls is linked and translated on a worker (DeferLinking) and reports pending meanwhile.
+    // The dispatch that asked for it waits for that work, as a linked dispatch waits for its module
+    // (RenderExecutor.SkipWhileLinkedModuleCompiles), for at most LinkedPreparationWait: a skipped dispatch that set up
+    // later work is lost for good. A program whose preparation outlasts the bound is not waited for again, and every
+    // dispatch skipped for it is counted (LinkedPreparationSkips) and reported once per program.
+    internal long LinkedPreparationWait = RenderExecutor.LinkedCompileWaitTicks;
+    private readonly HashSet<ulong> _slowPreparations = new();
+    private long _linkedPreparationSkips;
+    public long LinkedPreparationSkips => Interlocked.Read(ref _linkedPreparationSkips);
+
+    private bool HoldPendingPreparation(ShaderSource source, long started, ref int idleRetries)
+    {
+        var left = LinkedPreparationWait - (System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        if (left > 0 && !_slowPreparations.Contains(source.Hash))
+        {
+            if (_programs.PendingPreparation(source.Hash) is { } task)
+            {
+                idleRetries = 0;
+                try
+                {
+                    task.Wait(TimeSpan.FromSeconds((double)left / System.Diagnostics.Stopwatch.Frequency));
+                }
+                catch (AggregateException)
+                {
+                    // A failed link or translation surfaces at the next request, which refuses the program.
+                }
+
+                return true;
+            }
+
+            // Pending with no worker: the next request starts one (a per-record link); a program that stays so is refused.
+            if (++idleRetries <= 2)
+                return true;
+        }
+
+        Interlocked.Increment(ref _linkedPreparationSkips);
+        if (_slowPreparations.Add(source.Hash))
+        {
+            Console.Error.WriteLine(
+                $"[GPU][WARN][LINKED_PENDING] stage={source.Label} hash=0x{source.Hash:X16}: the linked program was not prepared within " +
+                $"{LinkedPreparationWait * 1000 / System.Diagnostics.Stopwatch.Frequency} ms (SHARPEMU_LINKED_COMPILE_WAIT_MS); its dispatches " +
+                "are skipped until it is ready and counted in LinkedPreparationSkips. Images can be incorrect.");
+        }
+
         return false;
     }
 

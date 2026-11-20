@@ -125,6 +125,35 @@ public sealed class MetalShaderPrewarmPendingTests : IDisposable
         Assert.Equal(new ulong[] { 0x1000, 0x3000, 0x2000 }, held3.Select(item => item.Record.Address));
     }
 
+    // Linked records never hold the guest and compile after every other compute, in the linked lane's order (the order
+    // function stands in for LinkedPrewarmOrder, whose order ShaderCallUnionStoreTests checks), even when the first frame
+    // or a list without one would hold them.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LinkedRecordsAreNeverHeldForAndCompileLastInTheirLanesOrder(bool firstFrameList)
+    {
+        using (var list = Open())
+        {
+            Record(list, 0x1000);
+            Record(list, 0x2000);
+            Record(list, 0x3000);
+            Record(list, 0x4000);
+            list.WriteFirstFrameComputes();
+            Record(list, 0x5000);
+        }
+
+        using var reopened = Open();
+        var linked = new HashSet<ulong> { 0x1000, 0x3000, 0x5000 };
+        var ordered = MetalShaderPrewarm.HoldFirstLinkedLast(reopened.LoadedComputes(),
+            firstFrameList ? reopened.ReadFirstFrameComputes() : null, record => linked.Contains(record.Address),
+            records => records.OrderByDescending(item => item.Record.Address), out var held);
+
+        Assert.Equal(2, held);
+        Assert.Equal(new ulong[] { 0x2000, 0x4000, 0x5000, 0x3000, 0x1000 }, ordered.Select(item => item.Record.Address));
+        Assert.Equal(new[] { true, true, false, false, false }, ordered.Select(item => item.Held));
+    }
+
     [Fact]
     public void AFirstFrameBeforeAnyComputeHoldsForNone()
     {
