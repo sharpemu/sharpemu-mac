@@ -29,7 +29,10 @@ internal sealed partial class MetalRenderHost
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_SHADER_CALLS") != "0";
 
     // Records live in the bindless heap, so they need it; marks exist only for programs linked with run-time records.
-    public bool RuntimeCallRecordsSupported => ShaderCallsEnabled && BindlessHeapEnabled;
+    public bool RuntimeCallRecordsSupported => ShaderCallsEnabled && BindlessHeapEnabled && RuntimeCallRecordsEnabled;
+
+    // Tests link a copy per record on one host, as SHARPEMU_RUNTIME_CALL_RECORDS=0 does for the process.
+    internal bool RuntimeCallRecordsEnabled { get; set; } = true;
 
     public bool CallMarksSupported => RuntimeCallRecordsSupported;
 
@@ -38,10 +41,13 @@ internal sealed partial class MetalRenderHost
     public long CallMarkedAt(uint bit) => Volatile.Read(ref _callMarkedAt[bit & (CallMarks.Bits - 1)]);
 
     // pipeline_cache/<title>/metal-v2/linked, beside the translations and analysis caches (MetalTranslationCache).
-    public string? LinkedProgramCacheDirectory => ShaderCallsEnabled
-        ? _linkedProgramCacheDirectory ??= SharpEmuPaths.UserPath("pipeline_cache",
-            MetalShaderPrewarm.SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()), "metal-v2", "linked")
-        : null;
+    // Tests set it before the first dispatch (the program cache opens the store at its first runtime-record caller).
+    public string? LinkedProgramCacheDirectory
+    {
+        get => ShaderCallsEnabled ? _linkedProgramCacheDirectory ??= SharpEmuPaths.UserPath("pipeline_cache",
+            MetalShaderPrewarm.SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()), "metal-v2", "linked") : null;
+        internal set => _linkedProgramCacheDirectory = value;
+    }
 
     private string? _linkedProgramCacheDirectory;
 
@@ -59,6 +65,17 @@ internal sealed partial class MetalRenderHost
     private int _callRecordReports;
 
     internal long CallRecordElementsExhausted, UnlinkedCalls;
+
+    // Calls that returned at once because the caller's program did not hold their callee yet: each bit a read mark snapshot
+    // holds is one (caller, callee address) whose calls were skipped since the snapshot before. The program cache links the
+    // callee in once its calls have settled (ShaderCalleeTiers), and the program that holds it serves from the next dispatch
+    // after its pipeline is ready; until then the caller runs without the callee's effects, as on Vulkan. Counted in total
+    // (MarkedCalls) and on the perf line (call_marks=); the program cache logs each caller once ([CALLEE_TIERS]).
+    internal long MarkedCalls => Volatile.Read(ref _markedCalls);
+    private long _markedCalls;
+    private long _markedCallsWindow;
+
+    internal long TakeMarkedCalls() => Interlocked.Exchange(ref _markedCallsWindow, 0);
 
     internal MetalCallRecordPreparation CallRecordPreparation => _callRecordPreparation ??= new MetalCallRecordPreparation(
         ReadCallRecordBytes, (address, size) => _memory.CanRead(address, size), CallRecordElement);
@@ -202,7 +219,15 @@ internal sealed partial class MetalRenderHost
             var snapshot = Volatile.Read(ref _callMarkSnapshots) + 1;
             for (var word = 0; word < words.Length; word++)
             {
-                for (var bits = Volatile.Read(ref words[word]); bits != 0; bits &= bits - 1)
+                var held = Volatile.Read(ref words[word]);
+                if (held != 0)
+                {
+                    var count = BitOperations.PopCount(held);
+                    Interlocked.Add(ref _markedCalls, count);
+                    Interlocked.Add(ref _markedCallsWindow, count);
+                }
+
+                for (var bits = held; bits != 0; bits &= bits - 1)
                 {
                     Volatile.Write(ref _callMarkedAt[word * 32 + BitOperations.TrailingZeroCount(bits)], snapshot);
                 }
