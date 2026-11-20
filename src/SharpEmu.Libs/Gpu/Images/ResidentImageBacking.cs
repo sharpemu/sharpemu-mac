@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Gpu.Images;
@@ -34,7 +35,54 @@ public static class ResidentImageBacking
     public static bool TryRead(IGuestBackedSpace backing, ulong address, Span<byte> destination, bool allowHoles) =>
         backing.TryReadBacking(address, destination) ||
         KernelMemoryCompatExports.TryReadPrtBacking(backing, address, destination) ||
+        TryReadMirroredPrtBacking(backing, address, destination) ||
         allowHoles && TryReadResidentPrefix(backing, address, destination, allowHoles: true);
+
+    // PRT backing in a process without the kernel (the GPU process of the two-process split): the guest process mirrors
+    // its PRT apertures and AMM area (PartiallyResidentRanges), and which pages are mapped is the shared view table's,
+    // which this process's backing reads. Same result as KernelMemoryCompatExports.TryReadPrtBacking: the address is
+    // translated as the kernel translates it, mapped 16 KiB chunks are read, and every other byte reads as zero. (The kernel
+    // reads a mapping that is backed whole in one piece; mappings are 16 KiB aligned, so that is the same bytes.)
+    // Empty, and so false at once, in a process that has the kernel.
+    internal static bool TryReadMirroredPrtBacking(IGuestBackedSpace backing, ulong address, Span<byte> destination)
+    {
+        if (PartiallyResidentRanges.Mirrored.Length == 0)
+        {
+            return false;
+        }
+
+        var size = (ulong)destination.Length;
+        address = GuestVaHole.TranslateRange(address, size);
+        if (!PartiallyResidentRanges.MirrorContains(address, size))
+        {
+            return false;
+        }
+
+        destination.Clear();
+        var end = address + size;
+        for (var chunk = address; chunk < end;)
+        {
+            var next = Math.Min(end, (chunk & ~(PrtProbeBytes - 1)) + PrtProbeBytes);
+            if (backing.IsBackedRange(chunk, next - chunk) &&
+                !backing.TryReadBacking(chunk, destination.Slice((int)(chunk - address), (int)(next - chunk))))
+            {
+                return false;
+            }
+
+            chunk = next;
+        }
+
+        Interlocked.Increment(ref _mirroredPrtReads);
+        return true;
+    }
+
+    // The kernel's probe size for a partly backed mapping (KernelMemoryCompatExports.PrtResidencyProbeBytes).
+    private const ulong PrtProbeBytes = 0x4000;
+
+    private static long _mirroredPrtReads;
+
+    /// <summary>Image reads answered from the mirrored PRT/AMM ranges (the split's GPU process).</summary>
+    public static long MirroredPrtReads => Interlocked.Read(ref _mirroredPrtReads);
 
     // Copies the backed prefix page by page and zero-fills the unmapped tail. A backed page
     // after a hole is not a mip chain, so it is rejected unless allowHoles.

@@ -188,6 +188,45 @@ public sealed unsafe partial class MetalImageBudgetTests
         Assert.False(image.IsCpuDirty);
     }
 
+    // The same hole inside a PRT aperture as the split's GPU process sees it: its backing has no kernel to ask (as this
+    // rig's has not), so the guest process's mirrored aperture (PartiallyResidentRanges) is what lets the upload read
+    // the unmapped page as zero, without SHARPEMU_IMAGE_BACKING_HOLES, as the kernel's PRT read does in one process.
+    [Fact]
+    public void AHoleInsideAMirroredPrtApertureReadsAsZeroWithoutTheHolePolicy()
+    {
+        if (!RequireDevice()) return;
+        using var scope = new ResidentLevelsScope(baseLevelCut: false);
+        using var rig = new Rig(Device.Value);
+        var reference = AcquireReference(rig, seed: 0x66);
+        StreamIn(rig, StreamedAddress, residentFrom: 2, seed: 0x66);
+        var whole = StreamedRequest(StreamedAddress, baseLevel: 0).Description;
+        var holeOffset = (whole.MipLayout[2].Offset + whole.MipLayout[2].TailOffset) & ~0xFFFUL;
+        rig.GuestBacking.Unmapped.Add((StreamedAddress + holeOffset, 0x1000));
+        PartiallyResidentRanges.ResetMirror();
+        try
+        {
+            _ = PartiallyResidentRanges.Mirror(new PartiallyResidentRanges.Range(1, StreamedAddress, whole.Data.Size, LazilyBacked: true));
+            var request = StreamedRequest(StreamedAddress, baseLevel: 2);
+            var identifier = rig.Cache.FindImage(ref request);
+            var before = ResidentImageBacking.MirroredPrtReads;
+            var view = rig.Cache.AcquireTextureView(identifier, request);
+            rig.Harness.Submit();
+            rig.Harness.Begin();
+            var image = rig.Cache.GetImage(identifier);
+            Assert.False(image.IsCpuDirty);
+            Assert.True(ResidentImageBacking.MirroredPrtReads > before);
+            Assert.NotEqual(ReadLevel(rig, reference.Texture, 2), ReadLevel(rig, view, 0));
+            for (uint level = 1; level < MipLevels - 2; level++)
+            {
+                Assert.Equal(ReadLevel(rig, reference.Texture, level + 2), ReadLevel(rig, view, level));
+            }
+        }
+        finally
+        {
+            PartiallyResidentRanges.ResetMirror();
+        }
+    }
+
     // A block-compressed texture resident from a level that is not block-aligned (250x250 of a 1000x1000 BC1 chain) is
     // held from that level: the memory policy would start at the 500x500 level, which the guest has not mapped.
     [Fact]
