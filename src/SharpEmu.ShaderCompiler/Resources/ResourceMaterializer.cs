@@ -4245,12 +4245,19 @@ public static partial class ResourceMaterializer
     /// </summary>
     public static bool SpecializationGuards { get; set; } = true;
 
+    /// <summary>
+    /// What ApplyTo refuses a specialization of the other stable image binding policy with: a recorded one (a prewarm
+    /// record) made by a session whose host answered another stable image budget. The Metal prewarm counts such a
+    /// compute record as stale, not failed.
+    /// </summary>
+    public const string ImageBindingPolicyMismatch = "shader image binding policy does not match the plan";
+
     public static SpecializedResourceInfo ApplyTo(ShaderResourcePlan plan, ResourceSpecialization specialization)
     {
         var source = plan.Info;
         if (plan.StableImageBindings != specialization.StableImageBindings ||
             (plan.StableImageBindings && specialization.ImageDescriptorGroups.Count != 0))
-            throw new ResourcePlanException("shader image binding policy does not match the plan");
+            throw new ResourcePlanException(ImageBindingPolicyMismatch);
         if (source.Buffers.Count != specialization.BaseBufferCount || source.Images.Count > specialization.Images.Count)
         {
             throw new ResourcePlanException(
