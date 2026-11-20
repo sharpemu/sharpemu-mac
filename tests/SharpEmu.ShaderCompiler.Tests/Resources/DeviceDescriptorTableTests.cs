@@ -15,11 +15,11 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 // instead of all of guest memory; anything the draw cannot bound stays unplanned.
 public sealed class DeviceDescriptorTableTests
 {
-    private const ulong Table = 0x1000;
+    internal const ulong Table = 0x1000;
     private const int CountOffset = 136;
 
     // s3 = 0; header: s10 = count at [s0:s1 + 136]; while (s3 < s10) { s[4:7] = [s0:s1 + (s3 << 4) + 16]; store; s3++ }
-    private static Gen5ShaderProgram BinningProgram(uint guardRegister = 3)
+    internal static Gen5ShaderProgram BinningProgram(uint guardRegister = 3)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0;
@@ -47,7 +47,7 @@ public sealed class DeviceDescriptorTableTests
         return Program([.. instructions]);
     }
 
-    private static TestWordMemory TableMemory(uint count)
+    internal static TestWordMemory TableMemory(uint count)
     {
         var memory = new TestWordMemory { Base = Table, Words = new uint[64] };
         memory.At(Table + CountOffset) = count;

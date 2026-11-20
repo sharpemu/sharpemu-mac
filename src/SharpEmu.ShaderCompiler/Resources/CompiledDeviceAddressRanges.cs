@@ -21,6 +21,11 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // The range assembly and the function-buffer tail are the reference's code with only the value evaluation replaced.
 // The function-buffer accesses are listed once per plan, and a call allocates nothing but its result array.
 // A plan with a cycle, a malformed node or more than MaxBlocks nodes stays on the interpreter.
+// So does a plan with device-descriptor tables (stores through V#s it loads from a table at a run-time offset): the
+// reference adds the buffers each table can select, or an unplanned written range, after the function V#s, and this
+// code has no such tail. Compiled, those stores had no range once the SRT compiler finished, so their writes were never
+// recorded as pending and a later host read of the bytes did not wait for them. Counted as descriptor_table_refusals on
+// the PLAN_BUILDS line and logged once per program ([SHADER][COMPILED-RANGES]).
 // CallRecordPlanner.AddRecordRanges evaluates each callee's computed V#s (CallRecordBufferWords) the same way, compiled
 // once per callee, with the record helper's own rules: one memo per record, shared by its buffers; the user data a record
 // reads is what WithCallArguments builds (the draw's, zeros up to the argument registers, then the argument) without
@@ -104,6 +109,12 @@ internal sealed class CompiledDeviceAddressRanges
         return [.. functions];
     }
 
+    // The refusal of a plan with device-descriptor tables (see the class comment).
+    internal const string DescriptorTablesRefusal = "descriptor_tables";
+
+    // The program hashes whose refusal was logged: one line per program for the session.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> DescriptorTableRefusalsLogged = new();
+
     // ShaderResourcePlan.CompileEvaluatorNow builds it under the plan's compile gate; null while the switch is off.
     internal static CompiledDeviceAddressRanges? TryBuild(ShaderResourcePlan plan)
     {
@@ -130,6 +141,19 @@ internal sealed class CompiledDeviceAddressRanges
         for (var callee = 0; callee < records.Length; callee++)
         {
             if (plan.CallRecordCallees[callee].BufferWords is { Length: > 0 } buffers) records[callee] = RecordRanges.Build(plan, buffers);
+        }
+
+        if (plan.DeviceDescriptorTables.Count != 0)
+        {
+            ResourcePlanBuildCounters.RecordDescriptorTableRefusal();
+            if (DescriptorTableRefusalsLogged.TryAdd(plan.Hash, 0))
+            {
+                Console.Error.WriteLine(FormattableString.Invariant(
+                    $"[SHADER][COMPILED-RANGES] hash=0x{plan.Hash:X16} stage={plan.Stage} stays on the interpreted ranges: ") +
+                    FormattableString.Invariant($"{plan.DeviceDescriptorTables.Count} device-descriptor table(s) the compiled ranges do not evaluate"));
+            }
+
+            return new(plan, null, null, 0, DescriptorTablesRefusal, records);
         }
 
         var ranges = plan.DeviceAddressRanges;
