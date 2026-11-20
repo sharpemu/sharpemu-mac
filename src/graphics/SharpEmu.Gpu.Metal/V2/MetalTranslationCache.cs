@@ -14,7 +14,7 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// <summary>
 /// The game's two shader disk caches, beside the rest of its Metal shader data
 /// (pipeline_cache/&lt;title&gt;/metal-v2, where the prewarm list and the binary archive live): the
-/// translations (TranslationDiskCache, <c>translations/</c>), so a later session takes a program's MSL
+/// translations (TranslationCache / TranslationDiskCache, <c>translations/</c>), so a later session takes a program's MSL
 /// and reflection from disk instead of translating it again, and the scalar graphs
 /// (ShaderAnalysisCache, <c>analysis/</c>). Opened by the process that translates, where the
 /// presenter starts: the GPU process with the split on, the one process with it off.
@@ -45,6 +45,6 @@ internal static class MetalTranslationCache
         var directory = SharpEmuPaths.UserPath(
             "pipeline_cache", MetalShaderPrewarm.SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()), "metal-v2");
         ShaderAnalysisCache.UseGameFolder(Path.Combine(directory, "analysis"));
-        TranslationDiskCache.UseGameFolder(Path.Combine(directory, "translations"), Stamp(GuestGpu.Current, device));
+        TranslationCache.UseGameFolder(Path.Combine(directory, "translations"), Stamp(GuestGpu.Current, device));
     }
 }

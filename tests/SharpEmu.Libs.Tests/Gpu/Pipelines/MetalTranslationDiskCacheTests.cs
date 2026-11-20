@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Gpu.Metal;
 using SharpEmu.Gpu.Metal.V2;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
@@ -12,7 +13,7 @@ using SharpEmu.ShaderCompiler.Metal.Tests;
 using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
-namespace SharpEmu.Gpu.Metal.Tests;
+namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 
 /// <summary>
 /// The translation disk cache on Metal: a session keeps each translation, and a later session over the same folder
@@ -20,12 +21,13 @@ namespace SharpEmu.Gpu.Metal.Tests;
 /// library key the host computes). An entry that is damaged, of another build, or made for another request is a
 /// counted miss that translates again.
 /// </summary>
-[Collection(MetalTranslationCacheCollection.Name)]
-public sealed class MetalTranslationCacheTests : IDisposable
+// The folder is process-wide: these share the upstream tests' collection.
+[Collection(TranslationDiskCacheCollection.Name)]
+public sealed class MetalTranslationDiskCacheTests : IDisposable
 {
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "SharpEmuTests", Guid.NewGuid().ToString("N"));
 
-    public MetalTranslationCacheTests() => TranslationDiskCache.UseGameFolder(_directory, "metal-test-stamp");
+    public MetalTranslationDiskCacheTests() => TranslationDiskCache.UseGameFolder(_directory, "metal-test-stamp");
 
     public void Dispose()
     {
@@ -209,7 +211,7 @@ public sealed class MetalTranslationCacheTests : IDisposable
         Assert.Equal(expected.UsesPerVertexInputs, actual.UsesPerVertexInputs);
         Assert.Equal(expected.FlattenedTableMinimumWords, rebuilt.FlattenedTableMinimumWords);
         Assert.Equal(fresh.Payload, rebuilt.Payload);
-        Assert.Equal(MetalShaderPrewarm.Identity(fresh), MetalShaderPrewarm.Identity(rebuilt));
+        Assert.Equal(fresh.PayloadHash, rebuilt.PayloadHash);
         Assert.Equal(
             MetalBinaryArchive.LibraryKey(expected.Source, expected.UsesPerVertexInputs),
             MetalBinaryArchive.LibraryKey(actual.Source, actual.UsesPerVertexInputs));
@@ -262,11 +264,4 @@ public sealed class MetalTranslationCacheTests : IDisposable
         public (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters() => throw Unsupported();
         public void RequestClose() => throw Unsupported();
     }
-}
-
-// The cache's folder is process-wide: these tests run one at a time.
-[CollectionDefinition(Name, DisableParallelization = true)]
-public sealed class MetalTranslationCacheCollection
-{
-    public const string Name = "MetalTranslationCache";
 }

@@ -13,6 +13,13 @@ using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
+// The running game's translation folder and stamp, for a host outside this assembly (the Metal presenter), as
+// ShaderAnalysisCache names the scalar graphs' folder: see TranslationDiskCache.UseGameFolder.
+public static class TranslationCache
+{
+    public static void UseGameFolder(string? folder, string? stamp) => TranslationDiskCache.UseGameFolder(folder, stamp);
+}
+
 // SHARPEMU_TRANSLATION_CACHE=0 turns it off. Each game keeps the programs it translated on disk, so a later session
 // takes a program's SPIR-V from disk instead of translating it again. The key is everything the translation reads: the
 // translated program's instructions, every field of the request (pipeline state, specialization, binding layout, memory
