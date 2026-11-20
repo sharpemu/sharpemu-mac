@@ -846,6 +846,67 @@ public sealed class NggMeshRuntimeTests(ITestOutputHelper output)
         Assert.Equal(0.0f, Green(pixels, TargetSize - 2, 1), 3);
     }
 
+    // Upstream's mesh planner (MeshDrawPlanner, 7cf0ac568) gives a mesh-style subgroup (one input point)
+    // min(256, PRIM_AMP_FACTOR) primitives, which can be more than VGT_GS_MAX_VERT_OUT vertices, and a lane per
+    // primitive as well as per vertex, since each lane exports one primitive. Metal's amplified mesh info follows the same
+    // rule: primitives from PRIM_AMP_FACTOR clamped to 256, threads in whole guest waves over the larger output.
+    [Theory]
+    [InlineData(true, 64u, 200u, 200u, 256u)]
+    [InlineData(true, 128u, 128u, 128u, 128u)]
+    [InlineData(true, 32u, 0x1FFu, 256u, 256u)]
+    [InlineData(true, 200u, 16u, 16u, 256u)]
+    [InlineData(false, 64u, 200u, 200u, 224u)]
+    [InlineData(false, 256u, 0x1FFu, 256u, 256u)]
+    public void PrimitiveAmplificationSizesTheOutputAndTheLanes(
+        bool wave64, uint verticesOut, uint amplification, uint primitives, uint threads)
+    {
+        var stage = Gen5NggFixtures.AmplifiedStageInfo with
+        {
+            IsWave64 = wave64,
+            AmplifiedVerticesOut = verticesOut,
+            MaxOutputPerSubgroup = verticesOut,
+            PrimitiveAmplificationFactor = amplification,
+        };
+        var shader = Gen5NggFixtures.CompileOrThrow(Gen5NggFixtures.AmplifiedWave64Triangle(), stage);
+        var mesh = shader.MeshInfo!;
+        Assert.True(mesh.Amplified);
+        Assert.Equal(verticesOut, mesh.MaxVertices);
+        Assert.Equal(primitives, mesh.MaxPrimitives);
+        Assert.Equal(threads, mesh.ThreadsPerThreadgroup);
+        Assert.Equal(threads / mesh.GuestWaveLanes, mesh.WavesPerThreadgroup);
+        Assert.True(mesh.ThreadsPerThreadgroup >= Math.Max(mesh.MaxVertices, mesh.MaxPrimitives));
+        if (SkipWithoutMetalDevice("the amplified mesh pipeline compile")) return;
+
+        // The device takes the pipeline's declared output (Metal refuses one past its mesh size limit) and runs a point.
+        var source = shader.Source + FragmentSource;
+        Assert.True(MetalNative.TryCompileLibrary(source, out var library, out var compileError), compileError);
+        var words = new uint[Gen5MslMeshInfo.DrawInfoDwordCount];
+        Gen5MslMeshLaunch.FillDrawInfo(
+            mesh, Gen5MslMeshInputTopology.PointList, words, count: 1, instanceCount: 1, indexed: false,
+            indexType: 0, firstIndex: 0, baseVertex: 0, firstInstance: 0);
+        var drawInfo = new byte[words.Length * sizeof(uint)];
+        Buffer.BlockCopy(words, 0, drawInfo, 0, drawInfo.Length);
+        Assert.True(
+            MetalNative.TryRenderMesh(
+                library,
+                shader.EntryPoint,
+                "gen5_mesh_test_fs",
+                [
+                    (BuildArgumentBuffer(shader), 0u),
+                    (new byte[64], 1u),
+                    (drawInfo, mesh.DrawInfoBufferIndex),
+                    (new byte[16], mesh.IndexBufferIndex),
+                    (new byte[16], Gen5MslMeshInfo.MeshletBufferIndex),
+                ],
+                threadgroups: 1,
+                mesh.ThreadsPerThreadgroup,
+                TargetSize,
+                TargetSize,
+                out _,
+                out var renderError),
+            $"the amplified mesh pipeline failed: {renderError}");
+    }
+
     [Theory]
     [InlineData(100u, null)]
     [InlineData(68u, 40u)]
