@@ -99,12 +99,18 @@ public static partial class Gen5MslTranslator
         }
 
         options ??= Gen5MslCodegenOptions.FromEnvironment;
-        var context = new CompilationContext(request, options);
+        SharedCallBodies? sharedCalls = null;
+        if (options.SharedCallBodies)
+        {
+            request = ShareLinkedCallBodies(request, out sharedCalls);
+        }
+
+        var context = new CompilationContext(request, options, sharedCalls);
         var compiled = context.TryCompile(out shader, out error);
         if (!compiled && context.HalfLocalLoopExchanged)
         {
             options = options with { HalfLocalWaveLoops = false };
-            context = new CompilationContext(request, options);
+            context = new CompilationContext(request, options, sharedCalls);
             compiled = context.TryCompile(out shader, out error);
         }
 
@@ -116,7 +122,7 @@ public static partial class Gen5MslTranslator
             }
 
             options = options with { HalfLocalExecBranches = false };
-            context = new CompilationContext(request, options);
+            context = new CompilationContext(request, options, sharedCalls);
             compiled = context.TryCompile(out shader, out error);
         }
 
@@ -130,7 +136,7 @@ public static partial class Gen5MslTranslator
             }
 
             Interlocked.Increment(ref _execRunsRefused);
-            if (!new CompilationContext(request, options with { ExecRuns = false }).TryCompile(out shader, out error))
+            if (!new CompilationContext(request, options with { ExecRuns = false }, sharedCalls).TryCompile(out shader, out error))
             {
                 return false;
             }
@@ -227,11 +233,13 @@ public static partial class Gen5MslTranslator
         }
 
         private readonly Gen5MslCodegenOptions _options;
+        private readonly SharedCallBodies? _sharedCalls;
 
-        public CompilationContext(ShaderCompileRequest request, Gen5MslCodegenOptions options)
+        public CompilationContext(ShaderCompileRequest request, Gen5MslCodegenOptions options, SharedCallBodies? sharedCalls = null)
         {
             _request = request;
             _options = options;
+            _sharedCalls = sharedCalls;
             _argumentLayout = Gen5MslArgumentLayout.Build(request.Bindings);
             // An NGG primitive shader that exchanges data through LDS, synchronizes or asks
             // for export space is the merged ES/GS workgroup stage, which only a mesh
@@ -626,6 +634,12 @@ public static partial class Gen5MslTranslator
             {
                 // No row until a run-time entry finds one: a record read before it takes the null element.
                 source.AppendLine($"    uint {CallRecordRowName} = 0xFFFFFFFFu;");
+            }
+
+            if (_sharedCalls is not null)
+            {
+                // The slot of the record whose entry ran last, which a shared body's record variants select by.
+                source.AppendLine($"    uint {CallSlotName} = 0u;");
             }
         }
 
@@ -1433,7 +1447,7 @@ public static partial class Gen5MslTranslator
                 uint? binding = null;
                 for (var index = first; index < first + count; index++)
                 {
-                    if (!request.Memory.TryGetIndex(instruction.Pc, (uint)index, out var memory))
+                    if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), (uint)index, out var memory))
                     {
                         return false;
                     }
@@ -1461,7 +1475,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                if (!request.Memory.TryGetIndex(instruction.Pc, (uint)component, out var memoryIndex))
+                if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), (uint)component, out var memoryIndex))
                 {
                     error = $"scalar load component {component} has no memory record";
                     return false;
@@ -1616,7 +1630,7 @@ public static partial class Gen5MslTranslator
             }
 
             var request = _request;
-            if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
+            if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex))
             {
                 error = "global access has no memory record";
                 return false;
@@ -2161,7 +2175,7 @@ public static partial class Gen5MslTranslator
             bindingIndex = -1;
             resource = null!;
             var request = _request;
-            if (!request.Memory.TryGetIndex(pc, 0, out var memoryIndex))
+            if (!request.Memory.TryGetIndex(MemoryPc(pc), 0, out var memoryIndex))
             {
                 return false;
             }
@@ -2187,7 +2201,7 @@ public static partial class Gen5MslTranslator
             elements = [];
             error = string.Empty;
             var request = _request;
-            if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
+            if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex))
             {
                 return false;
             }
@@ -2277,7 +2291,7 @@ public static partial class Gen5MslTranslator
         {
             var request = _request;
             if (!_options.IndexedImageCandidates || elements.Count < IndexedCandidateMinimum ||
-                !request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) ||
+                !request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex) ||
                 !request.IndirectRootByMemoryIndex.ContainsKey(memoryIndex))
             {
                 return false;
@@ -2379,7 +2393,7 @@ public static partial class Gen5MslTranslator
             mipLevel = "0u";
             var request = _request;
             var info = request.Resources.Info;
-            if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
+            if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex))
             {
                 error = "image access has no memory record";
                 return false;

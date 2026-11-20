@@ -104,9 +104,9 @@ public sealed class MslLinkedCallTests(ITestOutputHelper output)
         return new ShaderCompileRequest(plan, resources, layout) { WaveSize = 32, LocalSizeX = 32 };
     }
 
-    private static Gen5MslShader Compile(ShaderCompileRequest request)
+    private static Gen5MslShader Compile(ShaderCompileRequest request, Gen5MslCodegenOptions? options = null)
     {
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options), error);
         return shader;
     }
 
@@ -118,12 +118,19 @@ public sealed class MslLinkedCallTests(ITestOutputHelper output)
         private readonly nint _library;
         private byte[] _result = [];
 
-        public Run(Gen5ShaderProgram program, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false)
+        public Run(Gen5ShaderProgram program, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false,
+            Gen5MslCodegenOptions? options = null)
         {
             Request = MslLinkedCallTests.Request(program, bindlessHeap, callRecords, callMarks);
-            _shader = Compile(Request);
+            _shader = Compile(Request, options);
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             Assert.True(MetalNative.TryCompileLibrary(_shader.Source, out _library, out var error), $"{error}\n{_shader.Source}");
+            LibraryMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         }
+
+        public string Source => _shader.Source;
+
+        public double LibraryMilliseconds { get; }
 
         public ShaderCompileRequest Request { get; }
 
@@ -273,6 +280,98 @@ public sealed class MslLinkedCallTests(ITestOutputHelper output)
         Assert.Equal(expected, run.Word(0));
         if (expected != 0) Assert.All(run.Faults, word => Assert.Equal(0u, word));
         else Assert.Equal(FaultRecord(run.Request.Hash, 16, address, 0), run.Faults);
+    }
+
+    // The copies of one callee that a per-record link holds at a site share one body (Gen5MslTranslator.SharedCalls.cs):
+    // each record's entry stores its slot and branches into the last copy, so the module holds one body however many
+    // records the table has. Every record still runs with its own argument, a store inside the body (a memory instruction
+    // whose records bind the same buffer) is emitted once, the caller continues with the body's registers, an unknown
+    // argument still faults, and the inlined form
+    // (SharedCallBodies off, SHARPEMU_METAL_SHARED_CALL_BODIES=0) computes the same words. The output lists the MSL size and
+    // the Metal library compile time of both forms.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(8)]
+    [InlineData(64)]
+    [InlineData(256)]
+    public void RecordsOfOneCalleeShareOneBody(int records)
+    {
+        // The caller adds 5 to v2 after the call and stores v[1:2]; the body stores v1 = argument + 3 * 31 and v2 = 7 itself
+        // first, so both stores read the body's result.
+        Gen5ShaderProgram Caller(uint argument) => Program(MoveScalar(0, 14, 0x2000), MoveScalar(4, 15, 0),
+            MoveScalar(8, 16, argument), MoveScalar(12, 17, 0), Vop1(16, "VMovB32", 2, Operand(0)),
+            Sop1(20, "SSwappcB64", 14, Gen5Operand.Scalar(14)),
+            Vop2(24, "VAddU32", 2, Operand(5), Gen5Operand.Vector(2)),
+            BufferAccess(28, "BufferStoreDwordx2", ResultRegister, dwords: 2, vectorData: 1), EndProgram(36));
+        var function = Program([
+            Vop1(0, "VMovB32", 1, Gen5Operand.Scalar(16)),
+            .. Enumerable.Range(0, 31).Select(index => Vop2(4 + (uint)index * 4, "VAddU32", 1, Operand(3), Gen5Operand.Vector(1))),
+            Vop1(128, "VMovB32", 2, Operand(7)),
+            BufferAccess(132, "BufferStoreDwordx2", ResultRegister, dwords: 2, vectorData: 1),
+            Sop1(140, "SSetpcB64", 0, Gen5Operand.Scalar(14))]);
+        ShaderCallTarget[] Targets() =>
+            Enumerable.Range(0, records).Select(index => new ShaderCallTarget(0x2000, 10 + (ulong)index, function)).ToArray();
+
+        var shared = Compile(Request(Gen5ShaderCallLinker.Link(Caller(10), [new(20, 14, 16, 14, 24, Targets())])),
+            Gen5MslCodegenOptions.FromEnvironment with { SharedCallBodies = true }).Source;
+        var inline = Compile(Request(Gen5ShaderCallLinker.Link(Caller(10), [new(20, 14, 16, 14, 24, Targets())])),
+            Gen5MslCodegenOptions.FromEnvironment with { SharedCallBodies = false }).Source;
+        if (records > 1)
+        {
+            Assert.Contains("sharpemu_call_slot", shared, StringComparison.Ordinal);
+            Assert.True(shared.Length < inline.Length, $"shared {shared.Length} bytes, inline {inline.Length}");
+        }
+
+        if (SkipWithoutMetalDevice()) return;
+        var arguments = new[] { 10u, 10u + (uint)records / 2, 10u + (uint)records - 1, 10u + (uint)records }.Distinct();
+        double sharedMs = 0, inlineMs = 0;
+        foreach (var argument in arguments)
+        {
+            var linked = Gen5ShaderCallLinker.Link(Caller(argument), [new(20, 14, 16, 14, 24, Targets())]);
+            var words = new List<(uint, uint, uint[])>();
+            foreach (var sharing in new[] { true, false })
+            {
+                var run = new Run(linked, options: Gen5MslCodegenOptions.FromEnvironment with { SharedCallBodies = sharing });
+                if (sharing) sharedMs = run.LibraryMilliseconds;
+                else inlineMs = run.LibraryMilliseconds;
+                run.Dispatch();
+                words.Add((run.Word(0), run.Word(4), run.Faults));
+            }
+
+            var known = argument < 10 + (uint)records;
+            Assert.Equal(known ? argument + 93 : 0u, words[0].Item1);
+            Assert.Equal(known ? 12u : 0u, words[0].Item2);
+            if (known) Assert.All(words[0].Item3, word => Assert.Equal(0u, word));
+            else Assert.Equal(FaultRecord(Hash, 20, 0x2000, 0), words[0].Item3);
+            Assert.Equal(words[1].Item1, words[0].Item1);
+            Assert.Equal(words[1].Item2, words[0].Item2);
+            Assert.Equal(words[1].Item3, words[0].Item3);
+        }
+
+        output.WriteLine($"SHARED_BODIES records={records} shared_msl_bytes={shared.Length} shared_library_ms={sharedMs:F0} " +
+            $"inline_msl_bytes={inline.Length} inline_library_ms={inlineMs:F0}");
+    }
+
+    // Records whose copies load a different buffer through their own argument: the shared body emits the load once per
+    // record under a test of the slot, each with its own copy's memory records, and the library compiles.
+    [Fact]
+    public void ASharedBodyEmitsAMemoryInstructionPerRecordWhoseResourcesDiffer()
+    {
+        var caller = Program(MoveScalar(0, 14, 0x2000), MoveScalar(4, 15, 0), MoveScalar(8, 16, 0x100000), MoveScalar(12, 17, 0),
+            Sop1(16, "SSwappcB64", 14, Gen5Operand.Scalar(14)),
+            BufferAccess(20, "BufferStoreDword", ResultRegister, vectorData: 1), EndProgram(28));
+        // s[20:23] = the V# at the record's argument; v1 = the buffer's first dword.
+        var function = Program(ScalarLoad(0, 16, 20, 4), BufferAccess(8, "BufferLoadDword", 20, vectorData: 1),
+            Sop1(16, "SSetpcB64", 0, Gen5Operand.Scalar(14)));
+        var linked = Gen5ShaderCallLinker.Link(caller, [new(16, 14, 16, 14, 20,
+            [new(0x2000, 0x100000, function), new(0x2000, 0x200000, function), new(0x2000, 0x300000, function)])]);
+        var request = Request(linked);
+        var shared = Compile(request, Gen5MslCodegenOptions.FromEnvironment with { SharedCallBodies = true }).Source;
+        var inline = Compile(request, Gen5MslCodegenOptions.FromEnvironment with { SharedCallBodies = false }).Source;
+        Assert.Contains("sharpemu_call_slot == 2u", shared, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_call_slot", inline, StringComparison.Ordinal);
+        if (SkipWithoutMetalDevice()) return;
+        Assert.True(MetalNative.TryCompileLibrary(shared, out _, out var error), error);
     }
 
     // A function reads its program address with S_GETPC_B64: the address the dispatch pushes for it (a function the game

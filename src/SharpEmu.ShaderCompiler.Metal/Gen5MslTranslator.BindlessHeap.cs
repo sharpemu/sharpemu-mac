@@ -189,7 +189,7 @@ public static partial class Gen5MslTranslator
         {
             use = default;
             slot = -1;
-            if (!_request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) ||
+            if (!_request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex) ||
                 !_request.HeapImageByMemoryIndex.TryGetValue(memoryIndex, out use))
             {
                 return false;

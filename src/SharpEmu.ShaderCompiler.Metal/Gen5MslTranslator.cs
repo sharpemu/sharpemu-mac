@@ -2254,10 +2254,16 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+            if (IsSharedCallMemoryInstruction(instruction, out var recordPcs))
+            {
+                return TryEmitSharedCallInstruction(instruction, recordPcs, out error);
+            }
+
             BeginInstruction(instruction);
             if (instruction.Control is ShaderCallEntryControl callEntry)
             {
                 EmitShaderCallEntry(callEntry);
+                EmitCallSlot(instruction);
                 return true;
             }
 
@@ -2615,7 +2621,7 @@ public static partial class Gen5MslTranslator
                 return TryEmitVertexInputFetch(control, vertexInput, out error);
             }
 
-            if (_request.Memory.TryGetIndex(instruction.Pc, 0, out var accessMemoryIndex))
+            if (_request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var accessMemoryIndex))
             {
                 var accessMemory = _request.Memory[accessMemoryIndex];
                 if (accessMemory.PlanningOnly)

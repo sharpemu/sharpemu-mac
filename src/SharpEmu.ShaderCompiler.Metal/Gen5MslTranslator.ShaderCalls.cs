@@ -20,9 +20,8 @@ namespace SharpEmu.ShaderCompiler.Metal;
 // images and samplers the copy reads through the record's argument are the heap elements the host resolved for that row.
 // A call whose callee the program lacks marks it (DescriptorBindingKind.CallMarks) and returns at once.
 //
-// The SPIR-V translator also merges the copies of a callee into one body and outlines compute bodies into functions
-// (Gen5SpirvTranslator.SharedCalls.cs) to bound its driver's compile time; those rewrites keep the linker's run-time
-// behaviour, and this translator emits the linker's form as it is.
+// As the SPIR-V translator does (Gen5SpirvTranslator.SharedCalls.cs), the records of one callee at one site share one
+// body (Gen5MslTranslator.SharedCalls.cs); its outlined functions that serve several sites are not ported.
 public static partial class Gen5MslTranslator
 {
     private sealed partial class CompilationContext
@@ -228,7 +227,7 @@ public static partial class Gen5MslTranslator
         private bool IsCallRecordImageAccess(Gen5ShaderInstruction instruction, out CallRecordFieldUse use)
         {
             use = default;
-            return _request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) &&
+            return _request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex) &&
                 _request.CallRecordImageByMemoryIndex.TryGetValue(memoryIndex, out use) && use.Slot >= 0;
         }
 
