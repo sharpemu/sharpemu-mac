@@ -2310,8 +2310,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool gpuThreadCounts) =>
         GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, retry: null, gpuThreadCounts);
 
+    // Each public form below has exactly the interface member's signature: IShaderPipelineProvider gives these members
+    // default bodies, so a form with one more (even optional) parameter would not implement its member and the default
+    // would answer for it (InterfaceDefaultShadowTests).
     public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
-        ComputeProgramRetry? retry, bool gpuThreadCounts = false) =>
+        ComputeProgramRetry? retry) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, retry, gpuThreadCounts: false);
+
+    private ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
+        ComputeProgramRetry? retry, bool gpuThreadCounts) =>
         GetComputeProgramKept(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect | gpuThreadCounts, retry, ahead: false, out _,
             gpuThreadCounts)!;
 
@@ -2320,9 +2327,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // frontend may turn into an image copy, or that is unavailable, is refused, so the dispatch resolves it as before.
     // The kept programs it reads and updates are this thread's own.
     public ComputeProgram? ResolveComputeProgramAhead(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY,
-        uint dimensionZ, bool indirect, out ComputePrefetchRefusal refusal, bool gpuThreadCounts = false) =>
-        GetComputeProgramKept(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect | gpuThreadCounts, retry: null, ahead: true,
-            out refusal, gpuThreadCounts);
+        uint dimensionZ, bool indirect, out ComputePrefetchRefusal refusal) =>
+        // A dispatch whose thread counts the GPU writes is never resolved ahead (RenderExecutor.Compute).
+        GetComputeProgramKept(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, retry: null, ahead: true,
+            out refusal, gpuThreadCounts: false);
 
     private ComputeProgram? GetComputeProgramKept(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ,
         bool indirect, ComputeProgramRetry? retry, bool ahead, out ComputePrefetchRefusal refusal, bool gpuThreadCounts)
