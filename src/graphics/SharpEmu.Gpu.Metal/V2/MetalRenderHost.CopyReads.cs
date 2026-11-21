@@ -616,7 +616,120 @@ internal sealed partial class MetalRenderHost
         $" copy_read_pending={Interlocked.Exchange(ref _copyReadPending, 0)}" +
         $" copy_read_order={Interlocked.Exchange(ref _copyReadOrder, 0)}" +
         $" copy_read_none={Interlocked.Exchange(ref _copyReadNone, 0)}" +
-        $" concurrent_copy_reads={Interlocked.Exchange(ref _concurrentCopyReads, 0)}";
+        $" concurrent_copy_reads={Interlocked.Exchange(ref _concurrentCopyReads, 0)}" +
+        $" concurrent_overlay_reads={Interlocked.Exchange(ref _concurrentOverlayReads, 0)}" +
+        $" clean_overlay_reads={Interlocked.Exchange(ref _cleanOverlayReads, 0)}";
+
+    /// <summary>
+    /// SHARPEMU_METAL_V2_CONCURRENT_OVERLAY_READS=0 abandons a resolution off the worker that reads a word a pending
+    /// command-processor write owes, as before, and lets the worker's clean read of such a word wait for the GPU.
+    /// A posted word copy (TryPostWordCopy) is such a write: Demon's Souls posts ~120 a frame, among them the 3 KB table
+    /// its draws read (see ConcurrentCopyReads), and every draw resolved ahead that read it was abandoned and resolved
+    /// again on the worker (~500 a frame), whose own clean reads of it waited for the GPU (~11 waits, ~12 ms a frame).
+    /// </summary>
+    internal bool ConcurrentOverlayReads { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_CONCURRENT_OVERLAY_READS") != "0";
+
+    private long _concurrentOverlayReads;
+    private long _cleanOverlayReads;
+
+    /// <summary>
+    /// Off the worker: a word a recorded GPU write owns, read as the bytes a command-processor write recorded ahead of
+    /// the draw still owes there, the way the worker reads it (TryReadGuest answers from the overlay before any wait).
+    /// The overlay speaks only for bytes no write recorded after it covers (each such write forgets them before it is
+    /// logged), so bytes it covers whole are the ones the draw sees, landed by the take or not. No image the GPU drew
+    /// into may own them, and no pending label (the worker reads labels first). Like a copy read, the word's owned
+    /// answer is dropped by the caller and the range kept for the take's write-log test: a write logged after the
+    /// resolution began over these bytes refuses it.
+    /// </summary>
+    private bool TryReadPendingCommandProcessorBytesConcurrent(ulong address, Span<byte> destination, ConcurrentAssumptions assumptions)
+    {
+        if (!ConcurrentOverlayReads || _cpOverlay.Count == 0)
+        {
+            return false;
+        }
+
+        var size = (ulong)destination.Length;
+        var serial = assumptions.Serial;
+        if (size == 0 || size > ConcurrentWordLineBytes || address > ulong.MaxValue - size ||
+            (_imageCache.MayOwn(address, size) && _imageCache.HasGpuModifiedImageBytes(address, size)) ||
+            (_labelOverlay.Count != 0 && _labelOverlay.Coverage(address, size, serial) != MetalOverlayCoverage.None))
+        {
+            return false;
+        }
+
+        // Up to 64 bytes byte by byte; a longer range (a compared range of a proof, up to a line) in whole words.
+        var covered = size <= 64
+            ? _cpOverlay.TryReadCovered(address, destination, serial)
+            : ((address | size) & 3) == 0 &&
+              _cpOverlay.ReadCoveredWords(address, destination, serial) == (size == 256 ? ulong.MaxValue : (1UL << (int)(size / 4)) - 1);
+        if (!covered)
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _concurrentOverlayReads);
+        assumptions.NoteCopiedThrough(address, size);
+        return true;
+    }
+
+    /// <summary>
+    /// Right after a word was read from a pending command-processor write (TryPendingCommandProcessorBytesConcurrent), the
+    /// other words of its line that the same reading would answer are read into the resolution's copy line, and later
+    /// reads of them take the bytes from there (TryReadGuestWordConcurrent), as FillCopyLine does for a pending copy.
+    /// A resolution reads a posted table word by word (Demon's Souls: ~100 words a draw, ~500 draws a frame), and each
+    /// word's own tests and overlay read took the overlay's lock. Each word kept is what that reading returns now:
+    ///   - owned by a recorded GPU write (the line's pending word mask), and by nothing tested before it: no write the
+    ///     command thread queued for this job, no image the GPU drew into over the line;
+    ///   - covered whole by the overlay, with no pending label over the line;
+    /// all read while the record stamp and the ownership versions stand (checked before and after). The line is kept
+    /// for the take's write-log test like a copied line: a write logged after the resolution began refuses it.
+    /// </summary>
+    private void FillOverlayLine(ConcurrentAssumptions assumptions, ulong line)
+    {
+        assumptions.CopyLine = ulong.MaxValue;
+        const ulong size = ConcurrentWordLineBytes;
+        var versions = OwnershipVersions();
+        var stamp = _gpuWrites.MutationStamp;
+        if ((stamp & 1) != 0 || PendingCommandWriteHolds(line, size) ||
+            (_imageCache.MayOwn(line, size) && _imageCache.HasGpuModifiedImageBytes(line, size)) ||
+            (_labelOverlay.Count != 0 && _labelOverlay.Coverage(line, size, assumptions.Serial) != MetalOverlayCoverage.None) ||
+            !_gpuWrites.TryPendingWordMask(line, assumptions.Serial(), out var pending, out var maskStamp) || maskStamp != stamp)
+        {
+            return;
+        }
+
+        var words = _cpOverlay.ReadCoveredWords(line, assumptions.CopyLineBytes, assumptions.Serial) & pending;
+        if (words == 0 || _gpuWrites.MutationStamp != stamp || OwnershipVersions() != versions)
+        {
+            return;
+        }
+
+        assumptions.NoteCopiedThrough(line, size);
+        assumptions.CopyLine = line;
+        assumptions.CopyLineWords = words;
+        assumptions.CopyLineStamp = stamp;
+        assumptions.CopyLineVersions = versions;
+    }
+
+    /// <summary>
+    /// On the worker: a clean read of a word a recorded GPU write owns, answered from a pending command-processor write
+    /// that covers it whole instead of waiting for the GPU (TryReadGuest's order). False: the caller waits as before.
+    /// </summary>
+    private bool TryReadPendingCommandProcessorBytes(ulong address, Span<byte> destination)
+    {
+        if (!ConcurrentOverlayReads || _cpOverlay.Count == 0 ||
+            (_imageCache.MayOwn(address, (ulong)destination.Length) && _imageCache.HasGpuModifiedImageBytes(address, (ulong)destination.Length)) ||
+            !_cpOverlay.TryReadCovered(address, destination, _completedSerialReader ??= () => CompletedSerial))
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _cleanOverlayReads);
+        Interlocked.Increment(ref _overlayReads);
+        NotePendingAnswer(address, destination.Length);
+        return true;
+    }
 
     private void WriteCopyReadTraces()
     {

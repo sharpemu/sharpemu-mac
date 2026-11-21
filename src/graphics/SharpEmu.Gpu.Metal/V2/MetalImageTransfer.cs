@@ -605,17 +605,28 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
 
         // Metal sizes level i of a texture as max(1, width >> i), as the guest does, so a
         // texture from firstLevel has exactly the extents of the chain's levels from there.
+        // A description with levels past its extent's 1x1 level (a colour target rendered past
+        // it, ImageRequestBuilders.ColorTarget) keeps the chain's levels only, as upstream's
+        // CachedImage does (MipChainLevels): Metal aborts on a texture descriptor with more.
         return new MetalTextureShape(
             (ulong)format,
             (ulong)TextureTypeOf(description),
             Math.Max(description.Extent.Width >> (int)firstLevel, 1),
             Math.Max(description.Extent.Height >> (int)firstLevel, 1),
             description.IsVolume ? description.Extent.Depth : 1,
-            description.Resources.Levels - firstLevel,
+            Math.Max(HostLevels(description), firstLevel + 1) - firstLevel,
             description.IsVolume ? 1 : description.Resources.Layers,
             description.Samples,
             (ulong)UsageOf(description, format, SrgbWritable.Value));
     }
+
+    /// <summary>
+    /// The guest levels a texture of the description holds: its levels, but none past its extent's 1x1 level. The
+    /// guest levels after those have no texture level; transfers leave them out (PlanColor).
+    /// </summary>
+    internal static uint HostLevels(in ImageDescription description) =>
+        Math.Min(description.Resources.Levels, ImageDescription.FullChainLevels(
+            description.Extent.Width, description.Extent.Height, description.IsVolume ? description.Extent.Depth : 1));
 
     public (ulong Start, ulong End) LevelBytes(in ImageDescription description, uint firstLevel)
     {
@@ -1821,6 +1832,11 @@ internal sealed partial class MetalImageTransfer : IMetalImageTransfer, IDisposa
             plan.TexelHeight = element.TexelHeight;
         }
 
+        // Guest levels past the texture's chain (HostLevels) have no texture level to move, as upstream's
+        // DropLevelsWithoutHostLevel: an upload leaves them out, a download leaves their guest bytes as they are.
+        var hostLevels = HostLevels(description);
+        plan.Copies.RemoveAll(copy => copy.Level >= hostLevels);
+        plan.Tiles.RemoveAll(transfer => transfer.Level >= hostLevels);
         return plan;
     }
 

@@ -60,6 +60,11 @@ public sealed partial class GpuCommandInterpreter
     private ulong _lastWriteValue;
     private int _lastWriteLength;
     private ulong _lastWritePacket;
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the packet whose passed wait waits softly for a release, whether the last slice
+    // stopped for it, and the address of the packet whose handler runs now.
+    private SoftWait? _softWait;
+    private bool _suspendedForLanding;
+    private ulong _packetAddress;
 
     // Since this queue's last command-processor write: a read answered from a value not yet landed, or a partial flush,
     // cache action or acquire. Either makes the next write a "work before me is done" signal the guest may act on, so the
@@ -234,6 +239,28 @@ public sealed partial class GpuCommandInterpreter
 
     public bool IsComputeQueue => InterruptEventId >= ComputeQueueBase;
 
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the releases of every queue, set by the command stream queue; null when off.
+    internal EndOfPipeLandings? Landings { get; set; }
+
+    // Set by the command stream queue for each slice: another queue's head may run now, and the newest completed GPU tick.
+    internal bool MayDeferForLanding { get; set; }
+
+    internal ulong CompletedGpuTick { get; set; }
+
+    // The release the last slice stopped for, or null, and when its soft wait began; the queue keeps such a head runnable,
+    // behind the other queues, until the same deadline.
+    internal EndOfPipeLanding? TakeLandingDeferral(out long since)
+    {
+        since = _softWait?.Since ?? 0;
+        if (!_suspendedForLanding || _softWait is null)
+        {
+            return null;
+        }
+
+        _suspendedForLanding = false;
+        return _softWait.Landing;
+    }
+
     public CommandRegisterBanks Registers { get; } = new();
 
     // The typed banks the render executor reads; the dictionaries feed the translation they replace.
@@ -251,9 +278,9 @@ public sealed partial class GpuCommandInterpreter
 
     public ulong DispatchIndirectArgumentsBase { get; private set; }
 
-    // Persistent draw state: indirect draws update it for later draws. An indirect draw
-    // resolved on the GPU leaves the count in guest memory; it is read only if a later
-    // draw needs it.
+    // Persistent draw state (NUM_INSTANCES). Indirect draws update it for later draws as
+    // IndirectInstanceInherit says; with All, one resolved on the GPU leaves the count in
+    // guest memory, read only if a later draw needs it.
     public uint InstanceCount
     {
         get
@@ -341,6 +368,8 @@ public sealed partial class GpuCommandInterpreter
     {
         var before = TypedRegisters.Context;
         _lastWriteLength = 0;
+        // A register reset leaves labels in memory as they are; only this queue's own soft wait ends.
+        EndSoftWait();
         Registers.Reset();
         TypedRegisters.Reset();
         IndexTypeAndSize = 0;
@@ -391,6 +420,12 @@ public sealed partial class GpuCommandInterpreter
         execution.MadeProgress = false;
         execution.Yielded = false;
         _yieldRequested = false;
+        _suspendedForLanding = false;
+        // A soft wait of a submission that will not run again (dropped, cancelled or discarded) ends here.
+        if (_softWait is { } soft && !ReferenceEquals(soft.Execution, execution))
+        {
+            EndSoftWait();
+        }
         // Forwarding is local to this slice, never a cached signal from an older submission.
         _lastWriteLength = 0;
         _dispatchMayOverlap = false;
@@ -745,6 +780,7 @@ public sealed partial class GpuCommandInterpreter
             }
 
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
+            _packetAddress = packetAddress;
             uint consumed;
             var packetStarted = PacketProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
             var handlerStarted = SharpEmu.Libs.Diagnostics.PacketHandlerTally.Enabled ? Stopwatch.GetTimestamp() : 0;

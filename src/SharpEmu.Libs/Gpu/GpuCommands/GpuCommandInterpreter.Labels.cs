@@ -235,12 +235,31 @@ public sealed partial class GpuCommandInterpreter
         if (_host.TryDeferEndOfPipe(QueueId, in completion))
         {
             _lastWriteLength = 0;
+            // SHARPEMU_END_OF_PIPE_SOFT_WAITS: a deferred label replaces any earlier hint for its address.
+            Landings?.Forget(write.Destination);
             return;
         }
 
         if (completion.WaitForGpu) _host.SynchronizeGpu();
+        // A label the host defers (DefersEndOfPipeLabel) is not in guest memory yet: it takes a soft-wait hint only on a
+        // host that records the landings of deferred labels (another queue's wait reads it from the pending labels).
+        var takesNoLanding = _host.DefersEndOfPipeLabel(write.Kind) && !_host.RecordsDeferredLabelLandings;
         if (is64Bit) WriteEndOfPipeQword(write.Destination, write.Value, write.Kind);
         else WriteEndOfPipeDword(write.Destination, (uint)write.Value, write.Kind);
+        // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the label is visible now; the host names the tick its release completes at.
+        if (Landings is { } landings)
+        {
+            if (takesNoLanding)
+            {
+                landings.Forget(write.Destination);
+            }
+            else if (landings.Publish(QueueId, in write) is { } landing)
+            {
+                RecordHostEndOfPipe(write with { Landing = landing });
+                return;
+            }
+        }
+
         RecordHostEndOfPipe(in write);
     }
 

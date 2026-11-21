@@ -354,7 +354,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             if (acquireResult == Result.Timeout)
             {
-                ReleaseUnsubmittedPresentationResources(
+                DropPresentationAfterAcquireTimeout(
+                    in presentation,
                     frameSlot,
                     ownsPresentedGuestImageVersion,
                     presentedGuestImage);

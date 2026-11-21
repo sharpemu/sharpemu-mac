@@ -26,7 +26,8 @@ internal static class Gen5BvhReference
         float extent,
         float[] origin,
         float[] direction,
-        float[] inverseDirection)
+        float[] inverseDirection,
+        Func<ulong, bool>? isMapped = null)
     {
         var baseAddress = (((ulong)(descriptor[1] & 0xFF) << 32) | descriptor[0]) << 8;
         var grow = (descriptor[1] >> 23) & 0xFF;
@@ -36,21 +37,27 @@ internal static class Gen5BvhReference
         var type = (uint)nodePointer & 7;
         var index = nodePointer >> 3;
 
-        uint[] Fetch(int count)
+        // A node is loaded only when each of its 64-byte units is mapped (upstream 7cf0ac568's RayNode); null otherwise.
+        uint[]? Fetch(int count)
         {
             var words = new uint[count];
             var address = baseAddress + (index << 6);
+            for (var unit = 0ul; unit * 16 < (ulong)count; unit++)
+                if (isMapped is not null && !isMapped(address + unit * 64))
+                    return null;
             for (var word = 0; word < count; word++)
                 words[word] = readDword(address + (ulong)word * 4);
             return words;
         }
 
         if (type <= 1 && index <= last)
-            return Triangle(Fetch(16), type, barycentrics, origin, direction, inverseDirection);
+            return Fetch(16) is { } triangle
+                ? Triangle(triangle, type, barycentrics, origin, direction, inverseDirection)
+                : [0x7F80_0000, 0x3F80_0000, Invalid, 0];
         if (type == 4 && index <= last)
-            return Box(Fetch(16), fp16: true, grow, sort, extent, origin, inverseDirection);
+            return Fetch(16) is { } box16 ? Box(box16, fp16: true, grow, sort, extent, origin, inverseDirection) : [Invalid, Invalid, Invalid, Invalid];
         if (type == 5 && index < last)
-            return Box(Fetch(28), fp16: false, grow, sort, extent, origin, inverseDirection);
+            return Fetch(28) is { } box32 ? Box(box32, fp16: false, grow, sort, extent, origin, inverseDirection) : [Invalid, Invalid, Invalid, Invalid];
         return [Invalid, Invalid, Invalid, Invalid];
     }
 

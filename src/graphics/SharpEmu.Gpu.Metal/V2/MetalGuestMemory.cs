@@ -714,7 +714,17 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     /// when <paramref name="whole"/> asks for it (a binding, which a prefix would cut short),
     /// otherwise only a prefix is handed back, which the caller has to check.
     /// </summary>
-    public MetalGuestRange Resolve(ulong gpuVa, ulong size, bool whole = false)
+    public MetalGuestRange Resolve(ulong gpuVa, ulong size, bool whole = false) => Resolve(gpuVa, size, whole, read: null);
+
+    /// <summary>Fills a staging span with guest bytes; see <see cref="ReadForStaging"/>.</summary>
+    public delegate void StagingRead(ulong gpuVa, Span<byte> destination);
+
+    /// <summary>
+    /// <see cref="Resolve(ulong, ulong, bool)"/> whose staged copy, when the range is not read in place, is filled by
+    /// <paramref name="read"/> rather than <see cref="ReadForStaging"/>: an image upload reads its guest bytes with
+    /// the resident-backing policy (MetalImageCache.ReadImageBacking), not as a readable prefix and zeros.
+    /// </summary>
+    public MetalGuestRange Resolve(ulong gpuVa, ulong size, bool whole, StagingRead? read)
     {
         if (size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa)
         {
@@ -727,7 +737,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
             return resolved;
         }
 
-        return Upload(gpuVa, size, whole);
+        return Upload(gpuVa, size, whole, read);
     }
 
     /// <summary>
@@ -805,7 +815,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
 
     /// <summary>A ring copy of the guest bytes the CPU sees now, whole up to the largest window.</summary>
     public MetalGuestRange Stage(ulong gpuVa, ulong size) =>
-        size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa ? default : Upload(gpuVa, size, whole: true);
+        size == 0 || gpuVa == 0 || size > ulong.MaxValue - gpuVa ? default : Upload(gpuVa, size, whole: true, read: null);
 
     /// <summary>
     /// True when the whole range lives in the backing. A managed write to such a range
@@ -1433,7 +1443,7 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
     }
 
     /// <summary>Copies guest bytes into the ring; used for ranges no window covers.</summary>
-    private MetalGuestRange Upload(ulong gpuVa, ulong size, bool whole)
+    private MetalGuestRange Upload(ulong gpuVa, ulong size, bool whole, StagingRead? read)
     {
         if (size > _maxUploadBytes && whole && size <= Math.Min(_maxWindowBytes, MaxWholeStageBytes))
         {
@@ -1480,7 +1490,15 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
         }
 
         var range = Allocate(size, RingAlignment, out var span);
-        ReadForStaging(gpuVa, span);
+        if (read is null)
+        {
+            ReadForStaging(gpuVa, span);
+        }
+        else
+        {
+            read(gpuVa, span);
+        }
+
         Interlocked.Add(ref _ringFallbackBytes, (long)size);
         Interlocked.Increment(ref _ringFallbacks);
         return range;
@@ -1511,6 +1529,47 @@ internal sealed partial class MetalGuestMemory : IDisposable, IMetalGranuleRuns
                 break;
             }
         }
+    }
+
+    private long _imageReadsResidentBacking;
+
+    /// <summary>The hole policy of <see cref="ReadImageBacking"/>: SHARPEMU_IMAGE_BACKING_HOLES=1; tests switch it.</summary>
+    internal static bool ImageBackingHoles { get; set; } = SharpEmu.Libs.Gpu.Images.ResidentImageBacking.HolesAllowed;
+
+    /// <summary>Staged image reads the CPU view could not serve whole and the resident-backing read did (PRT/AMM, holes).</summary>
+    public long ImageReadsResidentBacking => Interlocked.Read(ref _imageReadsResidentBacking);
+
+    /// <summary>
+    /// The staged read of an image upload (<see cref="StagingRead"/>), with the policy of upstream's Vulkan image caches
+    /// (<see cref="ResidentImageBacking"/>): every byte is the guest's - CPU-visible guest memory, or partially resident
+    /// (PRT/AMM) memory whose reserved pages read as zero - or, with SHARPEMU_IMAGE_BACKING_HOLES=1, an unmapped page reads
+    /// as zero. Anything else stops the GPU, as upstream does: an image's upload reads only the levels its texture holds
+    /// (a streamed texture's resident levels, MetalImageCache.BaseLevel.cs), so an unmapped byte in them is not a level
+    /// to invent, and the readable prefix and zeros <see cref="ReadForStaging"/> gives a binding would hide that.
+    /// Guest memory outside the shared backing (one process only) is still read through the CPU view first.
+    /// </summary>
+    public void ReadImageBacking(ulong gpuVa, Span<byte> span)
+    {
+        var size = (ulong)span.Length;
+        MetalGpuReferenceCensus.Mark(gpuVa, size, MetalRefKind.Staged);
+        SharpEmu.HLE.GuestMemory.SplitPrivateAccess.CheckGpuRead(_backing, gpuVa, size, "metal-image-read");
+        if (_memory.TryRead(gpuVa, span))
+        {
+            return;
+        }
+
+        if (SharpEmu.Libs.Gpu.Images.ResidentImageBacking.TryRead(_backing, gpuVa, span, ImageBackingHoles))
+        {
+            Interlocked.Increment(ref _imageReadsResidentBacking);
+            return;
+        }
+
+        throw GpuFatal.Fatal(
+            $"Could not read the mapped guest image backing: address=0x{gpuVa:X16} size=0x{size:X16} " +
+            $"range_backed={_backing.IsBackedRange(gpuVa, size)} first_byte_backed={_backing.IsBackedRange(gpuVa, 1)} " +
+            $"last_byte_backed={_backing.IsBackedRange(gpuVa + size - 1, 1)} " +
+            $"split={SharpEmu.HLE.GuestMemory.SplitPrivateAccess.Enabled} (SHARPEMU_IMAGE_BACKING_HOLES=1 reads unmapped " +
+            "pages after a mapped first page as zero; SHARPEMU_METAL_V2_PARTIAL_MIP_CHAINS=0 restores the readable-prefix read).");
     }
 
     /// <summary>A second ring copy of bytes already staged in the ring; invalid when the range is not a ring range.</summary>

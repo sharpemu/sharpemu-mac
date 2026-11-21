@@ -105,6 +105,7 @@ public static partial class ResourceMaterializer
         public List<BufferCandidateTable> BufferCandidateTables = [];
         public List<BindlessImageEntries> BindlessImages = [];
         public BindlessImageTable[] BindlessTables = [];
+        public BindlessHeapDescriptor[] Heaps = [];
     }
 
     // A V#-described image table read for one draw: the distinct usable descriptors it holds
@@ -253,6 +254,7 @@ public static partial class ResourceMaterializer
             UserData = nextSnapshot.UserData,
             DeviceAddressRanges = ranges,
             BindlessImages = nextSnapshot.BindlessTables,
+            Heaps = nextSnapshot.Heaps,
         };
         specialization = nextSpecialization;
         failure = ResourceMaterializationFailure.None;
@@ -1276,8 +1278,16 @@ public static partial class ResourceMaterializer
         return true;
     }
 
+    // The fast path assembles no bindless heap descriptors and evaluates only the planned ranges, so a program that reads
+    // heap records, or whose ranges the planner extends, takes the full path.
     public static bool CanMaterializeFast(ShaderResourcePlan plan) =>
-        plan.IndirectImages.Count == 0 && plan.BufferCandidateTables.Count == 0 && plan.MaterializationProgram is not null;
+        plan.IndirectImages.Count == 0 && plan.BufferCandidateTables.Count == 0 && plan.HeapRecordSources.Count == 0 &&
+        !ExtendsPlannedRanges(plan) && plan.MaterializationProgram is not null;
+
+    // DeviceAddressRangePlanner.Evaluate adds the ranges of the shader function buffers and of the device record counts
+    // after the planned ones; a materialization program evaluates the planned ranges only.
+    private static bool ExtendsPlannedRanges(ShaderResourcePlan plan) =>
+        plan.Graph.Program.FunctionBufferAccesses.Count != 0 || plan.DeviceRecordCounts is not null;
 
     // Materializes every draw from the plan's program: no cached snapshot to prove. The
     // specialization is a function of descriptor words only, so equal words reuse it.
@@ -1755,8 +1765,8 @@ public static partial class ResourceMaterializer
         if (program is not null && program.TryRun(plan, inputs, additionalTableWords, out values, out table, out var programRanges, out activeSources))
         {
             _programRuns.Increment();
-            ProgramCheck?.Invoke(plan, inputs, values, table, programRanges);
-            ranges = programRanges;
+            ranges = ExtendsPlannedRanges(plan) ? DeviceAddressRangePlanner.Evaluate(plan, inputs) : programRanges;
+            ProgramCheck?.Invoke(plan, inputs, values, table, ranges);
         }
         else
         {
@@ -1964,6 +1974,11 @@ public static partial class ResourceMaterializer
             }
 
             snapshot.BufferCandidateTables.Add(candidateTable);
+        }
+
+        if (!TryEvaluateHeaps(plan, inputs, out snapshot.Heaps))
+        {
+            return false;
         }
 
         // One draw's user data is built for that draw and never written again, so the snapshot
@@ -2230,6 +2245,7 @@ public static partial class ResourceMaterializer
     {
         ReadOnlySpan<uint> reserved =
         [
+            // GFX10/10.3 word 2 bit 31 is RESOURCE_LEVEL, not reserved.
             0x00000000u, 0x20000000u, 0x70003000u, 0x00000000u,
             0xe000e000u, 0xf9000000u, 0x00007b00u, 0x00000000u,
         ];
@@ -2378,7 +2394,7 @@ public static partial class ResourceMaterializer
     // other field of the record) is not something it can sample, so a shared selector reads it as null.
     private static bool SamplesAs(ReadOnlySpan<uint> descriptor, ImageResource image)
     {
-        var dimension = DescriptorDimension(descriptor, image.Dimension);
+        var dimension = DescriptorDimension(descriptor, image);
         return dimension == image.Dimension ||
             image.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray &&
             dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray;
@@ -2440,18 +2456,57 @@ public static partial class ResourceMaterializer
         UsableImageCandidate(candidate, image.R128) &&
         (!image.CubeAccess || GuestImageFormat.ImageTypeOf(candidate) == GuestImageFormat.ImageTypeCube);
 
-    // A call record's image the host can give a float view without a conversion in the shader: a valid sampled T# of a
-    // float format. A freed T# (0xFEFEFEFE words) fails the reserved-bit check.
-    public static bool IsFloatHeapImage(ReadOnlySpan<uint> words)
+    // The heap V#s the bindless heap records of a draw are read from, for the host's descriptor set 1. They are read for
+    // every draw, also one whose other descriptors a cache entry still holds: a table the guest allocates per frame names
+    // its heaps at another address each time.
+    internal static bool TryEvaluateHeaps(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out BindlessHeapDescriptor[] heaps)
     {
-        if (words.Length < 8 || !UsableImageCandidate(words, r128: false))
+        heaps = [];
+        if (plan.HeapRecordSources.Count == 0)
+        {
+            return true;
+        }
+
+        var heapSources = new uint[plan.HeapRecordSources.Count];
+        for (var index = 0; index < heapSources.Length; index++)
+            heapSources[index] = plan.HeapRecordSources[index].Source;
+        if (!RuntimeValueEvaluator.EvaluateSources(plan, heapSources, inputs, [], evaluateTable: false, out var words, out _) ||
+            words.Count != heapSources.Length)
         {
             return false;
         }
 
+        heaps = new BindlessHeapDescriptor[words.Count];
+        for (var index = 0; index < words.Count; index++)
+        {
+            if (words[index].DwordCount != 4)
+            {
+                return false;
+            }
+
+            var view = plan.HeapRecordSources[index];
+            heaps[index] = BindlessHeapDescriptor.FromWords(view.Sampler, words[index].Dwords, view.Immediate, view.R128);
+        }
+
+        return true;
+    }
+
+    // The numeric class of a bindless heap record the host can give a view without a conversion in the shader: a valid
+    // sampled T# of a float, unsigned or signed format. Any other record is Unsupported; a freed record (0xFEFEFEFE
+    // words) fails the reserved-bit check. The words of an R128 T# are its first four, the rest zero.
+    public static ImageNumericClass HeapImageNumericClass(ReadOnlySpan<uint> words, bool r128 = false)
+    {
+        if (words.Length < 8 || !UsableImageCandidate(words, r128))
+        {
+            return ImageNumericClass.Unsupported;
+        }
+
         var format = GuestImageFormat.FormatOf(words);
-        return GuestImageFormat.SampledNumericClass(format) == ImageNumericClass.Float &&
-            ImageConversionFormat(format) == GuestImageFormat.Invalid;
+        var numericClass = GuestImageFormat.SampledNumericClass(format);
+        return numericClass is ImageNumericClass.Float or ImageNumericClass.Uint or ImageNumericClass.Sint &&
+            ImageConversionFormat(format) == GuestImageFormat.Invalid
+            ? numericClass
+            : ImageNumericClass.Unsupported;
     }
 
     private static ulong ScalarBufferSize(ReadOnlySpan<uint> descriptor)
@@ -2533,19 +2588,62 @@ public static partial class ResourceMaterializer
             }
         }
         var records = (ulong)material.Dwords[2];
-        if (provenOffsets is null && (indirect.SharedSelector ? records : probeCount) > MaxIndirectImageProbes)
+        // A selector the shader clamps or masks reaches exactly selector * stride + offset for
+        // selector in [0, bound]; that set is proven, so it replaces the exhaustive enumeration
+        // of every residue + k * step (the product wraps modulo 2^32 for an unbounded selector).
+        IEnumerable<ulong> offsets;
+        if (provenOffsets is not null)
         {
-            return false;
+            offsets = provenOffsets.Select(offset => (ulong)offset);
+        }
+        else if (indirect.SelectorBound is { } bound)
+        {
+            var last = (ulong)bound;
+            if (last * indirect.SelectorStride + indirect.SelectorOffset <= uint.MaxValue)
+            {
+                last = indirect.SelectorOffset > limit ? 0 : Math.Min(last, (limit - indirect.SelectorOffset) / indirect.SelectorStride);
+            }
+
+            if (last + 1 > MaxIndirectImageProbes)
+            {
+                failure = ResourceMaterializationFailure.ImageCapacityExceeded;
+                return false;
+            }
+
+            if (diagnostic is not null)
+            {
+                diagnostic.SelectionMode = "clamp_bounded";
+            }
+
+            offsets = Enumerable.Range(0, (int)last + 1)
+                .Select(selector => unchecked((ulong)((uint)selector * indirect.SelectorStride + indirect.SelectorOffset)))
+                .Distinct();
+        }
+        // A loop counter walks the table record by record: the keys are the ones its records hold, not every dword
+        // the stride lattice reaches. Anything past the last record reads as zero, which is key 0.
+        else if (indirect.SharedSelector && records <= MaxIndirectImageProbes)
+        {
+            offsets = Enumerable.Range(0, (int)records).Select(index => (ulong)unchecked(indirect.SelectorOffset + (uint)index * materialStride));
+        }
+        else if (!indirect.SharedSelector && probeCount <= MaxIndirectImageProbes)
+        {
+            offsets = Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
+        }
+        else
+        {
+            // A table this large cannot be enumerated into bindings. The access reads the null image, as a heap record at
+            // an index the host cannot evaluate does (BindlessNullDescriptors), so the draw still runs instead of being
+            // rejected (fatal with strict shaders): a pixel shader reads its terrain
+            // material table through such a selector.
+            result.Descriptors.Add(DescriptorWords.Empty(8));
+            result.Candidates.Add(0);
+            result.Keys.Add(0);
+            failure = ResourceMaterializationFailure.None;
+            return true;
         }
 
         var keys = new List<uint> { 0 };
         var seen = new HashSet<uint> { 0 };
-        // A loop counter walks the table record by record: the keys are the ones its records hold, not every dword
-        // the stride lattice reaches. Anything past the last record reads as zero, which is key 0.
-        var offsets = provenOffsets is not null ? provenOffsets.Select(offset => (ulong)offset) :
-            indirect.SharedSelector ?
-                Enumerable.Range(0, (int)records).Select(index => (ulong)unchecked(indirect.SelectorOffset + (uint)index * materialStride)) :
-                Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
         foreach (var offset in offsets)
         {
             if (!ReadScalarBufferWord(material.Dwords, (uint)offset, indirect.MaterialImmediate, inputs, out var key))
@@ -2583,6 +2681,7 @@ public static partial class ResourceMaterializer
         }
 
         if (!FinishIndirectImage(
+                plan,
                 probed,
                 keys,
                 out var table,
@@ -2597,7 +2696,8 @@ public static partial class ResourceMaterializer
         table.SelectorStride = indirect.SelectorStride;
         table.SelectorOffset = indirect.SelectorOffset;
         table.SelectorDiagnostic = diagnostic;
-        table.UnboundedSelector = indirect.SelectorValues is null;
+        // A clamped or masked selector (SelectorBound) has an analysed range too: a candidate it reaches still fails.
+        table.UnboundedSelector = indirect.SelectorValues is null && indirect.SelectorBound is null;
         result = table;
         return true;
     }
@@ -2639,6 +2739,7 @@ public static partial class ResourceMaterializer
         }
 
         return FinishIndirectImage(
+            plan,
             probed,
             Enumerable.Range(0, (int)indirect.KeyBound)
                 .Select(index => unchecked(indirect.DynamicOffsetBase + ((uint)index << 5))),
@@ -2913,7 +3014,7 @@ public static partial class ResourceMaterializer
             offsets.Add(0);
         }
 
-        return FinishIndirectImage(probed, offsets, out result, out failure);
+        return FinishIndirectImage(plan, probed, offsets, out result, out failure);
     }
 
     private static bool TryReadCleanWord(ulong baseAddress, ulong offset, ResourceRuntimeInputs inputs, out uint word)
@@ -2924,6 +3025,7 @@ public static partial class ResourceMaterializer
     }
 
     private static bool FinishIndirectImage(
+        ShaderResourcePlan plan,
         IReadOnlyList<uint[]> probed,
         IEnumerable<uint> keys,
         out IndirectImageTable result,
@@ -2941,7 +3043,8 @@ public static partial class ResourceMaterializer
             if (found < 0)
             {
                 // A table selected by a loop counter may name up to its largest layout (see FitSharedImageTables).
-                if (result.Descriptors.Count >= (keepFirstCandidates ? MaxSharedCandidates + 1 : ShaderResourceInfo.MaxIndirectImageCandidates))
+                var candidateLimit = ShaderResourceInfo.IndirectImageCandidateLimit(plan.BindlessHeap);
+                if (result.Descriptors.Count >= (keepFirstCandidates ? MaxSharedCandidates + 1 : candidateLimit))
                 {
                     if (keepFirstCandidates)
                     {
@@ -2951,7 +3054,7 @@ public static partial class ResourceMaterializer
 
                     var distinct = probed.Select(words => string.Join(',', words)).Distinct().Count();
                     SpecializationFailed($"indirect image table of {probed.Count} entries holds about {distinct} distinct descriptors, " +
-                        $"more than the {ShaderResourceInfo.MaxIndirectImageCandidates} candidates an access selects among");
+                        $"more than the {candidateLimit} candidates an access selects among");
                     failure = ResourceMaterializationFailure.ImageCapacityExceeded;
                     return false;
                 }
@@ -3062,6 +3165,25 @@ public static partial class ResourceMaterializer
 
     // ---- specialization ----
 
+    // A sampled image an array instruction reads (its dimension, a cube one's too, is Dim2DArray) is compiled as an array
+    // whatever its T# holds: a 2D texture or a null descriptor is bound as a one-layer array view, whose layer the
+    // sampler clamps to its only one, as the hardware clamps the slice to the T#'s layers. The address operands are
+    // those of an array read either way, so the LOD or mip after the slice is read where the instruction puts it, and a
+    // pixel shader that reads both kinds of texture through one instruction compiles once.
+    private static bool SampledArrayRead(ImageResource image) =>
+        image.ResourceClass != ImageResourceClass.Storage && image.Dimension == ImageDimension.Dim2DArray;
+
+    private static ImageDimension DescriptorDimension(ReadOnlySpan<uint> descriptor, ImageResource image)
+    {
+        var dimension = DescriptorDimension(descriptor, image.Dimension);
+        return dimension == ImageDimension.Dim2D && GuestImageFormat.ImageTypeOf(descriptor) == GuestImageFormat.ImageType2D &&
+            SampledArrayRead(image)
+            ? ImageDimension.Dim2DArray
+            : dimension;
+    }
+
+    // The dimension a T# gives an access of the requested dimension, without the one-layer array view of
+    // SampledArrayRead (a bindless table's classes, ClassifyBindlessImagesCore, keep their own dimension).
     private static ImageDimension DescriptorDimension(ReadOnlySpan<uint> descriptor, ImageDimension requested)
     {
         var isArray = requested is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray;
@@ -3434,6 +3556,18 @@ public static partial class ResourceMaterializer
                 continue;
             }
 
+            if (index < info.Images.Count && plan.DescriptorSources[(int)baseImage.Source].Heap is { } heap)
+            {
+                // A heap image has no descriptor before the shader picks its record: the instruction names its class.
+                images[index] = image with
+                {
+                    NumericClass = ImageNumericClass.Float,
+                    Dimension = baseImage.Dimension,
+                    Cube = heap.Cube,
+                };
+                continue;
+            }
+
             if (NullImageDescriptor(descriptor))
             {
                 images[index] = image with
@@ -3444,13 +3578,13 @@ public static partial class ResourceMaterializer
                     NumericClass = baseImage.Atomic64
                         ? ImageNumericClass.Uint64
                         : baseImage.Atomic ? baseImage.NumericClass : ImageNumericClass.Float,
-                    Dimension = ImageDimension.Dim2D,
+                    Dimension = SampledArrayRead(baseImage) ? ImageDimension.Dim2DArray : ImageDimension.Dim2D,
                     Cube = false,
                 };
                 continue;
             }
 
-            var dimension = DescriptorDimension(descriptor, baseImage.Dimension);
+            var dimension = DescriptorDimension(descriptor, baseImage);
             if (dimension == ImageDimension.Unknown)
             {
                 return Fail(
@@ -3477,7 +3611,12 @@ public static partial class ResourceMaterializer
 
             var storage = baseImage.ResourceClass == ImageResourceClass.Storage;
             var conversionFormat = ImageConversionFormat(format);
-            var shaderSwizzle = storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
+            // A storage image with no conversion format takes its select from shader data (RuntimeImageSwizzle), so the
+            // module keeps the identity select for every select bound.
+            var runtimeSwizzle = storage && conversionFormat == GuestImageFormat.Invalid && info.UsesRuntimeImageSwizzles &&
+                image.IndirectRoot == DescriptorConstants.NoIndex;
+            var shaderSwizzle = runtimeSwizzle ? DescriptorConstants.IdentityImageSwizzle
+                : storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
             // A sampled view applies the T# DST_SEL, which would permute a _PCK access's raw
             // components; storage and converted views are unswizzled.
             if (baseImage.Packed && !storage && conversionFormat == GuestImageFormat.Invalid &&
@@ -3486,8 +3625,11 @@ public static partial class ResourceMaterializer
                 return Fail($"packed image descriptor {index} swizzles its format's components (DST_SEL 0x{descriptor[3] & 0xFFF:X3})");
             }
 
-            var rawSintStorage = storage && format == GuestImageFormat.Format32Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             var numericClass = GuestImageFormat.SampledNumericClass(format);
+            // A signed-integer storage image the program only writes stores the low bits of each register, which are the
+            // same bits as unsigned: it is compiled and viewed as the unsigned format of its width (ImageRequestBuilders).
+            // A compute shader can write a 16_SINT image.
+            var rawSintStorage = storage && numericClass == ImageNumericClass.Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             if (storage)
             {
                 if (numericClass == ImageNumericClass.Unsupported)
@@ -3521,7 +3663,7 @@ public static partial class ResourceMaterializer
                 images[index] = image with
                 {
                     NumericClass = ImageNumericClass.Float,
-                    Dimension = ImageDimension.Dim2D,
+                    Dimension = SampledArrayRead(baseImage) ? ImageDimension.Dim2DArray : ImageDimension.Dim2D,
                     Cube = false,
                 };
                 continue;
@@ -3594,12 +3736,17 @@ public static partial class ResourceMaterializer
             var imageClass = images[(int)exemplar];
             var capturedMismatch = false;
             var sharedSelector = plan.DescriptorSources[(int)info.Images[rootIndex].Source].IndirectImage is { SharedSelector: true };
+            // A table the program cache could not read from the heap (NullIncompatibleImageCandidates) reads a candidate of
+            // another class as null too.
+            var nullIncompatible = plan.NullIncompatibleImageCandidates || sharedSelector;
             var rootTable = snapshot.IndirectImages.Find(table => table.Resource == rootIndex);
             var unboundedSelector = rootTable is { UnboundedSelector: true };
             // Demon's Souls' vertex program 0x536AAA4B8B5F3E90 walks up to its count of 160-byte volume records and
             // samples a texture each names; while a stage loads, one record named a texture of another class, and
             // the failed program stopped the GPU host. The other records keep their textures.
-            var offClassReadsNull = unboundedSelector || rootTable is { LoopSelected: true };
+            // A host with the bindless heap fails instead, so the program cache replans the table with heap records
+            // (ShaderResourcePlan.BindlessHeap); NullIncompatibleImageCandidates still nulls it if that cannot help.
+            var offClassReadsNull = !plan.BindlessHeap && (unboundedSelector || rootTable is { LoopSelected: true });
             // A shader dump records the first mismatched candidate of a table, as it is before it reads as null.
             void CaptureMismatch(int candidate)
             {
@@ -3647,7 +3794,7 @@ public static partial class ResourceMaterializer
                 // cubes through a selector with no analysed range. A candidate a bounded selector
                 // reaches, or one whose bound could not be evaluated, still fails below, unless it is
                 // a counted loop's record and the caller asked for those to read as null.
-                if ((sharedSelector || offClassReadsNull) && !NullImageDescriptor(snapshot.Images[candidate]) &&
+                if ((nullIncompatible || offClassReadsNull) && !NullImageDescriptor(snapshot.Images[candidate]) &&
                     !CompatibleCandidates(image, imageClass, separateSampledDimensions))
                 {
                     CaptureMismatch(candidate);
@@ -3784,10 +3931,11 @@ public static partial class ResourceMaterializer
         specialization = new ResourceSpecialization
         {
             BaseBufferCount = baseBufferCount,
+            StableImageBindings = plan.StableImageBindings,
             Buffers = buffers,
             Images = images,
             BufferCandidateTables = candidateTables,
-            ImageDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Images, snapshot.Images.Length, images),
+            ImageDescriptorGroups = plan.StableImageBindings ? [] : DescriptorBindingAliases.Group(snapshot.Images, snapshot.Images.Length, images),
             SamplerDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Samplers, Math.Min(info.Samplers.Count, snapshot.Samplers.Length)),
             Samplers = samplers,
         };
@@ -4097,9 +4245,19 @@ public static partial class ResourceMaterializer
     /// </summary>
     public static bool SpecializationGuards { get; set; } = true;
 
+    /// <summary>
+    /// What ApplyTo refuses a specialization of the other stable image binding policy with: a recorded one (a prewarm
+    /// record) made by a session whose host answered another stable image budget. The Metal prewarm counts such a
+    /// compute record as stale, not failed.
+    /// </summary>
+    public const string ImageBindingPolicyMismatch = "shader image binding policy does not match the plan";
+
     public static SpecializedResourceInfo ApplyTo(ShaderResourcePlan plan, ResourceSpecialization specialization)
     {
         var source = plan.Info;
+        if (plan.StableImageBindings != specialization.StableImageBindings ||
+            (plan.StableImageBindings && specialization.ImageDescriptorGroups.Count != 0))
+            throw new ResourcePlanException(ImageBindingPolicyMismatch);
         if (source.Buffers.Count != specialization.BaseBufferCount || source.Images.Count > specialization.Images.Count)
         {
             throw new ResourcePlanException(
@@ -4129,7 +4287,6 @@ public static partial class ResourceMaterializer
             {
                 Source = DescriptorConstants.NoIndex,
                 Read = true,
-                PackedStride = specialized.PackedStride,
                 DescriptorFormat = specialized.DescriptorFormat,
                 DescriptorSwizzle = specialized.DescriptorSwizzle,
             });

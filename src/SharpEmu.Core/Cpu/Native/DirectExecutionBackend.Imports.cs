@@ -2362,7 +2362,12 @@ public sealed partial class DirectExecutionBackend
 		// and deciding used to cost thirteen eagerly evaluated string comparisons
 		// against the NID. The one code each of those imports expects is resolved
 		// at stub setup, so the decision is now a single integer compare.
-		if (resultValue != entry.ExpectedBenignResult)
+		// sceSaveDataConvert reports a save directory that is missing or already in the current format; titles
+		// then mount it as usual. Two codes, so it stays outside the one-code table; the code is compared first.
+		var expectedSaveDataNoConversion =
+			(resultValue == unchecked((int)0x809F0008) || resultValue == unchecked((int)0x809F001E)) &&
+			string.Equals(nid, "2mfSRGdshtk", StringComparison.Ordinal);
+		if (resultValue != entry.ExpectedBenignResult && !expectedSaveDataNoConversion)
 		{
 			return ShouldSampleImportResult(nid, resultValue, out mutexOccurrence);
 		}

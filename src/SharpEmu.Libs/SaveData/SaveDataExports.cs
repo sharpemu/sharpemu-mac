@@ -26,6 +26,7 @@ public static class SaveDataExports
     private const int OrbisSaveDataErrorResourceFull = unchecked((int)0x809F001A);
     private const int OrbisSaveDataErrorResourceBusy = unchecked((int)0x809F001B);
     private const int OrbisSaveDataErrorResourceInvalid = unchecked((int)0x809F001C);
+    private const int OrbisSaveDataErrorNoNeedConvert = unchecked((int)0x809F001E);
     private const int SaveDataTitleIdSize = 10;
     private const int SaveDataDirNameSize = 32;
     private const int SaveDataParamSize = 0x530;
@@ -618,6 +619,25 @@ public static class SaveDataExports
     [SysAbiExport(Nid = "dQ2GohUHXzk", ExportName = "sceSaveDataAbort", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
     public static int SaveDataAbort(CpuContext ctx) => SetReturn(ctx, 0);
 
+    // Cancels a prepared update. Writes go straight to the host directory, so only the prepared state is released.
+    [SysAbiExport(Nid = "e6y3WMBYbiM", ExportName = "sceSaveDataCancel", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
+    public static int SaveDataCancel(CpuContext ctx)
+    {
+        var resource = unchecked((int)ctx[CpuRegister.Rdi]);
+        lock (_stateGate)
+        {
+            if (!_transactionResources.Contains(resource))
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorResourceInvalid);
+            }
+
+            _preparedTransactionResources.Remove(resource);
+        }
+
+        TraceSaveData($"cancel resource={resource}");
+        return SetReturn(ctx, 0);
+    }
+
     [SysAbiExport(Nid = "eBSSNIG6hMk", ExportName = "sceSaveDataGetEventInfo", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
     public static int SaveDataGetEventInfo(CpuContext ctx) => SetReturn(ctx, 0);
 
@@ -684,12 +704,6 @@ public static class SaveDataExports
     // neither). Each returns only SDK save data codes, validates only the leading fields its
     // parameter block is known to start with, and writes no output it cannot fill truthfully.
 
-    // Every save data call here completes before it returns, so nothing is ever in flight to
-    // cancel. anyps5's PS4 path returns NOT_FOUND when no request matches; we return OK, the
-    // more conservative answer for a title that cancels on its cleanup path.
-    [SysAbiExport(Nid = "e6y3WMBYbiM", ExportName = "sceSaveDataCancel", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
-    public static int SaveDataCancel(CpuContext ctx) => SetReturn(ctx, 0);
-
     // sceSaveDataBackup only queues its completion event; no separate backup copy is kept on
     // the host, so there is never a backup to check or restore: NOT_FOUND, outputs untouched.
     [SysAbiExport(Nid = "RQOqDbk3bSU", ExportName = "sceSaveDataCheckBackupData", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
@@ -735,8 +749,9 @@ public static class SaveDataExports
         SetReturn(ctx, ctx[CpuRegister.Rdi] == 0 ? OrbisSaveDataErrorParameter : 0);
 
     // sceSaveDataConvert: +0x00 userId, +0x08 SceSaveDataDirName* (anyps5, read from a title's
-    // call). Host saves need no conversion: an existing save converts at once and untouched,
-    // a missing one is NOT_FOUND; progress follows (1.0 after success, 0.0 otherwise).
+    // call). This emulator writes one format only, so an existing save needs no conversion
+    // (NO_NEED_CONVERT, untouched) and a missing one is NOT_FOUND; titles treat both as "mount
+    // as usual". Progress follows (1.0 once an existing save is found, 0.0 otherwise).
     [SysAbiExport(Nid = "2mfSRGdshtk", ExportName = "sceSaveDataConvert", Target = Generation.Gen5, LibraryName = "libSceSaveData")]
     public static int SaveDataConvert(CpuContext ctx)
     {
@@ -779,8 +794,8 @@ public static class SaveDataExports
         }
 
         Volatile.Write(ref _convertProgress, 1.0f);
-        TraceSaveData($"convert user={userId} dir='{dirName}'");
-        return SetReturn(ctx, 0);
+        TraceSaveData($"convert user={userId} dir='{dirName}' -> no_need_convert");
+        return SetReturn(ctx, OrbisSaveDataErrorNoNeedConvert);
     }
 
     [SysAbiExport(Nid = "8EA5OMIL1lQ", ExportName = "sceSaveDataGetConvertProgress", Target = Generation.Gen5, LibraryName = "libSceSaveData")]

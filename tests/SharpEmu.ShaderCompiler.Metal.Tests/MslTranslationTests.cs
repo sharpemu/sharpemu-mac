@@ -16,7 +16,7 @@ public sealed class MslTranslationTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void ShaderCallsReportTheBackendLimitation(bool linked)
+    public void ShaderCallsCompileLinkedOrAlone(bool linked)
     {
         var program = new Gen5ShaderProgram(0x1000, [
             new(0, Gen5ShaderEncoding.Sop1, "SSwappcB64", [0xBE8E2100],
@@ -31,15 +31,14 @@ public sealed class MslTranslationTests
                 [new ShaderCallTarget(0x2000, 0, function)])]);
         }
         var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Compute);
-        // An unlinked S_SWAPPC_B64 is the caller compiled alone (the call is skipped): the
-        // pipeline cache only links calls for a backend that supports them, which Metal does not.
-        if (!linked)
+        // An unlinked S_SWAPPC_B64 is the caller compiled alone (the call is skipped, as before the port). A linked program
+        // compiles since Metal lowers the linker's call controls (Gen5MslTranslator.ShaderCalls.cs); this request pushes no
+        // call targets, so the test compares the link-time address (MslLinkedCallTests runs the pushed form).
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        if (linked)
         {
-            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var unlinkedError), unlinkedError);
-            return;
+            Assert.Contains("8192ul", shader.Source, StringComparison.Ordinal);
         }
-        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
-        Assert.Equal("Metal does not support linked shader calls.", error);
     }
 
     [Fact]
@@ -987,7 +986,9 @@ public sealed class MslTranslationTests
         uint dstSelect,
         string expectedComponents)
     {
-        var shader = CompileImageStore(dstSelect, dmask: 0xF);
+        // The select baked into the module (RuntimeImageSwizzle off); RuntimeSwizzleStorePicksTheChannelsFromShaderData
+        // is the shader-data twin.
+        var shader = CompileImageStore(dstSelect, dmask: 0xF, runtimeImageSwizzles: false);
 
         Assert.Contains(
             $".write(vec<float, 4>({expectedComponents}),",
@@ -1000,7 +1001,8 @@ public sealed class MslTranslationTests
     {
         var shader = CompileImageStore(
             Gen5ShaderTranslator.IdentityImageDstSelect,
-            dmask: 0);
+            dmask: 0,
+            runtimeImageSwizzles: false);
 
         Assert.Contains(
             ".write(vec<float, 4>(as_type<float>(v4), 0.0f, 0.0f, 0.0f),",
@@ -1014,12 +1016,39 @@ public sealed class MslTranslationTests
         var shader = CompileImageStore(
             0x9F5u,
             dmask: 0xF,
-            opcode: "ImageStoreMip");
+            opcode: "ImageStoreMip",
+            runtimeImageSwizzles: false);
 
         Assert.Contains(
             ".write(vec<float, 4>(as_type<float>(v7), as_type<float>(v4), as_type<float>(v5), as_type<float>(v6)),",
             shader.Source,
             StringComparison.Ordinal);
+    }
+
+    // The shader-data twins of the tests above (RuntimeImageSwizzle on, upstream's default): the module keeps the
+    // identity select whatever the T# names, and a store reads its channel map from the image's slot of shader data
+    // (BindingLayout.StorageImageSwizzlesDword), as Gen5SpirvTranslator.RuntimeSwizzleStoreTexel does.
+    [Theory]
+    [InlineData(0xFACu, "ImageStore", 0xFu, 71u)]
+    [InlineData(0x9F5u, "ImageStore", 0xFu, 71u)]
+    [InlineData(0x9F5u, "ImageStoreMip", 0xFu, 71u)]
+    [InlineData(0xF2Eu, "ImageStore", 0xFu, 69u)]
+    [InlineData(0xFACu, "ImageStore", 0x0u, 71u)]
+    public void RuntimeSwizzleStorePicksTheChannelsFromShaderData(uint dstSelect, string opcode, uint dmask, uint unifiedFormat)
+    {
+        var shader = CompileImageStore(dstSelect, dmask, opcode, unifiedFormat, runtimeImageSwizzles: true, out var layout);
+        Assert.Equal(1u, layout.StorageImageSwizzleCount);
+        // One module for every select: the T#'s select does not reach the source.
+        var identity = CompileImageStore(0xFACu, dmask, opcode, unifiedFormat, runtimeImageSwizzles: true, out _);
+        Assert.Equal(identity.Source, shader.Source);
+        var kind = unifiedFormat == 69u ? "uint" : "float";
+        var logical = dmask == 0 ? "uint4(v4, 0u, 0u, 0u)" : "uint4(v4, v5, v6, v7)";
+        Assert.Contains($"= {logical};", shader.Source, StringComparison.Ordinal);
+        Assert.Contains($".write(vec<{kind}, 4>(", shader.Source, StringComparison.Ordinal);
+        for (var channel = 0u; channel < 4; channel++)
+        {
+            Assert.Contains($" >> {channel * 3}u) & 7u) ^ {channel}u;", shader.Source, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -1028,16 +1057,20 @@ public sealed class MslTranslationTests
         var shader = CompileImageStore(
             0xF2Eu,
             dmask: 0xF,
-            unifiedFormat: 69u); // FORMAT_16_16_16_16_UINT
+            unifiedFormat: 69u, // FORMAT_16_16_16_16_UINT
+            runtimeImageSwizzles: false);
 
         Assert.Contains(
             "texture2d<uint, access::write>",
             shader.Source,
             StringComparison.Ordinal);
-        Assert.Contains(
-            ".write(vec<uint, 4>(v6, v5, v4, v7),",
-            shader.Source,
-            StringComparison.Ordinal);
+        // Each channel's register, in the inverse select's order, is narrowed to the width its image's width slot gives
+        // before the write (an integer store keeps the low bits, Gen5MslTranslator.StoreWidths.cs).
+        var channels = new[] { "v6", "v5", "v4", "v7" }
+            .Select(register => shader.Source.IndexOf($" = {register};", StringComparison.Ordinal)).ToArray();
+        Assert.All(channels, at => Assert.True(at >= 0, shader.Source));
+        Assert.Equal(channels.Order(), channels);
+        Assert.Contains(".write(vec<uint, 4>((", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1549,7 +1582,17 @@ public sealed class MslTranslationTests
         uint dstSelect,
         uint dmask,
         string opcode = "ImageStore",
-        uint unifiedFormat = 71u)
+        uint unifiedFormat = 71u,
+        bool? runtimeImageSwizzles = null) =>
+        CompileImageStore(dstSelect, dmask, opcode, unifiedFormat, runtimeImageSwizzles, out _);
+
+    private static Gen5MslShader CompileImageStore(
+        uint dstSelect,
+        uint dmask,
+        string opcode,
+        uint unifiedFormat,
+        bool? runtimeImageSwizzles,
+        out BindingLayout layout)
     {
         var control = new Gen5ImageControl(
             Dmask: dmask,
@@ -1584,18 +1627,25 @@ public sealed class MslTranslationTests
         userData[8] = 0x20;
         userData[9] = unifiedFormat << 20;
         userData[11] = (9u << 28) | dstSelect;
-        return CompileMaterialized(new Gen5ShaderProgram(0x1_0000_C000, [store, end]), userData);
+        return CompileMaterialized(new Gen5ShaderProgram(0x1_0000_C000, [store, end]), userData, out layout,
+            runtimeImageSwizzles: runtimeImageSwizzles);
     }
+
     private static Gen5MslShader CompileMaterialized(Gen5ShaderProgram program, uint[] userData,
-        Gen5MslCodegenOptions? options = null)
+        Gen5MslCodegenOptions? options = null) =>
+        CompileMaterialized(program, userData, out _, options);
+
+    private static Gen5MslShader CompileMaterialized(Gen5ShaderProgram program, uint[] userData, out BindingLayout layout,
+        Gen5MslCodegenOptions? options = null, bool? runtimeImageSwizzles = null)
     {
-        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 1, 0, (uint)userData.Length);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 1, 0, (uint)userData.Length,
+            runtimeImageSwizzles: runtimeImageSwizzles);
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
         Assert.True(ResourceMaterializer.Materialize(plan, new ResourceRuntimeInputs { UserData = userData },
             ref snapshot, ref specialization));
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
-        var layout = BindingLayout.Allocate(resources.Info,
+        layout = BindingLayout.Allocate(resources.Info,
             BindingLayout.CollectUserDataRegisters(program, 0, (uint)userData.Length), false,
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         var request = new ShaderCompileRequest(plan, resources, layout);

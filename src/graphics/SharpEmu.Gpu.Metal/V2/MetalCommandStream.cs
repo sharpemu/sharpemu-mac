@@ -853,6 +853,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         var contextId = write.ContextId;
         var requestId = write.FlipRequestId;
         var encoded = TryEncodeEndOfPipeLabel(in write);
+        if (write.Landing is { } landing)
+        {
+            RecordLanding(landing);
+        }
+
         if (DsTrace.Gpu && DsTrace.Armed)
         {
             // DSTRACE §4.7 LENC. deferred: 0 copy encoded at the packet, 1 copy deferred to
@@ -1483,11 +1488,11 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
             // Reads overlapping this queued write wait until the worker installed
             // its overlay. Unrelated packets can continue; prefetch's non-draw gate
             // still orders future resource reads after the write.
-            _commandThread!.PostWrite(() => RecordCommandProcessorWrite(address, queued, kind, causal), address, queued, UngatedWrites);
+            _commandThread!.PostWrite(() => RecordCommandProcessorWrite(address, queued, kind, causal, queued), address, queued, UngatedWrites);
         }
         else
         {
-            RunTagged(() => RecordCommandProcessorWrite(address, queued, kind, causal), nameof(RecordCommandProcessorWrite));
+            RunTagged(() => RecordCommandProcessorWrite(address, queued, kind, causal, queued), nameof(RecordCommandProcessorWrite));
         }
     }
 
@@ -1495,7 +1500,13 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind) =>
         RecordCommandProcessorWrite(address, source, kind, causal: true);
 
-    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal)
+    public void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal) =>
+        RecordCommandProcessorWrite(address, source, kind, causal, owned: null);
+
+    // owned: source's own array, which the caller hands over (the command thread's queued copy): a write the GPU
+    // cannot make lands from it, not from another copy (upstream b13a98086, "Post owned store data without copying it
+    // again").
+    private void RecordCommandProcessorWrite(ulong address, ReadOnlySpan<byte> source, string kind, bool causal, byte[]? owned)
     {
         if (OnCommandThread)
         {
@@ -1534,7 +1545,7 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         }
 
         Interlocked.Increment(ref _hostCommandProcessorWrites);
-        var bytes = source.ToArray();
+        var bytes = owned is not null && owned.Length == source.Length ? owned : source.ToArray();
         var landedKind = CommandProcessorWriteHistory.Enabled ? "landed:" + kind : null;
         var lazy = RidesNextCommit(clock: false);
         Interlocked.Increment(ref _owedHostLabels);
@@ -2697,6 +2708,30 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
     private static readonly bool GpuTimedLabels =
         Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_GPU_LABELS") != "0" &&
         !SharpEmu.Libs.Gpu.GpuCommands.FrameOverlapProbe.Enabled;
+
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS: another queue's wait met by a label this host defers (read from the queue's
+    // pending labels at parse time, long before the GPU reaches the label) waits softly for the release as it would
+    // for a label written as parsed: the label takes a landing, RecordEndOfPipe names the serial the label rides and
+    // that serial's completion reaches the queue (RecordLanding). SHARPEMU_METAL_V2_DEFERRED_LABEL_LANDINGS=0 gives
+    // deferred labels no landing again (soft waits then only follow labels published as parsed).
+    private static readonly bool DeferredLabelLandings =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_DEFERRED_LABEL_LANDINGS") != "0";
+
+    public bool RecordsDeferredLabelLandings => DeferredLabelLandings;
+
+    // Worker, where the release is recorded: the buffer being recorded holds it, so the release has completed once
+    // that serial has; its completion tells the queue (the soft wait then passes as complete, not at its cap).
+    private void RecordLanding(EndOfPipeLanding landing)
+    {
+        var serial = SubmissionSerial;
+        landing.Recorded(serial);
+        QueueOperandWake(serial);
+        Interlocked.Increment(ref _recordedLandings);
+    }
+
+    private long _recordedLandings;
+
+    internal long RecordedLandings => Interlocked.Read(ref _recordedLandings);
 
     /// <summary>
     /// The interpreter must never publish label bytes itself on this host: it parses a

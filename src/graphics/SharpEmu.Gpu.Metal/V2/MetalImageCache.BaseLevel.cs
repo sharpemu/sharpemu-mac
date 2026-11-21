@@ -48,7 +48,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 // texture the title coarsens and stops binding keeps its levels until age retirement or the
 // budget takes the whole image.
 //
-// SHARPEMU_METAL_V2_BASE_LEVEL=0 allocates every texture with its whole chain again.
+// SHARPEMU_METAL_V2_BASE_LEVEL=0 allocates every texture with its whole chain again, except where upstream's
+// resident levels keep the levels before BASE_LEVEL out because the guest has not mapped them
+// (MetalImageCache.ResidentLevels.cs).
 internal sealed partial class MetalImageCache
 {
     // Finer levels that hold less than this are kept through a view rather than reallocated.
@@ -108,16 +110,15 @@ internal sealed partial class MetalImageCache
     }
 
     // The same for an image the cache holds: only one that has been sampled and nothing else.
-    private static uint DesiredFirstLevel(MetalCachedImage image, uint baseLevel)
+    private static uint DesiredFirstLevel(MetalCachedImage image, uint baseLevel) =>
+        HoldsGpuContents(image) ? 0 : DesiredFirstLevel(in image.Description, baseLevel);
+
+    // An image that is a window view, or that something other than sampling used, holds its whole chain.
+    private static bool HoldsGpuContents(MetalCachedImage image)
     {
         var uses = image.Uses;
-        if (image.IsWindowLinearView || image.IsGpuModified ||
-            uses.Storage || uses.RenderTarget || uses.DepthTarget || uses.VideoOut)
-        {
-            return 0;
-        }
-
-        return DesiredFirstLevel(in image.Description, baseLevel);
+        return image.IsWindowLinearView || image.IsGpuModified ||
+            uses.Storage || uses.RenderTarget || uses.DepthTarget || uses.VideoOut;
     }
 
     // The guest levels the image's texture holds, in the description's own level numbers.
@@ -153,6 +154,12 @@ internal sealed partial class MetalImageCache
         var frame = _idleClock.Frames;
         var window = ShrinkWindowFrames << image.ShrinkBackoff;
         var desired = DesiredFirstLevel(image, view.BaseLevel);
+        if (desired < image.FirstLevel)
+        {
+            // Never grown into levels before the binding's that the guest has not mapped (ResidentLevels.cs).
+            desired = ResidentFloor(in image.Description, view.BaseLevel, desired, HoldsGpuContents(image));
+        }
+
         NoteNeededLevel(image, desired, frame, window);
         if (desired < image.FirstLevel)
         {
@@ -170,8 +177,9 @@ internal sealed partial class MetalImageCache
             return;
         }
 
+        // Shrinking is the memory policy's; the resident-levels floor only ever keeps levels out.
         var needed = Math.Min(image.NeededLevel, image.NeededLevelBefore);
-        if (needed <= image.FirstLevel || frame - image.LevelsChangedFrame < window ||
+        if (!BaseLevelAllocation || needed <= image.FirstLevel || frame - image.LevelsChangedFrame < window ||
             LevelBytesBetween(in image.Description, image.FirstLevel, needed) < ShrinkMinimumBytes)
         {
             return;

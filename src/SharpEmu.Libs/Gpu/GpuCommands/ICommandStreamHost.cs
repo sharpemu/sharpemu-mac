@@ -32,7 +32,14 @@ public readonly record struct DrawIndexedArguments(
     // The guest set no index buffer size: IndexCount is only the range seen so far and
     // must not clamp the count read from the arguments.
     bool UnboundedIndexBuffer = false,
-    int StartInstanceUserData = -1)
+    int StartInstanceUserData = -1,
+    // The indirect packet named a shader register for the base vertex or the start instance: the
+    // value is in that register, and BaseVertex or FirstInstance is 0.
+    bool BaseVertexInRegister = false,
+    bool FirstInstanceInRegister = false,
+    // The vertex program's user data index the indirect packet names for the base vertex, or -1 (StartInstanceUserData
+    // likewise): the draw passes BaseVertex and the program stores it there.
+    int BaseVertexUserData = -1)
 {
     // Predicated, or inside an occlusion query: never left out while its pipeline compiles.
     public bool MustExecute { get; init; }
@@ -51,7 +58,12 @@ public readonly record struct DrawAutoArguments(
     // Nonzero when the counts are still in guest memory at this address, laid out as
     // (vertexCount, instanceCount, firstVertex, firstInstance). VertexCount is then a
     // placeholder and the other counts are unused.
-    ulong IndirectArgumentsAddress = 0)
+    ulong IndirectArgumentsAddress = 0,
+    // The indirect packet named a shader register for the start vertex or the start instance: the
+    // value is in that register, and FirstVertex or FirstInstance is 0.
+    bool FirstVertexInRegister = false,
+    bool FirstInstanceInRegister = false,
+    int BaseVertexUserData = -1)
 {
     // Predicated, or inside an occlusion query: never left out while its pipeline compiles.
     public bool MustExecute { get; init; }
@@ -100,7 +112,9 @@ public readonly record struct EndOfPipeWrite(
     long FlipArgument = 0,
     ulong FlipRequestId = 0,
     bool ReferenceClock = false,
-    bool WaitForGpu = false);
+    bool WaitForGpu = false,
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the host names the GPU tick that completes this write.
+    EndOfPipeLanding? Landing = null);
 
 // The host state a command block (or a refusal to give one) was read under: four counters the
 // host bumps whenever bytes a packet read could return, or whether that read would wait, change.
@@ -288,6 +302,13 @@ public interface ICommandStreamHost
     /// </remarks>
     bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => DefersEndOfPipeLabels;
 
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS on a host that defers labels: a label this host defers still releases another
+    // queue's wait at parse time through the queue's pending labels, as an immediately written one does, so it takes a
+    // landing too. Only a host that names the tick of every landing it is handed (EndOfPipeLanding.Recorded) and reports
+    // that tick's completion (CommandStreamQueue.NotifyCompletedGpuTick) answers true; any other host's deferred labels
+    // take no landing, as before.
+    bool RecordsDeferredLabelLandings => false;
+
     // A host that counts no occlusion samples (Metal). Its ZPASS_DUMP pairs are the
     // always-visible ones: every dump writes one value from a counter that only grows to
     // 16 depth blocks, and the counter select and reset events are ignored, so an end dump
@@ -440,8 +461,12 @@ public interface ICommandStreamHost
     bool ResolvesIndirectDispatchOnGpu => false;
 
     // The same for an indirect dispatch in thread units, whose conversion to groups the host
-    // then also does on the GPU (IRenderHost.TryDispatchThreadsIndirect).
+    // then also does on the GPU (IRenderHost.TryDispatchThreadsIndirect). The Metal host's form.
     bool ResolvesThreadIndirectDispatchOnGpu => false;
+
+    // True when an indirect dispatch whose arguments count threads (DISPATCH_INITIATOR.USE_THREAD_DIMENSIONS) also keeps
+    // its counts on the GPU (IRenderHost.PrepareThreadDispatch). The Vulkan host's form of the same thing.
+    bool ResolvesIndirectThreadDispatchOnGpu => false;
 
     // True when an indexed indirect draw may be handed over with its arguments still in
     // guest memory (DrawIndexedArguments.IndirectArgumentsAddress).

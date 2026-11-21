@@ -33,6 +33,7 @@ public static partial class AgcExports
     private const uint ItDrawIndexMultiAuto = 0x30;
     private const uint ItDrawIndexOffset2 = 0x35;
     private const uint ItDrawIndexIndirectMulti = 0x38;
+    private const uint ItDrawIndirectMulti = 0x2C;
     private const uint DrawIndexedIndirectArgsSize = 20;
     private const uint DrawIndexedIndirectMaxScan = 1024;
     private const uint ItWriteData = 0x37;
@@ -495,13 +496,113 @@ public static partial class AgcExports
         return fingerprint;
     }
 
-    private static bool TryAllocateCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress)
-        => TryPrepareCommandDwords(ctx, commandBufferAddress, sizeDwords, true, out commandAddress);
+    private static bool TryAllocateCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress,
+        bool isMarker = false)
+        => TryPrepareCommandDwords(ctx, commandBufferAddress, sizeDwords, true, out commandAddress, isMarker);
+
+    // Guest threads run HLE exports concurrently. Two exports appending to one command buffer both read its cursor before
+    // either stores it back, and the second packet overwrites the first: a game's DCB lost the header of a
+    // SET_SH_REG to a concurrent PopMarker (seen as "The packet opcode is unknown" right after a PopMarker).
+    // The cursor update is atomic per buffer, under a striped lock that is released around the guest's buffer-full callback.
+    private const int CommandBufferLockStripes = 64;
+    private static readonly object[] _commandBufferLocks = Enumerable.Range(0, CommandBufferLockStripes).Select(static _ => new object()).ToArray();
+
+    // Inline guest stores do not take the lock. The last ordinary packet writer of each buffer is remembered, so a
+    // diagnostic marker from another guest thread is skipped (null packet pointer) instead of reserving space inside that
+    // writer's unpublished inline packet. An ordinary export takes the buffer over, which allows a handoff between threads.
+    // Writers are scoped to the guest memory, and guest thread handles survive migration between host threads.
+    private static readonly ConditionalWeakTable<object, ConcurrentDictionary<ulong, CommandBufferWriter>> _commandBufferWriters = new();
+
+    private readonly record struct CommandBufferWriter(ulong ThreadHandle, CpuContext Context)
+    {
+        public bool Matches(CpuContext ctx) => ThreadHandle != 0 && GuestThreadExecution.CurrentGuestThreadHandle != 0
+            ? ThreadHandle == GuestThreadExecution.CurrentGuestThreadHandle
+            : ReferenceEquals(Context, ctx);
+    }
+
+    // Worker threads keep their command buffer objects at the same offset of stacks 16 MiB apart; a multiplicative hash
+    // keeps them on different stripes.
+    private static int CommandBufferStripe(ulong commandBufferAddress) =>
+        (int)((commandBufferAddress * 0x9E3779B97F4A7C15UL) >> 58);
+
+    private static bool TryPrepareCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, bool advanceCursor,
+        out ulong commandAddress, bool isMarker = false)
+    {
+        var gate = _commandBufferLocks[CommandBufferStripe(commandBufferAddress)];
+        lock (gate)
+        {
+            if (!TryTakeCommandBufferWriterLocked(ctx, commandBufferAddress, isMarker, out var writers))
+            {
+                commandAddress = 0;
+                return false;
+            }
+
+            return TryPrepareCommandDwordsLocked(ctx, commandBufferAddress, sizeDwords, advanceCursor, gate, writers, isMarker,
+                out commandAddress);
+        }
+    }
+
+    // The writer bookkeeping of an append, under the buffer's stripe lock: a marker from another writer is refused; any
+    // other append makes the calling guest thread the buffer's writer (a first marker establishes one too). The
+    // dictionary is written only when the writer changes.
+    private static bool TryTakeCommandBufferWriterLocked(CpuContext ctx, ulong commandBufferAddress, bool isMarker,
+        out ConcurrentDictionary<ulong, CommandBufferWriter> writers)
+    {
+        writers = _commandBufferWriters.GetValue(CanonicalMemory(ctx.Memory), static _ => new());
+        var known = writers.TryGetValue(commandBufferAddress, out var writer);
+        if (isMarker && known && !writer.Matches(ctx))
+        {
+            return false;
+        }
+
+        if (!known || !writer.Matches(ctx) || writer.ThreadHandle != GuestThreadExecution.CurrentGuestThreadHandle)
+        {
+            writers[commandBufferAddress] = new(GuestThreadExecution.CurrentGuestThreadHandle, ctx);
+        }
+
+        return true;
+    }
+
+    // The in-place appends (TryReserveCommandDwordsInPlace then TryCommitCommandDwords) run inside one of these: the
+    // buffer's stripe lock is held from the cursor read to the cursor-and-packet write, so a concurrent export cannot
+    // hand out the same address, and the caller becomes the buffer's writer as through TryPrepareCommandDwords.
+    // Uncontended it costs one Monitor enter/exit (an interlocked exchange each way) and two lock-free dictionary reads.
+    // Dispose it before falling back to TryAllocateCommandDwords, which releases the lock around the guest's full callback.
+    private ref struct CommandBufferAppendScope
+    {
+        private object? _gate;
+
+        public CommandBufferAppendScope(CpuContext ctx, ulong commandBufferAddress)
+        {
+            _gate = _commandBufferLocks[CommandBufferStripe(commandBufferAddress)];
+            Monitor.Enter(_gate);
+            try
+            {
+                TryTakeCommandBufferWriterLocked(ctx, commandBufferAddress, isMarker: false, out _);
+            }
+            catch
+            {
+                Monitor.Exit(_gate);
+                _gate = null;
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_gate is not null)
+            {
+                Monitor.Exit(_gate);
+                _gate = null;
+            }
+        }
+    }
 
     // Whether the buffer already has the room, without calling its full callback or moving the
     // cursor: a caller that emits several packets takes them in one allocation then, and packet by
     // packet otherwise, so each packet still reaches the callback with the size it asks for alone.
     // The packet goes to commandAddress and the cursor to nextCursor, together, in TryCommitCommandDwords.
+    // Callers hold a CommandBufferAppendScope across both calls.
     private static bool TryReserveCommandDwordsInPlace(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress, out ulong nextCursor)
     {
         commandAddress = nextCursor = 0;
@@ -530,9 +631,12 @@ public static partial class AgcExports
 
     private static bool TryEmitCommandDwords(CpuContext ctx, ulong commandBufferAddress, out ulong commandAddress, params ReadOnlySpan<uint> dwords)
     {
-        if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, (uint)dwords.Length, out commandAddress, out var nextCursor))
+        using (new CommandBufferAppendScope(ctx, commandBufferAddress))
         {
-            return TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, commandAddress, dwords);
+            if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, (uint)dwords.Length, out commandAddress, out var nextCursor))
+            {
+                return TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, commandAddress, dwords);
+            }
         }
 
         // No room (or no readable buffer): the buffer's callback, a leaf's decline and the failure
@@ -564,7 +668,8 @@ public static partial class AgcExports
         return true;
     }
 
-    private static bool TryPrepareCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, bool advanceCursor, out ulong commandAddress)
+    private static bool TryPrepareCommandDwordsLocked(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, bool advanceCursor,
+        object gate, ConcurrentDictionary<ulong, CommandBufferWriter> writers, bool isMarker, out ulong commandAddress)
     {
         commandAddress = 0;
         if (sizeDwords == 0 ||
@@ -587,22 +692,40 @@ public static partial class AgcExports
             var scheduler = GuestThreadExecution.Scheduler;
             ulong callbackResult = 0;
             string? callbackError = null;
-            if (callback == 0 ||
-                scheduler is null ||
-                !scheduler.TryCallGuestFunction(
-                    ctx,
-                    callback,
-                    commandBufferAddress,
-                    (ulong)sizeDwords + reservedDwords,
-                    userData,
-                    0,
-                    0,
-                    "agc_command_buffer_full",
-                    out callbackResult,
-                    out callbackError))
+            bool called;
+            // The callback is guest code; it may block or append to this buffer itself.
+            Monitor.Exit(gate);
+            try
+            {
+                called = callback != 0 &&
+                    scheduler is not null &&
+                    scheduler.TryCallGuestFunction(
+                        ctx,
+                        callback,
+                        commandBufferAddress,
+                        (ulong)sizeDwords + reservedDwords,
+                        userData,
+                        0,
+                        0,
+                        "agc_command_buffer_full",
+                        out callbackResult,
+                        out callbackError);
+            }
+            finally
+            {
+                Monitor.Enter(gate);
+            }
+
+            if (!called)
             {
                 TraceAgc(
                     $"agc.cmd_alloc_callback_failed buf=0x{commandBufferAddress:X16} callback=0x{callback:X16} result=0x{callbackResult:X16} error={callbackError ?? "none"}");
+                return false;
+            }
+
+            // The callback ran with the lock released: an ordinary export may have taken the buffer over meanwhile.
+            if (isMarker && writers.TryGetValue(commandBufferAddress, out var currentWriter) && !currentWriter.Matches(ctx))
+            {
                 return false;
             }
 
@@ -645,17 +768,15 @@ public static partial class AgcExports
         return true;
     }
 
+    // The free space is the dword distance between the cursors truncated to 32 bits,
+    // less the reserved space. Titles rely on the truncation: an allocator with a null down cursor still has room.
     private static uint GetRemainingCommandDwords(
         ulong cursorUp,
         ulong cursorDown,
         uint reservedDwords)
     {
-        var availableDwords = cursorDown >= cursorUp
-            ? Math.Min((cursorDown - cursorUp) / sizeof(uint), uint.MaxValue)
-            : 0;
-        return availableDwords > reservedDwords
-            ? (uint)availableDwords - reservedDwords
-            : 0;
+        var availableDwords = unchecked((uint)((long)(cursorDown - cursorUp) / sizeof(uint)));
+        return Math.Max(availableDwords, reservedDwords) - reservedDwords;
     }
 
     private static int ReturnPointer(CpuContext ctx, ulong pointer)
@@ -705,8 +826,55 @@ public static partial class AgcExports
         return true;
     }
 
+    // AgcPacketWrites: the submitted command buffer the capture scan walks on this thread. TryReadUInt32 serves its
+    // words from a copy that is loaded one 4 KiB page at a time, when a word there is first read, so the walk touches
+    // the pages its word reads would. A page that cannot be loaded leaves its words to the ordinary read.
+    private const int ScanPageBytes = 4096;
+    [ThreadStatic]
+    private static byte[]? _scanWindow;
+    [ThreadStatic]
+    private static ulong _scanWindowStart;
+    [ThreadStatic]
+    private static int _scanWindowLength;
+    // One bit per 4 KiB page the window overlaps, from the page that holds its start: set once the page is in the copy.
+    [ThreadStatic]
+    private static ulong[]? _scanLoaded;
+
+    private static bool TryLoadScanPages(CpuContext ctx, byte[] window, ulong address, int length)
+    {
+        var loaded = _scanLoaded!;
+        var firstPage = _scanWindowStart / ScanPageBytes;
+        var windowEnd = _scanWindowStart + (ulong)_scanWindowLength;
+        for (var page = address / ScanPageBytes; page <= (address + (ulong)length - 1) / ScanPageBytes; page++)
+        {
+            var index = (int)(page - firstPage);
+            if ((loaded[index >> 6] & (1UL << (index & 63))) != 0)
+            {
+                continue;
+            }
+
+            var begin = Math.Max(_scanWindowStart, page * ScanPageBytes);
+            var end = Math.Min(windowEnd, (page + 1) * ScanPageBytes);
+            if (!ctx.Memory.TryRead(begin, window.AsSpan((int)(begin - _scanWindowStart), (int)(end - begin))))
+            {
+                return false;
+            }
+
+            loaded[index >> 6] |= 1UL << (index & 63);
+        }
+
+        return true;
+    }
+
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
     {
+        if (_scanWindow is { } window && address >= _scanWindowStart && address - _scanWindowStart < (ulong)_scanWindowLength &&
+            _scanWindowLength - (int)(address - _scanWindowStart) >= sizeof(uint) && TryLoadScanPages(ctx, window, address, sizeof(uint)))
+        {
+            value = BinaryPrimitives.ReadUInt32LittleEndian(window.AsSpan((int)(address - _scanWindowStart)));
+            return true;
+        }
+
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
         if (!ctx.Memory.TryRead(address, buffer))
         {
@@ -778,6 +946,67 @@ public static partial class AgcExports
 
         var values = new List<byte>(Math.Min(maximumLength, 128));
         for (var index = 0; index < maximumLength; index++)
+        {
+            if (!TryReadByte(ctx, address + (ulong)index, out var value))
+            {
+                bytes = [];
+                return false;
+            }
+
+            if (value == 0)
+            {
+                bytes = [.. values];
+                return true;
+            }
+
+            values.Add(value);
+        }
+
+        bytes = [];
+        return false;
+    }
+
+    // AgcPacketWrites: TryReadGuestCString with the bytes read up to 64 at a time, each chunk within one 4 KiB page, so
+    // it touches the pages the byte reads touch (those up to the terminator). From a chunk that cannot be read, it goes
+    // on byte by byte as there, so a name that ends just before unreadable memory gives the same result.
+    private static bool TryReadGuestCStringInChunks(
+        CpuContext ctx,
+        ulong address,
+        int maximumLength,
+        out byte[] bytes)
+    {
+        if (address == 0)
+        {
+            bytes = [];
+            return true;
+        }
+
+        var values = new List<byte>(Math.Min(maximumLength, 128));
+        Span<byte> chunk = stackalloc byte[64];
+        var index = 0;
+        while (index < maximumLength)
+        {
+            var at = address + (ulong)index;
+            var toPageEnd = ScanPageBytes - (int)(at % ScanPageBytes);
+            var piece = chunk[..Math.Min(Math.Min(chunk.Length, maximumLength - index), toPageEnd)];
+            if (address > ulong.MaxValue - (ulong)maximumLength || !ctx.Memory.TryRead(at, piece))
+            {
+                break;
+            }
+
+            var end = piece.IndexOf((byte)0);
+            if (end >= 0)
+            {
+                values.AddRange(piece[..end]);
+                bytes = [.. values];
+                return true;
+            }
+
+            values.AddRange(piece);
+            index += piece.Length;
+        }
+
+        for (; index < maximumLength; index++)
         {
             if (!TryReadByte(ctx, address + (ulong)index, out var value))
             {

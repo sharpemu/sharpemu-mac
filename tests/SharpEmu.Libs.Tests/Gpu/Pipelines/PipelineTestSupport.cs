@@ -30,7 +30,7 @@ internal sealed class FakeCompiledShader(ShaderCompileRequest request, byte[]? s
 }
 
 // Counts modules and pipelines; every guest read comes straight from the fake memory.
-internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
+internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 {
     private ulong _nextHandle = 1;
 
@@ -55,11 +55,19 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public uint MaxPushDescriptors => 32;
 
+    public StableImageDescriptorLimits ComputeImageDescriptorLimits { get; set; }
+
+    public StableImageDescriptorLimits GraphicsImageDescriptorLimits { get; set; }
+
     public bool ComputeWave64Supported => true;
 
     public bool GraphicsSubgroupOperationsEnabled => true;
 
     public bool SharedInt64AtomicsEnabled => false;
+
+    public bool SupportsBindlessHeap { get; set; }
+
+    public bool RuntimeCallRecordsSupported { get; set; }
 
     public bool CallMarksSupported { get; set; }
 
@@ -82,6 +90,15 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
 
     public GraphicsPrewarmList? GraphicsPrewarm { get; set; }
+
+    public List<(ulong Module, ulong Identity)> RecordedVertexPrograms { get; } = new();
+
+    public void VertexProgramRecorded(ulong module, ulong prewarmIdentity) => RecordedVertexPrograms.Add((module, prewarmIdentity));
+
+    // Off as on Metal (IShaderPipelineHost.RuntimeImageSwizzlesSupported); a test of the Vulkan plan turns it on.
+    public bool RuntimeImageSwizzlesSupported { get; set; }
+
+    public bool PixelSubgroupArithmetic { get; set; }
 
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
 
@@ -190,25 +207,6 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     // standing in for the host shader compiler running on a worker thread.
     public Dictionary<ulong, int> PendingComputeCompiles { get; } = new();
 
-    // How many graphics requests report "still compiling" before one is handed over.
-    public int PendingGraphicsCompiles { get; set; }
-
-    public int GraphicsCompileRequests { get; private set; }
-
-    public bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
-    {
-        GraphicsCompileRequests++;
-        handle = default;
-        if (PendingGraphicsCompiles > 0)
-        {
-            PendingGraphicsCompiles--;
-            return false;
-        }
-
-        handle = CreateGraphicsPipeline(description);
-        return true;
-    }
-
     // Answers resident reads from the fake memory, as a host whose GPU owns nothing does.
     public bool ResidentReadsEnabled { get; set; }
 
@@ -224,6 +222,36 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
         handle = CreateComputePipeline(description);
         return true;
     }
+
+    // How many requests for graphics pipelines report "still compiling" before one is handed over, and the description
+    // each request named.
+    public int PendingGraphicsCompiles { get; set; }
+
+    public List<GraphicsPipelineDescription> GraphicsPipelineRequests { get; } = new();
+
+    public int GraphicsCompileRequests => GraphicsPipelineRequests.Count;
+
+    // Whether a draw that must have its pipeline waits in WaitForGraphicsPipeline (IShaderPipelineHost.WaitsForGraphicsPipelines).
+    public bool WaitsForGraphicsPipelines { get; set; }
+
+    public bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
+    {
+        GraphicsPipelineRequests.Add(description);
+        handle = default;
+        if (PendingGraphicsCompiles > 0)
+        {
+            PendingGraphicsCompiles--;
+            return false;
+        }
+
+        handle = CreateGraphicsPipeline(description);
+        return true;
+    }
+
+    // The descriptions a caller waited for, outside the pipeline cache's lock.
+    public List<GraphicsPipelineDescription> GraphicsPipelineWaits { get; } = new();
+
+    public void WaitForGraphicsPipeline(GraphicsPipelineDescription description) => GraphicsPipelineWaits.Add(description);
 }
 
 // Remembers every request; compiles nothing unless a module factory was given.
@@ -263,6 +291,10 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
     }
 
     public void CountShaderCompilation() => Compilations++;
+
+    // The two fixed stages a tessellated draw adds; the fake host only counts their modules.
+    public (IGuestCompiledShader Vertex, IGuestCompiledShader Control) CompileTessellationBridge(BindingLayout layout, Gen5TessellationDomain domain) =>
+        (new FakeCompiledShader(null!), new FakeCompiledShader(null!));
 
     public IGuestCompiledShader GetDepthOnlyFragmentShader() => throw Unsupported();
 

@@ -172,6 +172,8 @@ internal sealed partial class MetalRenderHost :
         _relay = relay;
         PerVertexPixelInputsSupported = SupportsApple10Features(device);
         DepthBoundsTestSupported = SupportsApple10Features(device);
+        PixelSubgroupArithmetic = PixelSubgroupArithmeticRequested && GraphicsSubgroupOperationsEnabled &&
+            SupportsSimdgroupReductions(device);
         GuestPixelFormats.NarrowSrgbFormats = SupportsNarrowSrgb(device);
         _sharedEvent = MetalNative.Send(device, SelNewSharedEvent);
         if (_sharedEvent == 0)
@@ -273,6 +275,14 @@ internal sealed partial class MetalRenderHost :
 
     public uint MaxPushDescriptors => 0;
 
+    // Each stage has its own argument buffer, so compute and graphics stages share one per-stage budget
+    // (MetalStableImageLimits). The prewarm answers the same (MetalShaderPrewarm.ComputeImageLimits).
+    public SharpEmu.ShaderCompiler.Resources.StableImageDescriptorLimits ComputeImageDescriptorLimits =>
+        MetalStableImageLimits.Of(_device);
+
+    public SharpEmu.ShaderCompiler.Resources.StableImageDescriptorLimits GraphicsImageDescriptorLimits =>
+        MetalStableImageLimits.Of(_device);
+
     // Metal threadgroups are always 32-wide on Apple silicon; a wave64 compute
     // program is emitted as two wave32 halves by the translator.
     public bool ComputeWave64Supported => false;
@@ -305,6 +315,7 @@ internal sealed partial class MetalRenderHost :
     internal const bool PrewarmSharedInt64Atomics = false;
     internal const bool PrewarmSignedZeroInfNanPreserve = true;
     internal const bool PrewarmExecGuardElision = true;
+    internal const bool PrewarmRuntimeImageSwizzles = true;
 
     public ShaderPrewarmList? ShaderPrewarm => MetalShaderPrewarm.List;
     public GraphicsPrewarmList? GraphicsPrewarm => MetalShaderPrewarm.Graphics;
@@ -316,7 +327,44 @@ internal sealed partial class MetalRenderHost :
     // Tessellated draws are emulated (hull kernel + post-tessellation vertex function), never native stages.
     public bool TessellationStagesSupported => false;
 
+    // A vertex function has [[base_vertex]] and [[base_instance]] on every Apple GPU, so the
+    // translator counts the guest's vertex and instance indices from the draw's base and stores
+    // the base an indirect packet names in user data there (ShaderCompileRequest.BaseVertexUserData,
+    // StartInstanceUserData), which the command processor then leaves unwritten.
+    // SHARPEMU_METAL_DRAW_PARAMETERS=0 keeps Metal's ids (which include both bases) and stores
+    // neither, as before.
+    public bool ShaderDrawParametersSupported => DrawParameters;
+
+    internal static readonly bool DrawParameters =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_DRAW_PARAMETERS") != "0";
+
+    // The translator reads a storage image's store channel map from shader data, which the
+    // descriptor path writes from the bound T# (WriteStageShaderData), so one module serves every
+    // destination select. SHARPEMU_RUNTIME_IMAGE_SWIZZLE=0 bakes the select into the module again
+    // (ShaderProgramCache applies the switch on top of this answer).
+    public bool RuntimeImageSwizzlesSupported => PrewarmRuntimeImageSwizzles;
+
     public GpuSampleCount NoAttachmentSampleCounts => GpuSampleCount.Count1Bit;
+
+    // A pixel shader's wave32 row scan read at lane 15 or 31 becomes a SIMD-group reduction over the row
+    // (Gen5MslTranslator.WaveReductions): a fragment simdgroup can hold only some of the guest wave's lanes, and a
+    // row with none of them read another row's scan. The translator emits simd_sum/min/max/and/or/xor, which MSL
+    // offers fragment functions from Metal 2.1 (MSL spec 6.10.2) and the feature set tables list as "SIMD-scoped
+    // reduction operations" for Apple7 and later; pixel shaders have real lanes only with graphics subgroups on.
+    // SHARPEMU_METAL_PIXEL_SUBGROUP_ARITHMETIC=0 keeps the scan's own lane reads.
+    public bool PixelSubgroupArithmetic { get; }
+
+    internal static readonly bool PixelSubgroupArithmeticRequested =
+        Environment.GetEnvironmentVariable("SHARPEMU_METAL_PIXEL_SUBGROUP_ARITHMETIC") != "0";
+
+    private const nint GpuFamilyApple7 = 1007;
+
+    private static bool SupportsSimdgroupReductions(nint device)
+    {
+        var supportsFamily = MetalNative.Selector("supportsFamily:");
+        return MetalNative.SendBool(device, MetalNative.Selector("respondsToSelector:"), supportsFamily) &&
+            MetalNative.SendBool(device, supportsFamily, GpuFamilyApple7);
+    }
 
     // Per-vertex pixel inputs are MSL 4.0's metal::vertex_value (macOS 26). The feature set
     // tables list "pre-raster per-vertex values" for Apple10 (M5) only; an M4 compiles the
@@ -750,6 +798,7 @@ internal sealed partial class MetalRenderHost :
         // every submission's status is read once it has finished.
         DrainFinishedSubmissions();
         ReportStepCaps();
+        ReportCallFaults();
         RetainInFlight(_commandBuffer, serial);
         // The host's own reference on the buffer it just committed, for the wait that reads
         // its timing after this flush (or after a later call that flushed nothing). The
@@ -2669,7 +2718,7 @@ internal sealed partial class MetalRenderHost :
 
         if (_memory.CanRead(address, size))
         {
-            return size;
+            return NoteReplayClamp(address, size, size);
         }
 
         var clamped = 1UL;
@@ -2687,7 +2736,7 @@ internal sealed partial class MetalRenderHost :
             }
         }
 
-        return clamped;
+        return NoteReplayClamp(address, size, clamped);
     }
 
     public BufferBinding NullBuffer => new((ulong)_guestMemory.NullBuffer, 0);
@@ -2729,7 +2778,7 @@ internal sealed partial class MetalRenderHost :
                 VerifyReadBinding(address, size, computeStage: false, MetalWritebackCause.BufferBinding, memo);
             }
 
-            return new BufferBinding((ulong)memo.Buffer, memo.Offset);
+            return NoteReplayObtain(address, size, isWritten, new BufferBinding((ulong)memo.Buffer, memo.Offset));
         }
 
         var memoStamp = !isWritten && ReadBindingMemoEnabled ? ReadBindingStamp() : default;
@@ -2747,7 +2796,7 @@ internal sealed partial class MetalRenderHost :
 
         if (!range.IsValid)
         {
-            return NullBuffer;
+            return NoteReplayObtain(address, size, isWritten, NullBuffer);
         }
 
         if (!isWritten && ReadBindingMemoEnabled)
@@ -2765,7 +2814,7 @@ internal sealed partial class MetalRenderHost :
             NoteGuestMemoryWrite(address, size, MetalGpuWriteOrigin.WrittenBinding);
         }
 
-        return new BufferBinding((ulong)range.Buffer, range.Offset);
+        return NoteReplayObtain(address, size, isWritten, new BufferBinding((ulong)range.Buffer, range.Offset));
     }
 
     public BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment)
@@ -2915,6 +2964,9 @@ internal sealed partial class MetalRenderHost :
             // (a miss it compiled itself, or a draw that could not be left out), and compiles
             // queued or running on the compiler threads now.
             $"draws_skipped_compiling={Interlocked.Exchange(ref _drawsSkippedCompiling, 0)} " +
+            // Calls that returned at once because their caller's linked program lacked the callee (MarkedCalls), and
+            // calls no link resolved at all.
+            $"call_marks={TakeMarkedCalls()} unlinked_calls={UnlinkedCalls} " +
             $"leave_out=[{FormatLeaveOutCounters()}] " +
             // Pipelines specialized for a draw's buffer words, and the draws on them (FormatBufferWordCounters).
             $"buffer_words=[{FormatBufferWordCounters()}] " +
@@ -3132,7 +3184,7 @@ internal sealed partial class MetalRenderHost :
             $"transfers=[{TakeTransferCauses()}] {TakePreludeText()}" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
             $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()} " +
-            SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport());
+            SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport() + " " + TakeReplayHostReport());
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");
@@ -3262,7 +3314,9 @@ internal sealed partial class MetalRenderHost :
             RetireUploadPreludes(CompletedSerial, all: true);
             ReleaseInFlightSubmissions();
             ReportStepCaps();
+            ReportCallFaults(shutdown: true);
             DisposeStepReport();
+            DisposeShaderCalls();
         }
         catch (Exception exception)
         {
@@ -3296,6 +3350,7 @@ internal sealed partial class MetalRenderHost :
         DisposeOcclusionAudit();
         DisposeWriteFences();
         DisposeHostMovie();
+        DisposeBindlessHeap();
         DisposeBindlessImages();
         DisposePipelines();
         (_transfer as IDisposable)?.Dispose();

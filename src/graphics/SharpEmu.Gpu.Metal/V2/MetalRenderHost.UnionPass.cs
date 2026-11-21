@@ -505,7 +505,7 @@ internal sealed partial class MetalRenderHost
     }
 
     // Whether a texture the next draw binds is this one or a view of it. A program that
-    // reaches images through bindless tables could reach any.
+    // reaches images through bindless tables or the bindless heap could reach any.
     private bool StagesSampleTexture(nint view, nint root)
     {
         foreach (var stage in _joinStages)
@@ -515,7 +515,7 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
-            if (stage.Program.Bindings is { BindlessImageTableCount: > 0 })
+            if (stage.Program.Bindings is { BindlessImageTableCount: > 0 } or { UsesBindlessHeap: true })
             {
                 return true;
             }

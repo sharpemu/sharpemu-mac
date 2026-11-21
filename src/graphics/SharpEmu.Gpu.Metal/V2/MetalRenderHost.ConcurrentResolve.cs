@@ -78,6 +78,16 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     internal static bool CleanReadsLanded { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_CLEAN_READ_LANDED") != "0";
     private long _cleanReadsCopied;
     private long _cleanReadsAbandoned;
+    // A branch write guard's read (ResourceBranchWriteGuard.ReadingWords) of a word a pending recorded GPU write owns and
+    // neither its copy nor the command processor answers: refused on both threads, never waited for nor abandoned, so the
+    // guarded plan keeps both paths of that predicate, as it kept every source before it had blocks. A predicate of the
+    // plan that dispatches right after its producer otherwise stalled the stream on the GPU every time (Demon's Souls:
+    // ~90 waits, ~800 ms per 2 s). SHARPEMU_GUARD_READS_REFUSE_PENDING=0 waits (worker) and abandons (resolver) again.
+    internal static bool GuardReadsRefusePending { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_GUARD_READS_REFUSE_PENDING") != "0";
+    private long _guardReadsRefused;
+
+    private static bool RefusesPendingGuardRead => GuardReadsRefusePending && SharpEmu.ShaderCompiler.Resources.ResourceBranchWriteGuard.ReadingWords;
     // Verify differences excused because a GPU write logged since the resolution began covers what it read.
     private long _supersededVerifies;
     // Takes refused because an owned answer (a refused clean or resident read) is clean now.
@@ -186,7 +196,7 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
         var dispatches = $" dispatch_jobs={computeSubmitted} dispatch_taken={computeTaken} dispatch_refused=(abandoned={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Abandoned]}," +
             $"provider={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Provider]}{FormatProviderRefusals(prefetch.TakeProviderRefusals())},inputs={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Inputs]}," +
             $"ownership={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Ownership]},effects={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Effects]},replanned={computeRefused[(int)ParallelProgramPrefetch.ComputeRefusal.Replanned]}) {prefetch.TakeComputeReport()} " +
-            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} superseded_verifies={Interlocked.Exchange(ref _supersededVerifies, 0)} owned_now_clean_refusals={Interlocked.Exchange(ref _ownedNowCleanRefusals, 0)} clean_under_write=(landed={Interlocked.Exchange(ref _cleanReadsLanded, 0)},copied={Interlocked.Exchange(ref _cleanReadsCopied, 0)},abandoned={Interlocked.Exchange(ref _cleanReadsAbandoned, 0)}) dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
+            $"write_log_refusals={Interlocked.Exchange(ref _writeLogRefusals, 0)} superseded_verifies={Interlocked.Exchange(ref _supersededVerifies, 0)} owned_now_clean_refusals={Interlocked.Exchange(ref _ownedNowCleanRefusals, 0)} clean_under_write=(landed={Interlocked.Exchange(ref _cleanReadsLanded, 0)},copied={Interlocked.Exchange(ref _cleanReadsCopied, 0)},abandoned={Interlocked.Exchange(ref _cleanReadsAbandoned, 0)},guard_refused={Interlocked.Exchange(ref _guardReadsRefused, 0)}) dispatch_wait_ms={computeWaitMs.ToString("F1", culture)} " +
             $"dispatch_saved_ms={computeSavedMs.ToString("F1", culture)}";
         return $"resolved={resolved} abandoned={abandoned} abandoned_by=({TakeAbandonCauses()}) abandoned_verify={GpuFatal.TakeSpeculativeVerifyFailures()} taken={taken} refused={refused} drains={drains} drained={drained} deferred_barriers={deferredBarriers} operand_reads_kept={operandReadsKept} " +
             $"wait_ms={waitMs.ToString("F1", culture)} resolve_ms={prefetch.TakeResolveMilliseconds().ToString("F1", culture)} " +
@@ -1341,6 +1351,18 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                     return true;
                 }
 
+                if (TryReadPendingCommandProcessorBytesConcurrent(address, bytes, assumptions))
+                {
+                    assumptions.Forget(ConcurrentQuery.Word, address, sizeof(uint), answers);
+                    word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+                    if ((address & 3) == 0 && ConcurrentWordLines)
+                    {
+                        FillOverlayLine(assumptions, address & ~lineMask);
+                    }
+
+                    return true;
+                }
+
                 // The source tests overwrote the owner; the abandon is the word's.
                 _lastConcurrentOwner = owner;
             }
@@ -1433,6 +1455,20 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
             return true;
         }
 
+        if (TryReadPendingCommandProcessorBytesConcurrent(address, bytes, assumptions))
+        {
+            assumptions.Forget(ConcurrentQuery.Resident, address, sizeof(uint), answers);
+            word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            return true;
+        }
+
+        if (RefusesPendingGuardRead)
+        {
+            // The owned answer stays recorded: the worker refuses the word as well while the write is pending.
+            Interlocked.Increment(ref _guardReadsRefused);
+            return false;
+        }
+
         _lastConcurrentOwner = owner;
         Interlocked.Increment(ref _cleanReadsAbandoned);
         NoteAbandonCause(address, sizeof(uint));
@@ -1521,7 +1557,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
     // (IsConcurrentResolveStillCurrent) tests every word compared here as it would the words read. A range a GPU write
     // owns is read through the pending copy that writes all of it, as TryReadGuestWordConcurrentTested reads each of its
     // words (TryReadThroughPendingCopyConcurrent: that copy the latest write over the range, its source owned by
-    // nothing, the source's answers recorded, the range's owned answer dropped), and compared there: any word of the
+    // nothing, the source's answers recorded, the range's owned answer dropped), or as the pending command-processor
+    // write that covers all of it (TryReadPendingCommandProcessorBytesConcurrent, likewise), and compared there: any word of the
     // range read alone finds that same copy, since a later write over it would be the range's latest. Any other owned
     // range refuses the compare, its owned answer dropped: the caller then reads the words itself, recording their own
     // answers. Then the other ranges' bytes, where they lie.
@@ -1556,7 +1593,8 @@ internal sealed partial class MetalRenderHost : IConcurrentResolveHost
                 {
                     var before = assumptions.Answers.Count;
                     var bytes = through[..length];
-                    if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions))
+                    if (TryReadThroughPendingCopyConcurrent(address, bytes, assumptions) ||
+                        TryReadPendingCommandProcessorBytesConcurrent(address, bytes, assumptions))
                     {
                         if (owned)
                         {

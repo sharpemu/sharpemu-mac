@@ -46,6 +46,73 @@ public sealed unsafe partial class MetalClearFoldingTests
         Assert.True(host.CompletedSerial >= serial);
     }
 
+    // A branch write guard's read of that word (its plan writes memory and kept every source before it had blocks) is
+    // refused on both threads instead: the resolver neither abandons nor answers, its refusal stands while the write is
+    // pending, and the worker does not wait. SHARPEMU_GUARD_READS_REFUSE_PENDING=0 abandons and waits again.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ABranchWriteGuardsReadUnderAPendingWriteIsRefusedWithoutAWait(bool refuse)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        var host = rig.Host;
+        rig.WriteBacking32(PredicateWord, 0x1234);
+        host.NoteGuestMemoryWrite(PredicateWord, sizeof(uint), MetalGpuWriteOrigin.StorageBuffer);
+        var serial = host.SubmissionSerial;
+        var configured = MetalRenderHost.GuardReadsRefusePending;
+        MetalRenderHost.GuardReadsRefusePending = refuse;
+        try
+        {
+            using var reads = SharpEmu.ShaderCompiler.Resources.ResourceBranchWriteGuard.EnterReads();
+            var concurrent = (IConcurrentResolveHost)host;
+            concurrent.BeginConcurrentResolve();
+            object? assumptions = null;
+            try
+            {
+                if (refuse)
+                {
+                    Assert.False(host.TryReadCleanGuestWord(PredicateWord, out _));
+                }
+                else
+                {
+                    Assert.Throws<GpuFatal.AbandonedWorkException>(() => host.TryReadCleanGuestWord(PredicateWord, out _));
+                }
+            }
+            finally
+            {
+                assumptions = concurrent.EndConcurrentResolve();
+            }
+
+            if (refuse)
+            {
+                Assert.True(concurrent.IsStillCurrent(assumptions), "the refusal stands while the write is pending");
+            }
+
+            concurrent.ReleaseAssumptions(assumptions);
+
+            if (refuse)
+            {
+                Assert.False(host.TryReadCleanGuestWord(PredicateWord, out _));
+                Assert.True(host.CompletedSerial < serial, "the worker waited");
+            }
+            else
+            {
+                Assert.True(host.TryReadCleanGuestWord(PredicateWord, out var word));
+                Assert.Equal(0x1234u, word);
+                Assert.True(host.CompletedSerial >= serial);
+            }
+        }
+        finally
+        {
+            MetalRenderHost.GuardReadsRefusePending = configured;
+        }
+
+        // Outside a guard's read the worker reads the landed value as before.
+        Assert.True(host.TryReadCleanGuestWord(PredicateWord, out var landed));
+        Assert.Equal(0x1234u, landed);
+    }
+
     [Fact]
     public void ACleanReadOfAPendingCopyDestinationIsAnsweredFromItsSourceOnBothThreads()
     {

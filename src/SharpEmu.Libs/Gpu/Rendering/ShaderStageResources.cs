@@ -34,7 +34,11 @@ public readonly record struct BufferResourceInfo(
     bool Formatted,
     bool Scalar,
     uint MaxByteExtent,
-    uint PackedStride);
+    // The specialization's packed stride word (BufferResource.PackedStride): the executor matches a known write's
+    // descriptor against it. Zero for a program the SPIR-V translator compiled with strides in shader data.
+    uint PackedStride = 0,
+    // Every access the program makes through the buffer is an atomic (BufferResource.PlainAccess unset).
+    bool AtomicOnly = false);
 
 // How a compiled program uses one image resource.
 public readonly record struct ImageResourceInfo(ImageResourceClass Class, bool Written);
@@ -58,6 +62,7 @@ public class ShaderProgramInfo
     public int VertexOffsetScalarRegister { get; init; } = NoScalarRegister;
     public int InstanceOffsetScalarRegister { get; init; } = NoScalarRegister;
     public bool UsesDeviceAddresses { get; init; }
+    public bool DeviceAddressReadsBounded { get; init; }
 
     // A store or an atomic through the device-address page table: the draw writes memory
     // no host-side range bounds, unlike a program that only reads through it.
@@ -129,14 +134,28 @@ public class ShaderProgramInfo
     // What the host resolves for each record of each callee, by callee slot, when the program reads its records'
     // descriptors at run time (ShaderCompileRequest.CallRecordCallees).
     public IReadOnlyList<CallRecordCallee> CallRecordCallees { get; init; } = [];
+
+    // A task-launched mesh program: its pipelines take the task stage, specialized with these values.
+    public MeshTaskLaunchInfo? MeshTask { get; init; }
 }
+
+// Null RequestedGeneration means the requested link is still pending: its exact layout identity is known, but no
+// linked generation exists yet. "link", "permutation" and "pipeline" name the work that forced the fallback.
+public sealed record LinkedCompileFallback(ulong CallerHash, long? RequestedGeneration, long ServedGeneration,
+    string RequestedLibrary, string ServedLibrary, string Reason);
 
 // One shader stage bound to a draw or dispatch: its program, the resources it reads and its code base.
 public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, ResourceSnapshot Resources, ulong ShaderBase = 0)
 {
     public bool IsValid => Program is not null;
 
+    // Per-resolution provenance of a compile fallback (ShaderProgramCache). It is never stored on a shared module.
+    public LinkedCompileFallback? CompileFallback { get; init; }
+
     public DispatchThreadLimits? ThreadLimits { get; init; }
+
+    // The thread limits come from GPU memory (ComputeInputInfo.IndirectThreadCounts); the host writes none.
+    public bool GpuThreadLimits { get; init; }
 
     public MeshDrawParameters? MeshDraw { get; init; }
 
@@ -172,7 +191,7 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
 
     public void WriteDispatchThreadLimits(Span<uint> shaderData)
     {
-        if (Program?.Bindings is not { UsesDispatchThreadLimits: true } layout) return;
+        if (Program?.Bindings is not { UsesDispatchThreadLimits: true } layout || GpuThreadLimits) return;
         if (ThreadLimits is not { } limits || shaderData.Length != layout.ShaderDataDwordCount)
         {
             throw GpuFatal.Fatal("The compute dispatch has missing thread limits or invalid shader data.");
@@ -309,6 +328,7 @@ public sealed class VertexInputInfo
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
     public int StartInstanceUserData { get; set; } = -1;
+    public int BaseVertexUserData { get; set; } = -1;
     public ShaderStageResources Stage { get; set; }
 
     public VertexInputInfo WithoutStage()
@@ -350,7 +370,12 @@ public readonly record struct GuestGeometryConfiguration
     public uint LocalDataShareDwords { get; init; }
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
+    // The program is launched by the task stage (MeshTaskLaunch): it reads its draw parameters from the task payload.
+    public bool TaskLaunched { get; init; }
 }
+
+// What the task stage of a task-launched mesh program is specialized with.
+public readonly record struct MeshTaskLaunchInfo(uint PrimitivesPerGroup, bool PointList);
 
 public sealed class PixelInputInfo
 {
@@ -414,6 +439,8 @@ public sealed class ComputeInputInfo
     public uint ThreadsY { get; init; }
     public uint ThreadsZ { get; init; }
     public bool DispatchThreadDimensions { get; init; }
+    // The thread counts are in GPU memory: the GPU writes the thread limits (IRenderHost.PrepareThreadDispatch).
+    public bool IndirectThreadCounts { get; init; }
     public uint DispatchThreadsX { get; set; }
     public uint DispatchThreadsY { get; set; }
     public uint DispatchThreadsZ { get; set; }

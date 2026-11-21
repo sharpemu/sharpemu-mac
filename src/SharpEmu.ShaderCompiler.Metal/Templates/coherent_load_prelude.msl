@@ -38,7 +38,7 @@ static inline uint sharpemu_load_word_coherent(device uint* b, uint bytes, uint 
 {
     if ((addr & 3u) == 0u)
     {
-        return addr + 4u <= bytes ? sharpemu_coherent_word_at(b, addr >> 2) : sharpemu_load_tail_coherent(b, bytes, addr);
+        return (addr | 3u) < bytes ? sharpemu_coherent_word_at(b, addr >> 2) : sharpemu_load_tail_coherent(b, bytes, addr);
     }
     uint shift = (addr & 3u) * 8u;
     uint aligned = addr & ~3u;

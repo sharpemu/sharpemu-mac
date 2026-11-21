@@ -36,12 +36,6 @@ public static partial class Gen5MslTranslator
         Gen5MslCodegenOptions? options = null)
     {
         shader = default!;
-        if (request.UsesBindlessHeap)
-        {
-            error = "Metal does not support bindless heap descriptors.";
-            return false;
-        }
-
         // The guest mesh stage (Vulkan's task/mesh path) has no MSL emission; the Metal mesh path
         // compiles NGG primitive shaders as Vertex requests with PrimitiveShader set instead.
         if (request.Stage == ShaderStage.Mesh)
@@ -49,13 +43,27 @@ public static partial class Gen5MslTranslator
             error = "Metal does not support mesh shaders.";
             return false;
         }
-        // A program the shader-call linker rewrote carries call dispatch the MSL emitter cannot
-        // express. An unlinked S_SWAPPC_B64 keeps today's behaviour (TryEmitScalar64 skips it),
-        // and an explicit branch target alone (ShaderLinkedBranchControl) compiles.
-        if (request.Program.Instructions.Any(instruction =>
-            instruction.Control is ShaderCallMatchControl or ShaderCallEntryControl or ShaderCallFaultControl))
+        // A program the shader-call linker rewrote reads its callees' addresses and its records' arguments from the
+        // dispatch (Gen5MslTranslator.ShaderCalls.cs): the layout holds one pair per callee and per argument. An unlinked
+        // S_SWAPPC_B64 (a backend that does not link) is the caller compiled alone: TryEmitScalar64 skips it.
+        var callArguments = Gen5ShaderCallLinker.CallEntryArguments(request.Program);
+        if (request.Bindings.CallArgumentCount != 0 && callArguments.Length != request.Bindings.CallArgumentCount)
         {
-            error = "Metal does not support linked shader calls.";
+            error = $"the layout holds {request.Bindings.CallArgumentCount} call arguments for {callArguments.Length}";
+            return false;
+        }
+
+        var callTargets = Gen5ShaderCallLinker.CallTargets(request.Program);
+        if (request.Bindings.CallTargetCount != 0 && callTargets.Length != request.Bindings.CallTargetCount)
+        {
+            error = $"the layout holds {request.Bindings.CallTargetCount} call targets for {callTargets.Length} callees";
+            return false;
+        }
+
+        if ((request.CallRecordImageByMemoryIndex.Count != 0 || request.CallRecordSamplerByMemoryIndex.Count != 0) &&
+            (request.Bindings.Find(DescriptorBindingKind.CallRecords) is null || !request.Bindings.UsesBindlessHeap))
+        {
+            error = "the layout of a program that reads call records holds no call records or bindless heap";
             return false;
         }
         try
@@ -91,12 +99,18 @@ public static partial class Gen5MslTranslator
         }
 
         options ??= Gen5MslCodegenOptions.FromEnvironment;
-        var context = new CompilationContext(request, options);
+        SharedCallBodies? sharedCalls = null;
+        if (options.SharedCallBodies)
+        {
+            request = ShareLinkedCallBodies(request, out sharedCalls);
+        }
+
+        var context = new CompilationContext(request, options, sharedCalls);
         var compiled = context.TryCompile(out shader, out error);
         if (!compiled && context.HalfLocalLoopExchanged)
         {
             options = options with { HalfLocalWaveLoops = false };
-            context = new CompilationContext(request, options);
+            context = new CompilationContext(request, options, sharedCalls);
             compiled = context.TryCompile(out shader, out error);
         }
 
@@ -108,7 +122,7 @@ public static partial class Gen5MslTranslator
             }
 
             options = options with { HalfLocalExecBranches = false };
-            context = new CompilationContext(request, options);
+            context = new CompilationContext(request, options, sharedCalls);
             compiled = context.TryCompile(out shader, out error);
         }
 
@@ -122,14 +136,40 @@ public static partial class Gen5MslTranslator
             }
 
             Interlocked.Increment(ref _execRunsRefused);
-            if (!new CompilationContext(request, options with { ExecRuns = false }).TryCompile(out shader, out error))
+            if (!new CompilationContext(request, options with { ExecRuns = false }, sharedCalls).TryCompile(out shader, out error))
             {
                 return false;
             }
         }
 
+        NoteStandInClock(request);
         Gen5MslDump.Write(request, shader);
         return true;
+    }
+
+    private static long _standInClockPrograms;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> StandInClockHashes = new();
+
+    /// <summary>Programs translated with the stand-in shader clock (TryEmitShaderClock): MSL has no clock, so their
+    /// S_MEMTIME / S_MEMREALTIME count reads, not time.</summary>
+    public static long StandInClockPrograms => Interlocked.Read(ref _standInClockPrograms);
+
+    // A program that reads the guest's clock gets a counter of its own reads instead: counted, and logged once per hash,
+    // so a title whose timing depends on it says so.
+    private static void NoteStandInClock(ShaderCompileRequest request)
+    {
+        if (!request.Program.Instructions.Any(static instruction => instruction.Opcode is "SMemtime" or "SMemrealtime"))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _standInClockPrograms);
+        if (StandInClockHashes.TryAdd(request.Hash, 0))
+        {
+            Console.Error.WriteLine(
+                $"[MSL][WARN][SHADER_CLOCK] 0x{request.Hash:X16} reads S_MEMTIME/S_MEMREALTIME: Metal has no shader clock, " +
+                "so each read advances a per-invocation counter (reads, not time).");
+        }
     }
 
     private sealed partial class CompilationContext
@@ -219,11 +259,13 @@ public static partial class Gen5MslTranslator
         }
 
         private readonly Gen5MslCodegenOptions _options;
+        private readonly SharedCallBodies? _sharedCalls;
 
-        public CompilationContext(ShaderCompileRequest request, Gen5MslCodegenOptions options)
+        public CompilationContext(ShaderCompileRequest request, Gen5MslCodegenOptions options, SharedCallBodies? sharedCalls = null)
         {
             _request = request;
             _options = options;
+            _sharedCalls = sharedCalls;
             _argumentLayout = Gen5MslArgumentLayout.Build(request.Bindings);
             // An NGG primitive shader that exchanges data through LDS, synchronizes or asks
             // for export space is the merged ES/GS workgroup stage, which only a mesh
@@ -320,6 +362,12 @@ public static partial class Gen5MslTranslator
                         break;
                     case DescriptorBindingKind.MipStatistics:
                         _hasMipStatistics = true;
+                        break;
+                    case DescriptorBindingKind.CallRecords:
+                        _hasCallRecords = true;
+                        break;
+                    case DescriptorBindingKind.CallMarks:
+                        _hasCallMarks = true;
                         break;
                     default:
                         DeclareImageClass(binding, info);
@@ -437,6 +485,11 @@ public static partial class Gen5MslTranslator
                 EmitBindlessEntryStructs(source);
             }
 
+            if (_argumentLayout!.Fields.Any(static field => field.FieldKind == MslArgumentFieldKind.BindlessHeapElements))
+            {
+                EmitHeapElementStructs(source);
+            }
+
             source.AppendLine($"struct {Gen5MslArgumentLayout.StructName}");
             source.AppendLine("{");
             foreach (var field in layout.Fields)
@@ -467,6 +520,8 @@ public static partial class Gen5MslTranslator
                     MslArgumentFieldKind.Pointer => $"{PointerType(field.Kind)} {field.Name}",
                     MslArgumentFieldKind.StepReport or MslArgumentFieldKind.PairLocks => $"device atomic_uint* {field.Name}",
                     MslArgumentFieldKind.BindlessImageTables => $"array<device const {BindlessEntryStruct}*, {field.Count}> {field.Name}",
+                    MslArgumentFieldKind.BindlessHeapElements => $"device const ulong* {field.Name}",
+                    MslArgumentFieldKind.BindlessHeapFeedback or MslArgumentFieldKind.CallFaults => $"device atomic_uint* {field.Name}",
                     _ => $"uint {field.Name}",
                 };
                 source.AppendLine($"    {declaration} [[id({field.FirstId})]];");
@@ -527,7 +582,8 @@ public static partial class Gen5MslTranslator
             DescriptorBindingKind.DeviceAddressPageTable => "device const Gen5AddressRange*",
             DescriptorBindingKind.FlattenedResourceTable or DescriptorBindingKind.ShaderData =>
                 _options.UniformTablesInConstantSpace ? "constant uint*" : "device const uint*",
-            DescriptorBindingKind.MipStatistics => "device atomic_uint*",
+            DescriptorBindingKind.MipStatistics or DescriptorBindingKind.CallMarks => "device atomic_uint*",
+            DescriptorBindingKind.CallRecords => "device const uint*",
             _ => "device uint*",
         };
 
@@ -598,6 +654,18 @@ public static partial class Gen5MslTranslator
             foreach (var scratch in _indirectKeyScratch.Values.OrderBy(static name => name, StringComparer.Ordinal))
             {
                 source.AppendLine($"    uint {scratch} = 0u;");
+            }
+
+            if (_hasCallRecords && UsesCallRecordRow)
+            {
+                // No row until a run-time entry finds one: a record read before it takes the null element.
+                source.AppendLine($"    uint {CallRecordRowName} = 0xFFFFFFFFu;");
+            }
+
+            if (_sharedCalls is not null)
+            {
+                // The slot of the record whose entry ran last, which a shared body's record variants select by.
+                source.AppendLine($"    uint {CallSlotName} = 0u;");
             }
         }
 
@@ -1405,7 +1473,7 @@ public static partial class Gen5MslTranslator
                 uint? binding = null;
                 for (var index = first; index < first + count; index++)
                 {
-                    if (!request.Memory.TryGetIndex(instruction.Pc, (uint)index, out var memory))
+                    if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), (uint)index, out var memory))
                     {
                         return false;
                     }
@@ -1433,7 +1501,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                if (!request.Memory.TryGetIndex(instruction.Pc, (uint)component, out var memoryIndex))
+                if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), (uint)component, out var memoryIndex))
                 {
                     error = $"scalar load component {component} has no memory record";
                     return false;
@@ -1588,7 +1656,7 @@ public static partial class Gen5MslTranslator
             }
 
             var request = _request;
-            if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
+            if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex))
             {
                 error = "global access has no memory record";
                 return false;
@@ -2133,7 +2201,7 @@ public static partial class Gen5MslTranslator
             bindingIndex = -1;
             resource = null!;
             var request = _request;
-            if (!request.Memory.TryGetIndex(pc, 0, out var memoryIndex))
+            if (!request.Memory.TryGetIndex(MemoryPc(pc), 0, out var memoryIndex))
             {
                 return false;
             }
@@ -2159,7 +2227,7 @@ public static partial class Gen5MslTranslator
             elements = [];
             error = string.Empty;
             var request = _request;
-            if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
+            if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex))
             {
                 return false;
             }
@@ -2249,7 +2317,7 @@ public static partial class Gen5MslTranslator
         {
             var request = _request;
             if (!_options.IndexedImageCandidates || elements.Count < IndexedCandidateMinimum ||
-                !request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) ||
+                !request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex) ||
                 !request.IndirectRootByMemoryIndex.ContainsKey(memoryIndex))
             {
                 return false;
@@ -2335,7 +2403,9 @@ public static partial class Gen5MslTranslator
             out SamplerResource? samplerInfo,
             out string error,
             out int resourceIndex,
-            (uint Resource, uint Element)? fixedElement = null)
+            (uint Resource, uint Element)? fixedElement = null,
+            bool heapVolumeLayers = false,
+            ImageNumericClass heapNumericClass = ImageNumericClass.Float)
         {
             error = string.Empty;
             resourceIndex = -1;
@@ -2349,7 +2419,7 @@ public static partial class Gen5MslTranslator
             mipLevel = "0u";
             var request = _request;
             var info = request.Resources.Info;
-            if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
+            if (!request.Memory.TryGetIndex(MemoryPc(instruction.Pc), 0, out var memoryIndex))
             {
                 error = "image access has no memory record";
                 return false;
@@ -2397,6 +2467,34 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            // A bindless heap image reads the element its key picks from the heap (Gen5MslTranslator.BindlessHeap.cs),
+            // not its null element in the class array: a 3D read of a 2D record reads the record's 2D-array element, and
+            // an integer element is read through the integer form of its class.
+            var heapSlot = bindingKind is { } heapKind ? BindlessHeap.ImageSlot(heapKind) : -1;
+            HeapRecordUse heapImage = default;
+            var fromHeap = fixedElement is null && heapSlot >= 0 && _heapRecordIndex is not null &&
+                request.HeapImageByMemoryIndex.TryGetValue(memoryIndex, out heapImage);
+            // A call record's image is the element the host resolved for the record its callee's entry found
+            // (Gen5MslTranslator.ShaderCalls.cs), read without a mark.
+            var fromCallRecord = !fromHeap && fixedElement is null && heapSlot >= 0 && _callRecordElement is not null &&
+                request.CallRecordImageByMemoryIndex.ContainsKey(memoryIndex);
+            if (heapVolumeLayers)
+            {
+                if (!fromHeap || heapSlot != BindlessHeap.VolumeSlot)
+                {
+                    error = "only a 3D heap image read has a layered alternative";
+                    return false;
+                }
+
+                heapSlot = BindlessHeap.VolumeLayerSlot;
+                imageClass = HeapVolumeLayerClass();
+            }
+
+            if ((fromHeap || fromCallRecord) && heapNumericClass != ImageNumericClass.Float)
+            {
+                imageClass = HeapIntegerClass(imageClass, heapNumericClass);
+            }
+
             // A sampled mip load keeps its mip operand; a storage case is already its own mip view.
             // The mip is the address component right after the coordinates, so it moves with
             // the dimension (2 for 2D, 3 for a 2D array or a volume, 1 for 1D).
@@ -2405,7 +2503,15 @@ public static partial class Gen5MslTranslator
                 mipLevel = Temp("uint", ImageIntegerAddress(image, imageClass.CoordinateComponents));
             }
 
-            if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex)
+            if (fromHeap)
+            {
+                texture = HeapTexture(heapSlot, imageClass.TextureType, HeapImageIndex(_heapRecordIndex!, heapSlot, heapNumericClass));
+            }
+            else if (fromCallRecord)
+            {
+                texture = HeapTexture(heapSlot, imageClass.TextureType, HeapImageIndex(_callRecordElement!, heapSlot, heapNumericClass), mark: false);
+            }
+            else if (imageInfo.BindlessSlot != DescriptorConstants.NoIndex)
             {
                 if (fixedElement is null || _bindlessAccess is not { } bindless)
                 {
@@ -2423,7 +2529,23 @@ public static partial class Gen5MslTranslator
             }
 
             resolved = imageClass;
-            if (UsesSampler(instruction.Opcode))
+            if (UsesSampler(instruction.Opcode) && fixedElement is null &&
+                request.HeapSamplerByMemoryIndex.TryGetValue(memoryIndex, out var heapSampler))
+            {
+                // A heap sampler is the element its key picks from the sampler array of its kind.
+                samplerName = HeapSampler(imageInfo.DepthCompare ? BindlessHeap.CompareSamplerSlot : BindlessHeap.SamplerSlot, heapSampler);
+                var heapSamplerIndex = request.Resources.SamplerByMemoryIndex.TryGetValue(memoryIndex, out var mapped) ? mapped : entry.Sampler;
+                samplerInfo = heapSamplerIndex < (uint)info.Samplers.Count ? info.Samplers[(int)heapSamplerIndex] : null;
+            }
+            else if (UsesSampler(instruction.Opcode) && fixedElement is null &&
+                request.CallRecordSamplerByMemoryIndex.TryGetValue(memoryIndex, out var recordSampler))
+            {
+                // A call record's sampler is the element of its record's field in the sampler array of its kind.
+                samplerName = CallRecordSampler(recordSampler);
+                var recordSamplerIndex = request.Resources.SamplerByMemoryIndex.TryGetValue(memoryIndex, out var mapped) ? mapped : entry.Sampler;
+                samplerInfo = recordSamplerIndex < (uint)info.Samplers.Count ? info.Samplers[(int)recordSamplerIndex] : null;
+            }
+            else if (UsesSampler(instruction.Opcode))
             {
                 if (!_hasSamplers)
                 {

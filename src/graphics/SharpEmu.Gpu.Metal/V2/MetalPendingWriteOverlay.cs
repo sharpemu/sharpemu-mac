@@ -344,6 +344,114 @@ internal sealed class MetalPendingWriteOverlay
             }
         }
     }
+    /// <summary>
+    /// <see cref="Coverage"/> and <see cref="Apply"/> at one moment, for a range of up to 64 bytes: true when the
+    /// pending writes cover every byte of it, with <paramref name="destination"/> holding their bytes, oldest first.
+    /// A forget or a retire from another thread cannot fall between the test and the read. False leaves
+    /// <paramref name="destination"/> partly written, for the caller to discard.
+    /// </summary>
+    public bool TryReadCovered(ulong address, Span<byte> destination, Func<ulong> completedSerial)
+    {
+        var size = (ulong)destination.Length;
+        if (size == 0 || size > 64 || Count == 0 || !MayOverlap(address, size))
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (!AnyOverlapLocked(address, size))
+            {
+                return false;
+            }
+
+            RetireOverlappingLocked(address, size, completedSerial());
+            var collect = new CollectVisitor();
+            ForEachOverlapping(address, size, ref collect);
+            if (collect.Entries is not { } entries)
+            {
+                return false;
+            }
+
+            entries.Sort(static (left, right) => left.Sequence.CompareTo(right.Sequence));
+            ulong covered = 0;
+            foreach (var entry in entries)
+            {
+                var start = Math.Max(address, entry.Address);
+                var end = Math.Min(address + size, entry.End);
+                for (var at = start; at < end; at++)
+                {
+                    if (!entry.IsDead(at - entry.Address))
+                    {
+                        destination[(int)(at - address)] = entry.Bytes[at - entry.Address];
+                        covered |= 1UL << (int)(at - address);
+                    }
+                }
+            }
+
+            return covered == (size == 64 ? ulong.MaxValue : (1UL << (int)size) - 1);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="TryReadCovered"/> for each aligned dword of a range of up to 256 bytes, at one moment: bit i of the
+    /// result is set when the pending writes cover all four bytes of dword i, whose bytes <paramref name="destination"/>
+    /// then holds. The bytes of a dword whose bit is clear are left partly written, for the caller to discard.
+    /// </summary>
+    public ulong ReadCoveredWords(ulong address, Span<byte> destination, Func<ulong> completedSerial)
+    {
+        var size = (ulong)destination.Length;
+        if (size == 0 || size > 256 || ((address | size) & 3) != 0 || Count == 0 || !MayOverlap(address, size))
+        {
+            return 0;
+        }
+
+        Span<ulong> covered = stackalloc ulong[4];
+        lock (_gate)
+        {
+            if (!AnyOverlapLocked(address, size))
+            {
+                return 0;
+            }
+
+            RetireOverlappingLocked(address, size, completedSerial());
+            var collect = new CollectVisitor();
+            ForEachOverlapping(address, size, ref collect);
+            if (collect.Entries is not { } entries)
+            {
+                return 0;
+            }
+
+            entries.Sort(static (left, right) => left.Sequence.CompareTo(right.Sequence));
+            foreach (var entry in entries)
+            {
+                var start = Math.Max(address, entry.Address);
+                var end = Math.Min(address + size, entry.End);
+                for (var at = start; at < end; at++)
+                {
+                    if (!entry.IsDead(at - entry.Address))
+                    {
+                        var offset = (int)(at - address);
+                        destination[offset] = entry.Bytes[at - entry.Address];
+                        covered[offset >> 6] |= 1UL << (offset & 63);
+                    }
+                }
+            }
+        }
+
+        ulong words = 0;
+        for (var word = 0; word < (int)(size >> 2); word++)
+        {
+            var offset = word * sizeof(uint);
+            if (((covered[offset >> 6] >> (offset & 63)) & 0xF) == 0xF)
+            {
+                words |= 1UL << word;
+            }
+        }
+
+        return words;
+    }
+
     /// <summary>Writes the pending bytes over <paramref name="destination"/>, oldest first.</summary>
     public void Apply(ulong address, Span<byte> destination)
     {

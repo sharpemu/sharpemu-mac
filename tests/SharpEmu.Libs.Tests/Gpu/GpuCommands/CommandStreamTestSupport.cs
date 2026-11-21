@@ -95,6 +95,9 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
 
     public List<DrawAutoArguments> AutoDraws { get; } = new();
 
+    // Runs at every draw, while the interpreter's registers hold the draw's state.
+    public Action? OnDraw { get; set; }
+
     public Queue<Action> PendingCommands { get; } = new();
 
     public int PendingCommandRuns { get; private set; }
@@ -113,6 +116,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
     public Func<EndOfPipeWriteKind, bool>? DefersKind { get; set; }
 
     public bool DefersEndOfPipeLabel(EndOfPipeWriteKind kind) => DefersKind?.Invoke(kind) ?? DefersEndOfPipeLabels;
+
+    public bool RecordsDeferredLabelLandings { get; set; }
 
     public bool FlipDone { get; set; } = true;
 
@@ -134,6 +139,16 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         OperandReads.Add(address);
         BeforeOperandRead?.Invoke(address);
         return TryReadGuest(address, destination);
+    }
+
+    // Deterministically inject a completion after the predicate bytes were copied, before requeue.
+    public Action<ulong>? AfterWaitOperandRead { get; set; }
+
+    public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination)
+    {
+        var read = TryReadGuestOperand(address, destination);
+        AfterWaitOperandRead?.Invoke(address);
+        return read;
     }
 
     public bool TryReadGuest(ulong address, Span<byte> destination)
@@ -178,7 +193,7 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
             PollCommits.Add(address);
         }
 
-        return TryReadGuest(address, destination);
+        return TryReadGuestWaitOperand(address, destination);
     }
 
     // Called before every packet, where a real host runs what other threads posted.
@@ -344,12 +359,14 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
     public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
     {
         IndexedDraws.Add(arguments);
+        OnDraw?.Invoke();
         Calls.Add($"draw_indexed {submitId} {arguments.IndexCount}");
     }
 
     public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
     {
         AutoDraws.Add(arguments);
+        OnDraw?.Invoke();
         Calls.Add($"draw_auto {submitId} {arguments.VertexCount}");
     }
 
@@ -383,6 +400,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
         PrefetchedDispatches.Add((banks.Shader.Compute.Address, groupsX));
 
     public bool ResolvesIndirectDispatchOnGpu { get; set; }
+
+    public bool ResolvesIndirectThreadDispatchOnGpu { get; set; }
 
     public bool ResolvesIndirectDrawOnGpu { get; set; }
 

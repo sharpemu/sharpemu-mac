@@ -9,6 +9,37 @@ namespace SharpEmu.ShaderCompiler.Metal;
 
 public static partial class Gen5MslTranslator
 {
+    /// <summary>Bit position of a storage image's store width code in its store channel map (whose maps use 12 bits).</summary>
+    public const int StoreWidthCodeShift = 12;
+
+    /// <summary>
+    /// The width code of an image store's components for a T# format, which the host puts in the image's store channel map
+    /// (WriteStoreWidths): 1 for 8-bit, 2 for 16-bit, 3 for 10_10_10_2 (X, Y, Z 10, W 2)
+    /// components; 0 for any other format, whose components the store passes whole.
+    /// </summary>
+    public static uint StoreComponentWidthCode(uint imageFormat)
+    {
+        if (!Gfx10UnifiedFormat.TryDecode(GuestImageFormat.Remap(imageFormat), out var dataFormat, out _))
+        {
+            return 0;
+        }
+
+        var count = Gfx10UnifiedFormat.ComponentCount(dataFormat);
+        var widths = new uint[count];
+        for (var component = 0u; component < count; component++)
+        {
+            if (!Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out _, out _, out widths[component]))
+            {
+                return 0;
+            }
+        }
+
+        if (count == 0) return 0;
+        if (widths.All(width => width == 8)) return 1;
+        if (widths.All(width => width == 16)) return 2;
+        return count == 4 && widths[0] == 10 && widths[1] == 10 && widths[2] == 10 && widths[3] == 2 ? 3u : 0u;
+    }
+
     private sealed partial class CompilationContext
     {
 
@@ -75,6 +106,16 @@ public static partial class Gen5MslTranslator
                 if (error.Length != 0)
                 {
                     return false;
+                }
+
+                if (IsHeapImageAccess(instruction, out var heapImage, out var heapSlot))
+                {
+                    return TryEmitHeapImage(instruction, image, heapImage, heapSlot, out error);
+                }
+
+                if (IsCallRecordImageAccess(instruction, out var recordImage))
+                {
+                    return TryEmitCallRecordImage(instruction, image, recordImage, out error);
                 }
 
                 if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out imageClass, out dstSelect, out mipLevel, out compareFunction, out packedFormat, out samplerInfo, out error, out resourceIndex))
@@ -164,19 +205,29 @@ public static partial class Gen5MslTranslator
                         return false;
                     }
                 }
+                else if (StoreChannelMapSlot(resourceIndex) is var slot && slot >= 0)
+                {
+                    EmitRuntimeSwizzleStoreTexel(image, kind, slot, components);
+                }
                 else
                 {
+                    // An integer store with the select in the module narrows each channel to the width its image's
+                    // slot gives (Gen5MslTranslator.StoreWidths.cs), as the run-time select's store does.
+                    string? width = null;
+                    if (kind is "uint" or "int" && (width = StoreWidthCode(resourceIndex, out error)) is null)
+                    {
+                        return false;
+                    }
+
                     for (var component = 0; component < 4; component++)
                     {
                         var sourceIndex = Gen5ShaderTranslator.GetImageStoreSourceIndex(
                             dstSelect,
                             image.Dmask,
                             component);
-                        components[component] = sourceIndex >= 0
-                            ? ImageTexelComponent(
-                                kind,
-                                ImageStoreComponent(image, kind, (uint)sourceIndex))
-                            : kind == "float" ? "0.0f" : "0";
+                        components[component] = sourceIndex < 0 ? kind == "float" ? "0.0f" : "0"
+                            : width is null ? ImageTexelComponent(kind, ImageStoreComponent(image, kind, (uint)sourceIndex))
+                            : NarrowStoreComponent(kind, ImageStoreComponent(image, kind, (uint)sourceIndex), width, (uint)component);
                     }
                 }
 
@@ -739,6 +790,42 @@ public static partial class Gen5MslTranslator
             return kind == "int"
                 ? $"(uint)extract_bits(as_type<int>({low}), 0u, 16u)"
                 : low;
+        }
+
+        // The slot of an image's store channel map in shader data (RuntimeImageSwizzle.Slot), or -1 when its stores
+        // follow the select the module was specialized with.
+        private int StoreChannelMapSlot(int resourceIndex) =>
+            _request.Bindings.StorageImageSwizzleCount == 0 || resourceIndex < 0
+                ? -1
+                : RuntimeImageSwizzle.Slot(_request.Resources.Info.Images, resourceIndex);
+
+        // A store's texel when the image's select is shader data (RuntimeImageSwizzle), as Gen5SpirvTranslator's
+        // RuntimeSwizzleStoreTexel builds it: the words of the components the dmask enables, in data-register order (zero
+        // for the others), each moved to the physical channel its slot's map names (a code xor its channel; 4 stores
+        // zero), which is where GetImageStoreSourceIndex places them for a select baked into the module.
+        private void EmitRuntimeSwizzleStoreTexel(Gen5ImageControl image, string kind, int slot, string[] components)
+        {
+            var dmask = (image.Dmask & 0xFu) == 0 ? 1u : image.Dmask & 0xFu;
+            var logical = new string[4];
+            var source = 0u;
+            for (var component = 0; component < logical.Length; component++)
+            {
+                logical[component] = (dmask & (1u << component)) != 0 ? ImageStoreComponent(image, kind, source++) : "0u";
+            }
+
+            var words = Temp("uint4", $"uint4({string.Join(", ", logical)})");
+            var map = Temp("uint",
+                $"{ShaderDataDword(_request.Bindings.StorageImageSwizzlesDword + (uint)slot / 2)} >> {(uint)slot % 2 * 16}u");
+            // An integer store keeps the low bits of each register, where a Metal write saturates: each component is
+            // narrowed to the width its T# format gives (the map's bits 12-13, StoreComponentWidthCode) first, a signed
+            // one sign-extended from it.
+            var width = kind == "float" ? null : Temp("uint", $"(({map}) >> {StoreWidthCodeShift}u) & 3u");
+            for (var channel = 0u; channel < 4; channel++)
+            {
+                var code = Temp("uint", $"((({map}) >> {channel * 3}u) & 7u) ^ {channel}u");
+                var raw = $"({code} < 4u ? {words}[{code} & 3u] : 0u)";
+                components[channel] = width is null ? ImageTexelComponent(kind, raw) : NarrowStoreComponent(kind, raw, width, channel);
+            }
         }
 
         private static string ImageTexelComponent(string kind, string raw) => kind switch

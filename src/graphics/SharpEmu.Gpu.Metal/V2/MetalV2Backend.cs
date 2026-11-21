@@ -29,6 +29,9 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
 
     public string BackendName => "Metal v2";
 
+    // Linked shader calls lower to MSL (Gen5MslTranslator.ShaderCalls.cs); SHARPEMU_METAL_SHADER_CALLS=0 compiles callers alone.
+    public bool LinkedShaderCallsSupported => MetalRenderHost.ShaderCallsEnabled;
+
     /// <summary>
     /// v2 builds MTLMeshRenderPipelineDescriptor pipelines and launches
     /// drawMeshThreadgroups, so the merged ES/GS stage runs as what it is.
@@ -54,6 +57,12 @@ internal sealed class MetalV2Backend : IGuestGpuBackend
         shader = new MetalCompiledGuestShader(compiled, request);
         return true;
     }
+
+    // A translation the translation disk cache kept, for the request it is taken for; the payload names its request,
+    // so one made for another stage or program is a miss. Without the request (the two-argument form) nothing is
+    // taken: the shader could not be checked, nor drop its source and translate it again like a fresh one.
+    public IGuestCompiledShader? CreateCachedShader(byte[] payload, uint? inputLocationMask, ShaderCompileRequest request) =>
+        MetalCompiledGuestShader.FromCachePayload(payload, request);
 
     public IGuestCompiledShader GetDepthOnlyFragmentShader() => DepthOnlyFragmentShader;
 

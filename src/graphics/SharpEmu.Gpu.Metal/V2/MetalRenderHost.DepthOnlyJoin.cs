@@ -260,7 +260,7 @@ internal sealed partial class MetalRenderHost
     }
 
     // Whether a texture the draw binds is one of the open pass's colour attachments, or a
-    // view of one. A program that reaches images through bindless tables could reach any.
+    // view of one. A program that reaches images through bindless tables or the bindless heap could reach any.
     private bool SamplesOpenColorAttachment()
     {
         foreach (var stage in _joinStages)
@@ -270,7 +270,7 @@ internal sealed partial class MetalRenderHost
                 continue;
             }
 
-            if (stage.Program.Bindings is { BindlessImageTableCount: > 0 })
+            if (stage.Program.Bindings is { BindlessImageTableCount: > 0 } or { UsesBindlessHeap: true })
             {
                 return true;
             }

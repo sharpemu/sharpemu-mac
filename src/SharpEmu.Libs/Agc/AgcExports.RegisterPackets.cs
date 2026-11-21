@@ -97,6 +97,7 @@ public static partial class AgcExports
                     start = end;
                 }
 
+                using var appendScope = new CommandBufferAppendScope(ctx, commandBufferAddress);
                 if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, totalDwords, out var batchAddress, out var nextCursor))
                 {
                     runs = runCount;
@@ -215,7 +216,7 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        ulong commandAddress;
+        ulong commandAddress = 0;
         var payloadWritten = false;
         using (AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.PacketSetup))
         {
@@ -223,33 +224,41 @@ public static partial class AgcExports
             // leading dwords one write - with a small payload, read first, in it too: each guest write
             // and cursor update is a backing admission, and this runs once per draw on GTA V's render
             // threads.
-            if (TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, 2 + packetDwords, out var markerAddress, out var nextCursor))
+            bool reserved;
+            using (new CommandBufferAppendScope(ctx, commandBufferAddress))
             {
-                commandAddress = markerAddress + 2 * sizeof(uint);
-                Span<uint> packet = stackalloc uint[4 + (int)Math.Min(valueCount, InlinePayloadDwords)];
-                packet[0] = Pm4(2, ItNop, RZero);
-                packet[1] = CbSetShRegisterRangeMarker;
-                packet[2] = Pm4(packetDwords, ItSetShReg, 0);
-                packet[3] = offset;
-                payloadWritten = valuesAddress != 0 && valueCount <= InlinePayloadDwords &&
-                    (valuesAddress >= markerAddress + (2 + (ulong)packetDwords) * sizeof(uint) ||
-                     valuesAddress + (ulong)valueCount * sizeof(uint) <= markerAddress) &&
-                    ctx.Memory.TryRead(valuesAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(packet[4..]));
-                if (!TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, markerAddress, payloadWritten ? packet : packet[..4]))
+                reserved = TryReserveCommandDwordsInPlace(ctx, commandBufferAddress, 2 + packetDwords, out var markerAddress, out var nextCursor);
+                if (reserved)
                 {
-                    AgcRegisterPacketProfile.RecordResult(false);
-                    return ReturnPointer(ctx, 0);
+                    commandAddress = markerAddress + 2 * sizeof(uint);
+                    Span<uint> packet = stackalloc uint[4 + (int)Math.Min(valueCount, InlinePayloadDwords)];
+                    packet[0] = Pm4(2, ItNop, RZero);
+                    packet[1] = CbSetShRegisterRangeMarker;
+                    packet[2] = Pm4(packetDwords, ItSetShReg, 0);
+                    packet[3] = offset;
+                    payloadWritten = valuesAddress != 0 && valueCount <= InlinePayloadDwords &&
+                        (valuesAddress >= markerAddress + (2 + (ulong)packetDwords) * sizeof(uint) ||
+                         valuesAddress + (ulong)valueCount * sizeof(uint) <= markerAddress) &&
+                        ctx.Memory.TryRead(valuesAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(packet[4..]));
+                    if (!TryCommitCommandDwords(ctx, commandBufferAddress, nextCursor, markerAddress, payloadWritten ? packet : packet[..4]))
+                    {
+                        AgcRegisterPacketProfile.RecordResult(false);
+                        return ReturnPointer(ctx, 0);
+                    }
                 }
             }
-            else if (TryDeclineLeaf(ctx))
+
+            // Without the room the fallback runs outside the append scope: the full callback must run without the lock.
+            if (!reserved && TryDeclineLeaf(ctx))
             {
                 // The marker and the packet would be allocated one after the other: a leaf backs out
                 // before either is written.
                 return ReturnPointer(ctx, 0);
             }
-            else if (!TryEmitCommandDwords(ctx, commandBufferAddress, out _, Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker) ||
+
+            if (!reserved && (!TryEmitCommandDwords(ctx, commandBufferAddress, out _, Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker) ||
                 !TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out commandAddress) ||
-                !TryWriteCommandDwords(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0), offset))
+                !TryWriteCommandDwords(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0), offset)))
             {
                 AgcRegisterPacketProfile.RecordResult(false);
                 return ReturnPointer(ctx, 0);
@@ -507,6 +516,18 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int DcbSetCxRegisterDirect(CpuContext ctx) =>
         DcbSetRegisterDirect(ctx, ItSetContextReg, "cx");
+
+    // Matches the 3-dword SET_CONTEXT_REG packet DcbSetCxRegisterDirect writes.
+    [SysAbiExport(
+        Nid = "1DeUNpRIDDA",
+        ExportName = "sceAgcDcbSetCxRegisterDirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetCxRegisterDirectGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 3u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
 
     private static int DcbSetRegisterRangeDirect(CpuContext ctx, uint op, string registerSpace)
     {

@@ -60,6 +60,7 @@ public static class StageStaticKey
         }
 
         key.Add((uint)info.StartInstanceUserData);
+        key.Add((uint)info.BaseVertexUserData);
         foreach (var attribute in info.Attributes)
         {
             var descriptor = attribute.Descriptor;
@@ -146,6 +147,12 @@ public static class StageStaticKey
         key.Add(info.Geometry.PositionExportControl);
         key.Add((uint)requiredOutputCount);
         AddClipSpace(info.Geometry.ClipSpace, key);
+
+        // A task-launched program is another translation; the keys of the others are unchanged.
+        if (info.Geometry.TaskLaunched)
+        {
+            key.Add(TaskLaunchedMark);
+        }
     }
 
     // The clip-space part of a vertex or mesh key: the clip-disabled viewport transform and the
@@ -183,6 +190,8 @@ public static class StageStaticKey
         }
     }
 
+    private const uint TaskLaunchedMark = 0x7A5C1A0Du;
+
     // The dispatch mode is static; exact thread limits arrive with each dispatch.
     public static void Build(ComputeInputInfo info, List<uint> key)
     {
@@ -204,5 +213,10 @@ public static class StageStaticKey
         key.Add(info.ThreadsZ);
         key.Add(Bit(info.GroupIdZ));
         key.Add(Bit(info.ThreadGroupSizeEnabled));
+        // A program whose thread counts are in GPU memory keeps its shader data out of push data.
+        if (info.IndirectThreadCounts)
+        {
+            key.Add(1);
+        }
     }
 }

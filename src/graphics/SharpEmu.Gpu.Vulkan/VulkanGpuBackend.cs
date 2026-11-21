@@ -21,6 +21,8 @@ public static class VulkanGpuBackend
 
     public static void Register()
     {
+        // Vulkan sizes a streamed texture's image by its resident levels (ImageDescription.FirstLevel/HostExtent).
+        SharpEmu.Libs.Gpu.Images.ImageRequestBuilders.PartialMipChains = true;
         GuestGpu.Register(static () => new VulkanGuestGpuBackend(), Name);
         HostVideoHost.RegisterPresenter(
             VulkanVideoPresenter.TryConfigureVideo,

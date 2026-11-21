@@ -96,6 +96,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../Fixtures/Tile5Volume/Tile5VolumeOracle.cs" Link="Fixtures/Tile5VolumeOracle.cs" />
+    <!-- Translated programs for the Metal translation cache tests (Gpu/Pipelines/MetalTranslationDiskCacheTests.cs). -->
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/Gen5ComputeFixtures.cs" Link="Fixtures/Gen5ComputeFixtures.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/Gen5ImageFixtures.cs" Link="Fixtures/Gen5ImageFixtures.cs" />
+    <Compile Include="../SharpEmu.ShaderCompiler.Metal.Tests/FakeGuestMemory.cs" Link="Fixtures/FakeGuestMemory.cs" />
     <EmbeddedResource Include="../Fixtures/Tile5Volume/offsets.csv" LogicalName="Tile5Volume.offsets.csv" />
   </ItemGroup>
   <ItemGroup>

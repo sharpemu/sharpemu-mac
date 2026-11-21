@@ -26,6 +26,8 @@ public sealed class ResourceRuntimeInputs
     public GuestWordReader? ReadMemory { get; init; }
     public GuestWordReader? ReadCleanMemory { get; init; }
     public ComputeSelectorState? ComputeState { get; set; }
+    // Metadata-only mapping query. It must not read the buffer or wait for GPU writes.
+    public Func<ulong, ulong, bool>? IsRangeMapped { get; init; }
     public Action<uint, uint, ulong, ulong, ReadOnlyMemory<uint>>? TraceImageCandidate { get; init; }
 
     // Told true before the flattened table's words are evaluated and false after, so a reader
@@ -61,6 +63,7 @@ public sealed class ResourceRuntimeInputs
     {
         ReadMemory = ReadMemory,
         ReadCleanMemory = ReadCleanMemory,
+        IsRangeMapped = IsRangeMapped,
         TraceImageCandidate = TraceImageCandidate,
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
@@ -75,11 +78,31 @@ public sealed class ResourceRuntimeInputs
     // Whether a copy of these readers (CopyReaders) reads exactly as other does.
     public bool SameReaders(ResourceRuntimeInputs other) =>
         ReferenceEquals(ReadMemory, other.ReadMemory) && ReferenceEquals(ReadCleanMemory, other.ReadCleanMemory) &&
+        ReferenceEquals(IsRangeMapped, other.IsRangeMapped) &&
         ReferenceEquals(TraceImageCandidate, other.TraceImageCandidate) && ReferenceEquals(TablePhase, other.TablePhase) &&
         ReferenceEquals(ReadResidentMemory, other.ReadResidentMemory) && ReferenceEquals(CompareResidentMemory, other.CompareResidentMemory) &&
         ReferenceEquals(CompareGuestWords, other.CompareGuestWords) && ReferenceEquals(ReadsSuperseded, other.ReadsSuperseded) &&
         ReadsClean == other.ReadsClean && ReferenceEquals(DataWritePending, other.DataWritePending) &&
         NullsOffClassLoopRecords == other.NullsOffClassLoopRecords;
+
+    internal ResourceRuntimeInputs WithComputeState(ComputeSelectorState state) => new()
+    {
+        UserData = UserData,
+        ShaderBase = ShaderBase,
+        ReadMemory = ReadMemory,
+        ReadCleanMemory = ReadCleanMemory,
+        ComputeState = state,
+        IsRangeMapped = IsRangeMapped,
+        TraceImageCandidate = TraceImageCandidate,
+        TablePhase = TablePhase,
+        ReadResidentMemory = ReadResidentMemory,
+        CompareResidentMemory = CompareResidentMemory,
+        CompareGuestWords = CompareGuestWords,
+        ReadsSuperseded = ReadsSuperseded,
+        ReadsClean = ReadsClean,
+        DataWritePending = DataWritePending,
+        NullsOffClassLoopRecords = NullsOffClassLoopRecords,
+    };
 
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
@@ -88,6 +111,7 @@ public sealed class ResourceRuntimeInputs
         ReadMemory = reader,
         ReadCleanMemory = ReadCleanMemory,
         ComputeState = ComputeState,
+        IsRangeMapped = IsRangeMapped,
         TraceImageCandidate = TraceImageCandidate,
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
@@ -130,6 +154,7 @@ public sealed class ResourceRuntimeInputs
             ReadMemory = ReadMemory,
             ReadCleanMemory = ReadCleanMemory,
             ComputeState = ComputeState,
+            IsRangeMapped = IsRangeMapped,
             TraceImageCandidate = TraceImageCandidate,
             TablePhase = TablePhase,
             ReadResidentMemory = ReadResidentMemory,
@@ -144,4 +169,9 @@ public sealed class ResourceRuntimeInputs
 }
 
 public readonly record struct ComputeSelectorState(uint WaveSize, uint ThreadsX, uint ThreadsY, uint ThreadsZ,
-    bool HasPartialWorkgroups, uint LocalDataShareDwords, int LocalInvocationIdComponents);
+    bool HasPartialWorkgroups, uint LocalDataShareDwords, int LocalInvocationIdComponents)
+{
+    public DispatchBufferFootprint.Dispatch? Dispatch { get; init; }
+    public bool DeviceCountProof { get; init; }
+    internal long DeviceCountProofRevision { get; init; }
+}

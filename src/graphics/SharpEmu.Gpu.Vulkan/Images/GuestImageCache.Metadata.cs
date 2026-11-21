@@ -405,8 +405,30 @@ public sealed partial class GuestImageCache
 
     public long MetadataGeneration => Volatile.Read(ref _metadataGeneration);
 
-    private void NoteMetadataChange(ulong address)
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _metadataChangeSites = new();
+
+    internal static string TakeMetadataChangeReport()
     {
+        var parts = new List<string>();
+        foreach (var site in _metadataChangeSites.Keys)
+        {
+            if (_metadataChangeSites.TryRemove(site, out var count) && count != 0)
+            {
+                parts.Add(FormattableString.Invariant($"{site}:{count}"));
+            }
+        }
+
+        return parts.Count == 0 ? "none" : string.Join(",", parts);
+    }
+
+    private void NoteMetadataChange(ulong address,
+        [System.Runtime.CompilerServices.CallerMemberName] string caller = "", [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+    {
+        if (RenderPhaseProfile.Enabled)
+        {
+            _metadataChangeSites.AddOrUpdate(FormattableString.Invariant($"{caller}@{line}"), 1, static (_, count) => count + 1);
+        }
+
         var generation = _metadataGeneration + 1;
         _metadataEvents[generation & (MetadataEventSlots - 1)] = (generation, address);
         Volatile.Write(ref _metadataGeneration, generation);
@@ -448,12 +470,21 @@ public sealed partial class GuestImageCache
         return _surfaceMetadata.TryGetValue(address, out var found) && !found.Invalidated && found.Kind != SurfaceMetadataKind.PendingDcc;
     }
 
+    // DCC tracks its own slice count. HTile tracks any slice (SurfaceMetadata keeps the slices past 31 apart): a depth
+    // array can have more layers than 32 (a game can bind one of 36). CMask and FMask keep 32.
+    private static uint SliceLimit(SurfaceMetadata metadata) => metadata.Kind switch
+    {
+        SurfaceMetadataKind.Dcc => metadata.DccSliceCount,
+        SurfaceMetadataKind.HTile => uint.MaxValue,
+        _ => 32,
+    };
+
     public bool IsMetadataCleared(ulong address, uint slice, out uint fillValue)
     {
         fillValue = 0;
         using var held = _lock.Read();
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
-            slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))
+            slice >= SliceLimit(found))
         {
             return false;
         }
@@ -653,7 +684,7 @@ public sealed partial class GuestImageCache
 
         using var held = _lock.Hold();
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
-            slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))
+            slice >= SliceLimit(found))
         {
             return false;
         }

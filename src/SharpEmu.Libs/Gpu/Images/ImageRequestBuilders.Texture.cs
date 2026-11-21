@@ -12,15 +12,22 @@ namespace SharpEmu.Libs.Gpu.Images;
 // A descriptor the texture builder rejected inside ImageRequestBuilders.RejectInvalidDescriptors.
 public sealed class TextureDescriptorRejectedException(string message) : Exception(message);
 
-// A texture request built from the descriptor words and the shape the shader was compiled with.
-public readonly record struct TextureRequestResolution(ImageRequest Request, bool ExactFormat, GpuFormat ViewFormat, uint Swizzle);
+// A texture request built from the descriptor words and the shape the shader was compiled with. Fields, not properties:
+// a request is about 560 bytes, and passing a property to an `in` parameter copies it.
+public struct TextureRequestResolution(ImageRequest request, bool exactFormat, GpuFormat viewFormat, uint swizzle)
+{
+    public ImageRequest Request = request;
+    public bool ExactFormat = exactFormat;
+    public GpuFormat ViewFormat = viewFormat;
+    public uint Swizzle = swizzle;
+}
 
 public static partial class ImageRequestBuilders
 {
     [ThreadStatic] private static int _rejectInvalidDescriptors;
 
     // Inside this scope a descriptor the builder cannot turn into a texture request throws TextureDescriptorRejectedException
-    // instead of stopping the GPU: a call record holds whatever the game last wrote there.
+    // instead of stopping the GPU: a bindless heap record holds whatever the game last wrote there.
     public static RejectionScope RejectInvalidDescriptors()
     {
         _rejectInvalidDescriptors++;
@@ -48,6 +55,23 @@ public static partial class ImageRequestBuilders
         DepthCompare: image.DepthCompare,
         Atomic: image.Atomic,
         Atomic64: image.Atomic64);
+
+    // The unsigned format of a signed-integer one: the view of a write-only signed storage image the program writes as
+    // unsigned bits (ResourceMaterializer). Undefined for any other format.
+    private static GpuFormat UnsignedOfSigned(GpuFormat format) => format switch
+    {
+        GpuFormat.R8Sint => GpuFormat.R8Uint,
+        GpuFormat.R8G8Sint => GpuFormat.R8G8Uint,
+        GpuFormat.R8G8B8A8Sint => GpuFormat.R8G8B8A8Uint,
+        GpuFormat.R16Sint => GpuFormat.R16Uint,
+        GpuFormat.R16G16Sint => GpuFormat.R16G16Uint,
+        GpuFormat.R16G16B16A16Sint => GpuFormat.R16G16B16A16Uint,
+        GpuFormat.R32Sint => GpuFormat.R32Uint,
+        GpuFormat.R32G32Sint => GpuFormat.R32G32Uint,
+        GpuFormat.R32G32B32A32Sint => GpuFormat.R32G32B32A32Uint,
+        GpuFormat.A2B10G10R10SintPack32 => GpuFormat.A2B10G10R10UintPack32,
+        _ => GpuFormat.Undefined,
+    };
 
     private static TextureNumericClass NumericClassOf(ImageResource image) => image.NumericClass switch
     {
@@ -171,13 +195,15 @@ public static partial class ImageRequestBuilders
     // The view follows the compiled module: a volume, a layer window to the last layer, or one layer.
     private static ImageViewDescription TextureView(
         in TextureDescriptorWords descriptor, in ShaderImageShape shape, GpuFormat format, bool shaderConversion, uint viewLevels, uint imageLayers,
-        ulong shaderHash, int imageIndex)
+        ulong shaderHash, int imageIndex, uint firstLevel)
     {
+        // The image's levels count from its first resident guest level.
+        var baseLevel = descriptor.BaseLevel - firstLevel;
         var mapping = shape.Storage || shaderConversion ? default : ViewFormatRules.ComponentMapping(DestinationSwizzle(descriptor));
         var usage = shape.Storage ? GpuImageUsage.StorageBit : GpuImageUsage.SampledBit;
         if (shape.Volume)
         {
-            return WithMinLod(new ImageViewDescription(format, GpuImageViewType.Type3D, GpuImageAspect.ColorBit, descriptor.BaseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape);
+            return WithMinLod(new ImageViewDescription(format, GpuImageViewType.Type3D, GpuImageAspect.ColorBit, baseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape, firstLevel);
         }
 
         var baseLayer = descriptor.BaseArray;
@@ -194,15 +220,39 @@ public static partial class ImageRequestBuilders
         var type = shape.OneDimensional
             ? shape.Arrayed ? GpuImageViewType.Type1DArray : GpuImageViewType.Type1D
             : shape.Arrayed ? GpuImageViewType.Type2DArray : GpuImageViewType.Type2D;
-        return WithMinLod(new ImageViewDescription(format, type, GpuImageAspect.ColorBit, descriptor.BaseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape);
+        return WithMinLod(new ImageViewDescription(format, type, GpuImageAspect.ColorBit, baseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape, firstLevel);
     }
+
+    // Set by a backend whose image cache understands ImageDescription.FirstLevel (an image of the
+    // resident levels only, WithWholeMipChain): Vulkan, and Metal unless SHARPEMU_METAL_V2_PARTIAL_MIP_CHAINS=0
+    // (MetalImageCache.ResidentLevels takes the request as its whole chain and holds the texture from its level).
+    // Requests cached under the other setting describe other images: a change drops every thread's cache at its next
+    // lookup (_textureCacheSetting).
+    public static bool PartialMipChains
+    {
+        get => _partialMipChains;
+        set
+        {
+            if (_partialMipChains != value)
+            {
+                _partialMipChains = value;
+                Interlocked.Increment(ref _partialMipChainsSetting);
+            }
+        }
+    }
+
+    private static volatile bool _partialMipChains;
+    private static int _partialMipChainsSetting;
+    [ThreadStatic]
+    private static int _textureCacheSetting;
 
     // MIN_LOD (4.8 fixed point, absolute mip levels) keeps sampling off mips a streamed texture has not
     // loaded yet; ignoring it sampled the unloaded mip 0 of Astro Bot's stadium sky and bloom spread its
     // garbage HDR values over the screen. Storage views address levels explicitly and are not clamped.
-    private static ImageViewDescription WithMinLod(ImageViewDescription view, in TextureDescriptorWords descriptor, in ShaderImageShape shape)
+    private static ImageViewDescription WithMinLod(ImageViewDescription view, in TextureDescriptorWords descriptor, in ShaderImageShape shape, uint firstLevel)
     {
-        var minLod = descriptor.MinLod / 256f;
+        // The view's levels are host levels, which start at the image's first guest level.
+        var minLod = descriptor.MinLod / 256f - firstLevel;
         if (shape.Storage || minLod <= view.BaseLevel)
         {
             return view;
@@ -210,6 +260,31 @@ public static partial class ImageRequestBuilders
 
         return view with { MinLod = Math.Min(minLod, view.BaseLevel + view.LevelCount - 1) };
     }
+
+    // The same texture as an image of the whole guest mip chain, viewed from the descriptor's base
+    // level: the request a texture gets when its larger mips are mapped or another image holds them.
+    public static ImageRequest WithWholeMipChain(in ImageRequest request)
+    {
+        var firstLevel = request.Description.FirstLevel;
+        if (firstLevel == 0)
+        {
+            return request;
+        }
+
+        var whole = request;
+        whole.Description.Resources = new SubresourceCount(request.Description.Resources.Levels + firstLevel, request.Description.Resources.Layers);
+        whole.Description.FirstLevel = 0;
+        whole.View = RebaseView(request.View, firstLevel);
+        return whole;
+    }
+
+    // A view of an image whose first level is `levels` guest levels lower than the view was built for.
+    public static ImageViewDescription RebaseView(in ImageViewDescription view, uint levels) =>
+        levels == 0 ? view : view with
+        {
+            BaseLevel = view.BaseLevel + levels,
+            MinLod = view.MinLod == 0 ? 0 : view.MinLod + levels,
+        };
 
     public static uint DestinationSwizzle(in TextureDescriptorWords descriptor) =>
         ViewFormatRules.PackDestinationSelect(descriptor.DestinationSelectX, descriptor.DestinationSelectY, descriptor.DestinationSelectZ, descriptor.DestinationSelectW);
@@ -243,6 +318,13 @@ public static partial class ImageRequestBuilders
         Span<uint> key = stackalloc uint[8];
         words[..Math.Min(words.Length, 8)].CopyTo(key);
         var cacheKey = new TextureKey(key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7], shape);
+        var setting = Volatile.Read(ref _partialMipChainsSetting);
+        if (_textureCacheSetting != setting)
+        {
+            _textureCache = null;
+            _textureCacheSetting = setting;
+        }
+
         var cache = _textureCache ??= new Dictionary<TextureKey, TextureRequestResolution>();
         if (cache.TryGetValue(cacheKey, out var cached))
         {
@@ -382,7 +464,10 @@ public static partial class ImageRequestBuilders
         var rawSint32 = format == GuestPixelFormat.Bits32SInt && shape.NumericClass != TextureNumericClass.Sint;
         var storageViewFormat = storage && shape.Atomic64
             ? shape.NativeInt64Atomics ? GpuFormat.R64Uint : GpuFormat.R32G32Uint
-            : storage && (shape.Atomic || rawSint32) ? GpuFormat.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+            : storage && (shape.Atomic || rawSint32) ? GpuFormat.R32Uint
+            : storage && shape.NumericClass == TextureNumericClass.Uint && UnsignedOfSigned(pixelFormat) is var unsigned and not GpuFormat.Undefined
+                ? unsigned
+                : ViewFormatRules.SrgbStorageFormat(pixelFormat);
         var viewFormat = storage && storageViewFormat != GpuFormat.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();
@@ -416,8 +501,24 @@ public static partial class ImageRequestBuilders
             PopulateTextureMipLayout(ref description);
         }
 
+        // A sampled texture whose descriptor starts past mip 0 never reads the levels before it, and a
+        // streamed texture has not even mapped them: the request holds only the levels from there.
+        // The image cache returns it to the whole chain when that memory is mapped, so a texture view
+        // of a lower mip of a rendered or fully loaded chain stays the same image (WithWholeMipChain).
+        // Only a backend whose image cache sizes images by ImageDescription.FirstLevel takes the
+        // resident levels alone (PartialMipChains); the others keep the whole chain, as before.
+        var firstLevel = PartialMipChains && !storage && !volume && samples == 1 && baseLevel > 0 && baseLevel < levels &&
+                         description.Metadata.Kind == MetadataKind.None && !description.IsDepth
+            ? baseLevel
+            : 0u;
+        if (firstLevel != 0)
+        {
+            description.FirstLevel = firstLevel;
+            description.Resources = new SubresourceCount(levels - firstLevel, imageLayers);
+        }
+
         var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers,
-            shaderHash, imageIndex);
+            shaderHash, imageIndex, firstLevel);
         if (NativeColorClearMetadata && !shape.R128 && descriptor.MetadataCompress && !description.IsDepth && !shaderConversion &&
             tile == GuestTileMode.RenderTarget && levels == 1 && samples == 1 &&
             type is GuestImageType.Color2D or GuestImageType.Color2DArray or GuestImageType.Color3D &&

@@ -190,11 +190,13 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
     [Fact]
     public void ADrawIntoATargetNotRebuiltEveryFrameWaitsForItsPipeline()
     {
+        // Declared before the rig, so it is disposed after it: a compiler thread may still reach this gate until the
+        // rig's host has joined its threads, and waiting on a disposed gate throws on that thread and ends the process.
+        using var gate = new ManualResetEventSlim(false);
         using var rig = CreateRig();
         if (rig is null) return;
         const uint size = 16;
         rig.Host.AsynchronousGraphics = true;
-        using var gate = new ManualResetEventSlim(false);
         rig.Host.PipelineCompiler.Gate = gate;
         var target = rig.ColorTarget(size, size);
         var state = new SceneState(size, size).ColorTarget(0, target, size, size);
@@ -325,6 +327,9 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
     [Fact]
     public void InWideModeADrawIntoATargetDrawnEveryFrameIsLeftOutWhileItsPipelineCompiles()
     {
+        // Declared before the rig, so it is disposed after it: a compiler thread may still reach this gate until the
+        // rig's host has joined its threads, and waiting on a disposed gate throws on that thread and ends the process.
+        using var gate = new ManualResetEventSlim(false);
         using var rig = CreateRig();
         if (rig is null) return;
         const uint size = 16;
@@ -349,7 +354,6 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
             Assert.Equal(red, Frame(green: false));
         }
 
-        using var gate = new ManualResetEventSlim(false);
         rig.Host.PipelineCompiler.Gate = gate;
         Assert.Equal(red, Frame(green: true));
         Assert.Equal(1, rig.Host.CompilingDrawCounters.Skipped);
@@ -392,6 +396,9 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
     [Fact]
     public void WithoutWideModeATargetOnlyDrawnEveryFrameWaitsForThePipeline()
     {
+        // Declared before the rig, so it is disposed after it: a compiler thread may still reach this gate until the
+        // rig's host has joined its threads, and waiting on a disposed gate throws on that thread and ends the process.
+        using var gate = new ManualResetEventSlim(false);
         using var rig = CreateRig();
         if (rig is null) return;
         const uint size = 16;
@@ -405,7 +412,6 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
             rig.Submit(rig.DrawMesh(new ScenePm4(), Target(), SceneDraws.Quad(0.5f, 1, 0, 0)));
         }
 
-        using var gate = new ManualResetEventSlim(false);
         rig.Host.PipelineCompiler.Gate = gate;
         var additive = Target();
         additive.Context[Cx.CbBlend0Control] = 1u | (1u << 8) | (1u << 16) | (1u << 30);
@@ -422,6 +428,9 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
     [Fact]
     public void ADispatchSuspendedOnItsPipelineKeepsItsModulesThroughATrimAndStoresOnceReady()
     {
+        // Declared before the rig, so it is disposed after it: a compiler thread may still reach this gate until the
+        // rig's host has joined its threads, and waiting on a disposed gate throws on that thread and ends the process.
+        using var gate = new ManualResetEventSlim(false);
         using var rig = CreateRig();
         if (rig is null) return;
         if (!rig.Host.SupportsPipelineSuspend)
@@ -432,7 +441,6 @@ public sealed class MetalAsyncPipelineTests(ITestOutputHelper output) : SceneTes
 
         rig.Host.ShaderCacheLimits = MetalShaderCacheLimits.Unbounded;
         const uint groups = 4;
-        using var gate = new ManualResetEventSlim(false);
         rig.Host.PipelineCompiler.Gate = gate;
         var buffer = rig.Memory.Allocate(groups * 64 * 4, 256);
         rig.Enqueue(rig.Dispatch(new ScenePm4(), ScenePrograms.StoreGlobalId, Descriptors.Buffer(buffer, 4, groups * 64, format: 20), groups).ToArray());

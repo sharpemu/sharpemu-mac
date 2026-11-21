@@ -55,7 +55,11 @@ public sealed class ShaderPipelineCacheAllocationTests(ITestOutputHelper output)
         // and the specialization that origin keeps (whether a resolve memo rebuild keeps the program) to 584 and 1008, and the
         // read proof comparer on each stage's runtime inputs (ResourceRuntimeInputs.CompareGuestWords) to 592 and 1024, and the
         // read-proof back-off counters on each fast snapshot's origin (FastOrigin.ProofChanges, ProofSkips) to 600 and 1040.
-        Assert.True(perDraw[^1] <= (pixelActive ? 1040 : 600), $"bytes={perDraw[^1]}");
+        // The upstream merge f1af467a6 adds 48 bytes per stage, in fields only: the stage's compile fallback and thread-limit
+        // flags (ShaderStageResources.CompileFallback, GpuThreadLimits: 16), the heap V#s on its snapshot
+        // (ResourceSnapshot.Heaps: 8) and the mapped-range probe and device-count proof on its runtime inputs
+        // (ResourceRuntimeInputs.IsRangeMapped, DeviceCountProof, DeviceCountProofRevision: 24), to 648 and 1136.
+        Assert.True(perDraw[^1] <= (pixelActive ? 1136 : 648), $"bytes={perDraw[^1]}");
         var first = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,
             banks.Context, mappings, pixelActive, depthBound: false, depthAspectBound: false);
         var second = cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel, banks.Context.ShaderInterface,

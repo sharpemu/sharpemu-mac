@@ -336,6 +336,7 @@ internal static class MetalShaderPrewarm
             "pipeline_cache", SanitizeTitleId(VideoOutBackendServices.GetApplicationTitleId()), "metal-v2");
         var compiler = GuestGpu.Current;
         var stamp = Stamp(compiler, device);
+        _stableImageLimits = MetalStableImageLimits.Of(device);
         // Seeded before the compute prewarm or the game plans a shader.
         MetalDeviceDataLoadsStore.Open(directory, stamp);
         // Loaded before the gate lets the game go, so every module the game creates
@@ -370,7 +371,12 @@ internal static class MetalShaderPrewarm
             return false;
         }
 
-        var ordered = HoldFirst(pending, HoldsForEveryCompute ? null : list.ReadFirstFrameComputes(), out var heldComputes);
+        var linkedDirectory = Path.Combine(directory, "linked");
+        // The hold-until-done and precompile modes hold the guest for every record, linked ones too (upstream's
+        // SHARPEMU_PREWARM_LINKED=all): their phase counts every record as held.
+        var ordered = HoldFirstLinkedLast(pending, HoldsForEveryCompute ? null : list.ReadFirstFrameComputes(),
+            HoldsForEveryCompute ? static _ => false : LinkedPrewarmOrder.IsLinked,
+            linked => LinkedPrewarmOrder.Order(linked, static item => item.Record, list, linkedDirectory), out var heldComputes);
         var orderedGraphics = HoldFirstGraphics(
             graphics, HoldsForEveryCompute ? null : _graphics?.ReadFirstFrame(), out var heldGraphics);
         var held = heldComputes + heldGraphics;
@@ -559,8 +565,16 @@ internal static class MetalShaderPrewarm
     // slots, where the module the game creates for it takes it from.
     private static void PrewarmGraphicsLibrary(in GraphicsPrewarmList.Item item, IGuestGpuBackend compiler)
     {
-        if (!ShaderPrewarmCompiler.TryCompileGraphicsPrewarm(item, compiler, out var compiled, out var error))
+        if (!ShaderPrewarmCompiler.TryCompileGraphicsPrewarm(
+                item, compiler, _stableImageLimits, out var compiled, out var error, out var stale))
         {
+            if (stale)
+            {
+                // Recorded by a session under the other image binding policy; the session records this one's anew.
+                Interlocked.Increment(ref _graphicsStale);
+                return;
+            }
+
             NoteGraphicsFailure(error);
             return;
         }
@@ -577,6 +591,34 @@ internal static class MetalShaderPrewarm
         {
             Interlocked.Increment(ref _graphicsCompiled);
         }
+    }
+
+    // The stable image budget this start's live host answers (MetalStableImageLimits.Of of the prewarm's device).
+    private static SharpEmu.ShaderCompiler.Resources.StableImageDescriptorLimits _stableImageLimits;
+
+    // Graphics records made under another stable image budget, not translated.
+    private static int _graphicsStale;
+
+    // Compute records made under the other stable image binding policy (their specialization's StableImageBindings is
+    // not the plan's under this host's budget): refused before translation, like stale graphics records, and not counted
+    // as failures; the session records them anew under this policy.
+    private static int _computeStale;
+
+    internal static int ComputeStale => Volatile.Read(ref _computeStale);
+
+    internal static int ComputeFailed => Volatile.Read(ref _failed);
+
+    // A compute record the prewarm could not compile: stale when its specialization follows the other image binding
+    // policy (ResourceMaterializer.ImageBindingPolicyMismatch), a failure otherwise.
+    internal static void NoteComputeRefusal(ComputePrewarmRecord record, string error)
+    {
+        if (error == SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.ImageBindingPolicyMismatch)
+        {
+            Interlocked.Increment(ref _computeStale);
+            return;
+        }
+
+        NoteFailure(record, error);
     }
 
     private static void NoteGraphicsFailure(string error)
@@ -663,21 +705,49 @@ internal static class MetalShaderPrewarm
         return Precompile.Complete(
             $"computes={Volatile.Read(ref _compiled)} compute_failed={Volatile.Read(ref _failed)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
+            $"graphics_stale={Volatile.Read(ref _graphicsStale)} compute_stale={Volatile.Read(ref _computeStale)} " +
             $"libraries_held={MetalLibraryPrewarm.HeldLibraries} {MetalStaticPrecompile.Describe()}");
     }
 
     /// <summary>
     /// The pending computes in the order the prewarm compiles them, and how many from the
     /// front the guest is held for: those the last session created before its first frame
-    /// (in list order, which is the order a session first used them), then the rest. With no
-    /// first-frame list yet, every one is held for. Demon's Souls records some 1400 computes
+    /// (in the first-frame list's recorded order, ShaderPrewarmList.ReadFirstFrameComputes,
+    /// whatever order the pending ones come in), then the rest in pending order (LoadedComputes:
+    /// the soonest needed first). With no first-frame list yet, every one is held for, in
+    /// pending order. Demon's Souls records some 1400 computes
     /// across its scenes and creates about a hundred before its first frame; a cold start
     /// held it for all of them, 126 s at the splash screen (run 20261017-075343-ds-base-boot),
     /// while the rest can compile behind the logos and the intro.
     /// </summary>
+    /// <summary>
+    /// HoldFirst over the records without linked callees, then the linked records (ComputePrewarmRecord with callees), which
+    /// the guest is never held for, in upstream's linked lane order (LinkedPrewarmOrder, as
+    /// VulkanVideoPresenter.StartLinkedPrewarm compiles them on its background lane): a linked permutation is a whole-module
+    /// compile that can take far longer than an ordinary compute (records x callee size), the session serves the caller's
+    /// dispatches from a ready permutation or links its kept callees itself meanwhile, and the permutation a session asks
+    /// for first goes first.
+    /// </summary>
+    internal static List<(ComputePrewarmRecord Record, ShaderCodeCapture Code, bool Held)> HoldFirstLinkedLast(
+        IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> pending,
+        IReadOnlyList<ulong>? firstFrame,
+        Func<ComputePrewarmRecord, bool> isLinked,
+        Func<IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>, IEnumerable<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>> orderLinked,
+        out int held)
+    {
+        var ordered = HoldFirst(pending.Where(item => !isLinked(item.Record)).ToList(), firstFrame, out held);
+        var linked = pending.Where(item => isLinked(item.Record)).ToList();
+        if (linked.Count != 0)
+        {
+            ordered.AddRange(orderLinked(linked).Select(static item => (item.Record, item.Code, false)));
+        }
+
+        return ordered;
+    }
+
     internal static List<(ComputePrewarmRecord Record, ShaderCodeCapture Code, bool Held)> HoldFirst(
         IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> pending,
-        IReadOnlySet<ulong>? firstFrame,
+        IReadOnlyList<ulong>? firstFrame,
         out int held)
     {
         if (firstFrame is null)
@@ -686,13 +756,22 @@ internal static class MetalShaderPrewarm
             return pending.Select(item => (item.Record, item.Code, true)).ToList();
         }
 
+        var rank = new Dictionary<ulong, int>(firstFrame.Count);
+        for (var index = 0; index < firstFrame.Count; index++)
+        {
+            rank.TryAdd(firstFrame[index], index);
+        }
+
         var ordered = new List<(ComputePrewarmRecord, ShaderCodeCapture, bool)>(pending.Count);
+        // OrderBy is stable: a pending duplicate of one identity keeps its pending order.
         ordered.AddRange(pending
-            .Where(item => firstFrame.Contains(ShaderPrewarmList.Identity(item.Record)))
-            .Select(item => (item.Record, item.Code, true)));
+            .Select(item => (Item: item, Rank: rank.TryGetValue(ShaderPrewarmList.Identity(item.Record), out var at) ? at : -1))
+            .Where(entry => entry.Rank >= 0)
+            .OrderBy(entry => entry.Rank)
+            .Select(entry => (entry.Item.Record, entry.Item.Code, true)));
         held = ordered.Count;
         ordered.AddRange(pending
-            .Where(item => !firstFrame.Contains(ShaderPrewarmList.Identity(item.Record)))
+            .Where(item => !rank.ContainsKey(ShaderPrewarmList.Identity(item.Record)))
             .Select(item => (item.Record, item.Code, false)));
         return ordered;
     }
@@ -809,7 +888,7 @@ internal static class MetalShaderPrewarm
 
     // The translators decide the MSL; the device and the OS decide what the driver's
     // compiler makes of it.
-    private static string Stamp(IGuestGpuBackend compiler, nint device) =>
+    internal static string Stamp(IGuestGpuBackend compiler, nint device) =>
         string.Join(
             '|',
             StampPart(typeof(Gen5ShaderTranslator)),
@@ -819,6 +898,8 @@ internal static class MetalShaderPrewarm
             // The switches decide the MSL as the translators do; what is stored under this stamp
             // and not keyed by source text (the static precompile's finished units) follows them.
             MetalRenderHost.TranslationSwitchStamp,
+            // The stable image budget decides which specializations a session asks for (MetalStableImageLimits).
+            MetalStableImageLimits.StampPart(MetalStableImageLimits.Of(device)),
             MetalNative.ReadNsString(MetalNative.Send(device, SelName)),
             RuntimeInformation.OSDescription);
 
@@ -827,24 +908,39 @@ internal static class MetalShaderPrewarm
     public static string Identity(MetalCompiledGuestShader shader) =>
         shader.PayloadHash.ToString("X16", System.Globalization.CultureInfo.InvariantCulture);
 
+    /// <summary>
+    /// A recorded compute program translated as the live host translates it: the compile flags the host answers
+    /// (MetalRenderHost.Prewarm*) and its stable image budget (MetalStableImageLimits.Of of the same device), so the
+    /// plan admits stable image bindings exactly when the session's did and the recorded specialization applies.
+    /// </summary>
+    internal static bool TryCompileCompute(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
+        SharpEmu.ShaderCompiler.Resources.StableImageDescriptorLimits stableImageLimits,
+        out IGuestCompiledShader? compiled, out string error) =>
+        ShaderPrewarmCompiler.TryCompilePrewarm(
+            record,
+            code,
+            compiler,
+            MetalRenderHost.PrewarmSharedInt64Atomics,
+            MetalRenderHost.PrewarmExecGuardElision,
+            MetalRenderHost.PrewarmSignedZeroInfNanPreserve,
+            out compiled,
+            out _,
+            out error,
+            stableImageLimits: stableImageLimits,
+            runtimeImageSwizzles: MetalRenderHost.PrewarmRuntimeImageSwizzles,
+            // As the live dispatch plans it (IShaderPipelineHost.SupportsBindlessHeap): a linked record holds the
+            // heap policy it was linked with and is refused under another.
+            bindlessHeap: MetalRenderHost.BindlessHeapEnabled);
+
     private static void PrewarmComputePipeline(
         ComputePrewarmRecord record,
         ShaderCodeCapture code,
         IGuestGpuBackend compiler,
         nint device)
     {
-        if (!ShaderPrewarmCompiler.TryCompilePrewarm(
-                record,
-                code,
-                compiler,
-                MetalRenderHost.PrewarmSharedInt64Atomics,
-                MetalRenderHost.PrewarmExecGuardElision,
-                MetalRenderHost.PrewarmSignedZeroInfNanPreserve,
-                out var compiled,
-                out _,
-                out var error))
+        if (!TryCompileCompute(record, code, compiler, MetalStableImageLimits.Of(device), out var compiled, out var error))
         {
-            NoteFailure(record, error);
+            NoteComputeRefusal(record, error);
             return;
         }
 
@@ -1019,6 +1115,7 @@ internal static class MetalShaderPrewarm
             $"archived={Volatile.Read(ref _archived)} " +
             $"runtime_first={Volatile.Read(ref _runtimeFirst)} " +
             $"graphics_libraries={Volatile.Read(ref _graphicsCompiled)} graphics_failed={Volatile.Read(ref _graphicsFailed)} " +
+            $"graphics_stale={Volatile.Read(ref _graphicsStale)} compute_stale={Volatile.Read(ref _computeStale)} " +
             $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
             $"yielded_ms={Interlocked.Read(ref _yieldedTicks) * 1000 / Stopwatch.Frequency} " +
             $"runtime_compute_modules={runtime.Count} matched={matched}";

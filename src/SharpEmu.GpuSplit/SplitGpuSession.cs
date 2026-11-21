@@ -73,6 +73,7 @@ public sealed class SplitGpuSession : IDisposable
     private long _protectsApplied;
     private long _protectsSkipped;
     private bool _globalsInstalled;
+    private bool _residencyMirrored;
 
     internal SplitGpuSession(GpuRemoteChannel channel, object outboundLock, GuestGpuMemory memory, GuestViewTable viewTable,
         ISplitGuestSide guest, IDisposable? process = null, IDisposable? memoryServer = null)
@@ -261,7 +262,41 @@ public sealed class SplitGpuSession : IDisposable
         }
 
         HostWindowInput.Connect(new SplitGamepadOutput(Writer));
+        MirrorResidencyRanges();
         _globalsInstalled = true;
+    }
+
+    /// <summary>
+    /// Sends the kernel's PRT apertures and AMM area to the GPU process, the current ones now and every change from
+    /// then on (<see cref="PartiallyResidentRanges"/>): its image reads ask the same question of them as the kernel answers
+    /// here (ResidentImageBacking), and its GPU memory manager covers the lazily backed ones as this process's does.
+    /// </summary>
+    /// <remarks>
+    /// A call, as span registrations are: it returns once the GPU process applied it, so a submission or a span change
+    /// this process makes after the kernel call that changed a range finds it applied there; and a span the kernel
+    /// registers inside an aperture after the aperture was set reaches the GPU process's ledger after the aperture's
+    /// lazy registration, in this process's order. One call per aperture or area change (the kernel's rare calls), none
+    /// per read.
+    /// </remarks>
+    internal void MirrorResidencyRanges()
+    {
+        PartiallyResidentRanges.Attach(SendResidencyRange);
+        _residencyMirrored = true;
+    }
+
+    private void SendResidencyRange(PartiallyResidentRanges.Range range)
+    {
+        if (!Call(GpuRemoteSyncOpcode.ResidencyRange, new ResidencyRangeRequest
+            {
+                Id = range.Id,
+                Address = range.Address,
+                Size = range.Size,
+                LazilyBacked = range.LazilyBacked ? 1u : 0u,
+            }, LongCallNanoseconds))
+        {
+            Report($"The GPU process did not take PRT/AMM range {range.Id} (0x{range.Address:X16}+0x{range.Size:X}); " +
+                "its image reads there stop instead of reading unmapped pages as zero.");
+        }
     }
 
     private void SendFusedProgram(ulong entry, ulong entryHeader, ulong continuation, ulong continuationHeader) =>
@@ -758,6 +793,11 @@ public sealed class SplitGpuSession : IDisposable
         _memory.AttachGpuQueue(null, null);
         _memory.AttachStores(null, null);
         FrameOverlapDiagnostic.RemoteReadFault = null;
+        if (_residencyMirrored)
+        {
+            PartiallyResidentRanges.Attach(null);
+        }
+
         if (_globalsInstalled)
         {
             AgcBackendServices.ShaderHeaderObserver = null;

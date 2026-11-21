@@ -11,6 +11,7 @@ using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 using Xunit.Abstractions;
@@ -198,6 +199,57 @@ public sealed unsafe class MetalBindlessTableCostTests(ITestOutputHelper output)
         Assert.Equal(count - 1, rig.Host.BindlessIncrementalSkipped - skipped);
     }
 
+    // A table entry whose T# names memory the guest has not mapped binds the null texture, as upstream's heap records
+    // do, instead of an image whose upload would stop the GPU; it is looked at again at every bind and takes its texture
+    // once the memory is mapped. With SHARPEMU_METAL_V2_BINDLESS_UNMAPPED_NULL=0 the upload stops the GPU.
+    [Fact]
+    public void AnEntryOverUnmappedMemoryBindsTheNullTextureUntilTheMemoryIsMapped()
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig();
+        const int count = 8;
+        const int unmapped = 3;
+        var saved = MetalRenderHost.BindlessUnmappedNull;
+        try
+        {
+            MetalRenderHost.BindlessUnmappedNull = true;
+            rig.Hole = (Rig.TextureAddress(unmapped), TextureStride);
+            var table = rig.Table(count);
+            rig.Bind(table);
+            Assert.Equal(1, rig.Host.BindlessUnmappedEntries);
+            var images = rig.Field<ResourceSlotIdentifier[]>(table, "Images");
+            Assert.False(images[unmapped].IsValid);
+            Assert.All(Enumerable.Range(0, count).Where(index => index != unmapped), index => Assert.True(images[index].IsValid));
+            var ids = rig.ResourceIds(table);
+            Assert.DoesNotContain(0ul, ids);
+            Assert.Equal(count - 1, ids.Where((_, index) => index != unmapped).Distinct().Count());
+            Assert.DoesNotContain(ids[unmapped], ids.Where((_, index) => index != unmapped));
+
+            // Bound again while unmapped: looked at again, still the null texture.
+            rig.Bind(table);
+            Assert.Equal(2, rig.Host.BindlessUnmappedEntries);
+            Assert.Equal(ids[unmapped], rig.ResourceIds(table)[unmapped]);
+
+            // The guest maps it: the next bind finds its image.
+            rig.Hole = default;
+            rig.Bind(table);
+            Assert.Equal(2, rig.Host.BindlessUnmappedEntries);
+            Assert.True(rig.Field<ResourceSlotIdentifier[]>(table, "Images")[unmapped].IsValid);
+            Assert.NotEqual(ids[unmapped], rig.ResourceIds(table)[unmapped]);
+
+            // Without the rule an unmapped entry makes an image whose upload has nothing to read: the GPU stops.
+            MetalRenderHost.BindlessUnmappedNull = false;
+            rig.Hole = (Rig.TextureAddress(count + 2), TextureStride);
+            var other = rig.Table(count + 4);
+            var stopped = Assert.ThrowsAny<Exception>(() => GpuFatal.Speculatively(() => { rig.Bind(other); return 0; }));
+            Assert.Contains("Could not read the mapped guest image backing", stopped.ToString());
+        }
+        finally
+        {
+            MetalRenderHost.BindlessUnmappedNull = saved;
+        }
+    }
+
     private bool RequireDevice()
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_REQUIRE_DEVICE") == "1")
@@ -245,6 +297,10 @@ public sealed unsafe class MetalBindlessTableCostTests(ITestOutputHelper output)
         }
 
         public MetalRenderHost Host { get; }
+
+        public (ulong Start, ulong Size) Hole { get => _backing.Hole; set => _backing.Hole = value; }
+
+        public static ulong TextureAddress(int texture) => TextureBase + (ulong)texture * TextureStride;
 
         // count distinct textures, one entry each.
         public BindlessImageTable Table(int count)
@@ -339,7 +395,11 @@ public sealed unsafe class MetalBindlessTableCostTests(ITestOutputHelper output)
         private static ulong Offset(ulong address) => (address - GuestBase) % Size;
 
         private bool Contains(ulong address, ulong length) =>
-            address >= GuestBase && address - GuestBase < Reach && Offset(address) + length <= Size;
+            address >= GuestBase && address - GuestBase < Reach && Offset(address) + length <= Size &&
+            (Hole.Size == 0 || address + length <= Hole.Start || address >= Hole.Start + Hole.Size);
+
+        // A range the guest has not mapped (none while Size is 0).
+        public (ulong Start, ulong Size) Hole { get; set; }
 
         public bool TryHoldRange(ulong address, ulong size) => false;
         public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address) { address = 0; return false; }

@@ -251,7 +251,7 @@ public sealed partial class RenderExecutor
     }
 
     // An image request field for field; the mip layouts by their levels, not by the array that holds them.
-    private static bool SameRequest(ImageRequest left, ImageRequest right)
+    internal static bool SameRequest(ImageRequest left, ImageRequest right)
     {
         for (var level = 0; level < ImageDescription.MaxLevels; level++)
         {

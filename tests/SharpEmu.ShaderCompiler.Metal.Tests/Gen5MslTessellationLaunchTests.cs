@@ -109,17 +109,28 @@ public sealed class Gen5MslTessellationLaunchTests(ITestOutputHelper output)
         Assert.True(MetalNative.TryCompileLibrary(shader.Source, out _, out var error), $"Metal rejected the {role} MSL: {error}\n{shader.Source}");
     }
 
-    private static string Compile(ShaderStage stage, Gen5TessellationLaunch tessellation)
+    // With draw parameters the hull program's instance counts from zero, as the hardware numbers it (upstream
+    // 7cf0ac568): a start instance reaches it only through the user data its draw packet names.
+    [Fact]
+    public void WithDrawParametersTheHullInstanceCountsFromZero()
     {
-        // Registers the program never indexes are emitted as locals (s2) rather than file entries (s[2]).
-        return Regex.Replace(CompileShader(stage, tessellation).Source, @"\b([sv])\[(\d+)\]", "$1$2");
+        var source = Compile(ShaderStage.Compute,
+            new Gen5TessellationLaunch(Gen5TessellationRole.Hull, 21, 3, 0x8000, 16), supportsDrawParameters: true);
+        Assert.Contains("v5 = sharpemu_hull_patch / sharpemu_hull_instance_patches;", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_hull_launch[1]", source, StringComparison.Ordinal);
     }
 
-    private static Gen5MslShader CompileShader(ShaderStage stage, Gen5TessellationLaunch tessellation)
+    private static string Compile(ShaderStage stage, Gen5TessellationLaunch tessellation, bool supportsDrawParameters = false)
+    {
+        // Registers the program never indexes are emitted as locals (s2) rather than file entries (s[2]).
+        return Regex.Replace(CompileShader(stage, tessellation, supportsDrawParameters).Source, @"\b([sv])\[(\d+)\]", "$1$2");
+    }
+
+    internal static Gen5MslShader CompileShader(ShaderStage stage, Gen5TessellationLaunch tessellation, bool supportsDrawParameters = false)
     {
         var program = Gen5ComputeFixtures.DecodeOrThrow(new Gen5ComputeFixture("tessellation", EndProgram, 0, 0));
         var request = Gen5ComputeFixtures.RequestOrThrow(program, stage,
-            waveLaneCount: 64, localSizeX: 64, tessellation: tessellation);
+            waveLaneCount: 64, localSizeX: 64, tessellation: tessellation, supportsDrawParameters: supportsDrawParameters);
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Same(tessellation, shader.Tessellation);
         return shader;

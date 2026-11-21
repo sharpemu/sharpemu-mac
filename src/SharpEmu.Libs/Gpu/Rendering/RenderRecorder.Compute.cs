@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Pipelines;
@@ -254,6 +255,25 @@ internal sealed partial class RenderRecorder
                 _keptComputePipeline = pipeline;
             }
 
+            if (!TryReplayDispatch(record, computeProgram, input, in pipeline))
+            {
+                RecordPreparedDispatch(record, computeProgram, input, program, in pipeline);
+            }
+        }
+
+        _host.ResetBindings();
+    }
+
+    private void RecordPreparedDispatch(ResolvedDispatch record, ComputeProgram computeProgram, ComputeInputInfo input, ShaderProgramInfo program,
+        in PipelineHandle pipeline)
+    {
+        _dispatchReplayValid = false;
+        {
+            // The indirect arguments are registered before the resources bind, so acquiring them merges no owner the
+            // dispatch already bound.
+            using var arguments = record.IndirectArgumentsAddress != 0
+                ? _host.PrepareIndirectDispatchArguments(record.IndirectArgumentsAddress)
+                : null;
             var bindings = PrepareBindings(input.Stage);
             if (program.UsesDeviceAddresses)
             {
@@ -261,6 +281,34 @@ internal sealed partial class RenderRecorder
             }
 
             _host.BindResources(bindings);
+            var owners = _host.BufferOwnerGeneration;
+            // Diagnostic readbacks may finish a submission. Complete them before final native bindings.
+            var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
+            arguments?.Rebind();
+            for (var attempt = 0; _host.BufferOwnerGeneration != owners; attempt++)
+            {
+                if (attempt == 8)
+                {
+                    throw _host.Fatal("Compute buffer owners did not stabilize.");
+                }
+
+                owners = _host.BufferOwnerGeneration;
+                _host.RebindBuffers(bindings);
+                arguments?.Rebind();
+            }
+
+            // The groups and thread limits come from the GPU-written counts; the pass binds its own pipeline, so it is
+            // recorded before this dispatch's bindings and outside its checked window.
+            Span<int> threadAxisOrder = stackalloc int[3];
+            if (record.GpuThreadCounts)
+            {
+                GroupAxisOrder(input, threadAxisOrder);
+            }
+
+            using var threadDispatch = record.GpuThreadCounts
+                ? _host.PrepareThreadDispatch(arguments ?? throw _host.Fatal("GPU thread counts have no prepared arguments."),
+                    bindings, [input.ThreadsX, input.ThreadsY, input.ThreadsZ], threadAxisOrder)
+                : null;
             Span<IPreparedBindings> stages = [bindings];
             _host.CommitBindings(GpuBindPoint.Compute, in pipeline, stages);
             var chain = _dispatchChain ??= new DispatchChain();
@@ -272,11 +320,11 @@ internal sealed partial class RenderRecorder
                 _host.ShaderWriteHazardBarrier();
             }
 
+            var shader = record.ShaderAddress;
             var (groupsX, groupsY, groupsZ) = PhysicalGroups(input, record);
             RenderExecutor.TraceFrameDispatch(_host, record.HasStorageWrites ? "dispatched-writes" : "dispatched", shader, program.Hash,
                 record.GroupsX, record.GroupsY, record.GroupsZ, record.IndirectArgumentsAddress);
             TraceRangeWriters(input.Stage, program.Hash, record.GroupsX, record.GroupsY, record.GroupsZ);
-            var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
             _host.BeginCheckedDispatch();
             _host.BindPipeline(GpuBindPoint.Compute, in pipeline);
             var dispatched = false;
@@ -284,8 +332,17 @@ internal sealed partial class RenderRecorder
             {
                 // SHARPEMU_SKIP_CS: what the program contributes, by its absence.
             }
+            else if (threadDispatch is not null)
+            {
+                // Its pass is ordered by the host, not by the mark: it joins the group, so a later marked dispatch
+                // is checked against it as well.
+                chain.JoinOverlapGroup();
+                threadDispatch.Dispatch();
+                dispatched = true;
+            }
             else if (record.ThreadsOnGpu)
             {
+                chain.JoinOverlapGroup();
                 if (!TryDispatchThreadsIndirect(input, record.IndirectArgumentsAddress))
                 {
                     throw _host.Fatal(
@@ -296,8 +353,8 @@ internal sealed partial class RenderRecorder
             }
             else
             {
-                _host.NextDispatchMayOverlap = record.MayOverlap;
-                if (record.IndirectArgumentsAddress == 0 || !TryDispatchIndirect(input, record.IndirectArgumentsAddress))
+                _host.NextDispatchMayOverlap = chain.KeepsOverlap(record.MayOverlap);
+                if (record.IndirectArgumentsAddress == 0 || !TryDispatchIndirect(record, arguments, input))
                 {
                     _host.Dispatch(groupsX, groupsY, groupsZ);
                 }
@@ -313,9 +370,119 @@ internal sealed partial class RenderRecorder
                 _host.NoteKnownGpuContents(known.Address, known.Words);
                 known.Release();
             }
+
+            if (DispatchReplayEnabled && record.IndirectArgumentsAddress == 0 && !record.GpuThreadCounts && threadDispatch is null && imageSnapshot == 0 &&
+                _host.CurrentItemSequence is var sequence and not 0 && IsReplayable(program))
+            {
+                _dispatchReplayStage = stage;
+                _dispatchReplayPipeline = pipeline;
+                _dispatchReplaySequence = sequence;
+                _dispatchReplayValid = true;
+                _host.SealDispatchReplay();
+            }
+        }
+    }
+
+    private static readonly bool DispatchReplayEnabled = Environment.GetEnvironmentVariable("SHARPEMU_DISPATCH_REPLAY") != "0";
+    private bool _dispatchReplayValid;
+    private long _dispatchReplaySequence;
+    private ShaderStageResources _dispatchReplayStage;
+    private PipelineHandle _dispatchReplayPipeline;
+    private static readonly ThreadCounter _dispatchReplays = new();
+    private static readonly string[] DispatchMissNames =
+        ["sequence", "pipeline", "program", "images", "samplers", "buffers", "table", "extras", "ranges", "heaps", "mips", "host"];
+    private static readonly ThreadCounter[] _dispatchMisses = Array.ConvertAll(DispatchMissNames, _ => new ThreadCounter());
+
+    private static bool DispatchMiss(int reason)
+    {
+        _dispatchMisses[reason].Increment();
+        return false;
+    }
+
+    internal static string TakeDispatchReplayReport()
+    {
+        var parts = new List<string>();
+        for (var index = 0; index < DispatchMissNames.Length; index++)
+        {
+            var count = _dispatchMisses[index].Take();
+            if (count != 0)
+            {
+                parts.Add(FormattableString.Invariant($"{DispatchMissNames[index]}:{count}"));
+            }
         }
 
-        _host.ResetBindings();
+        return FormattableString.Invariant($"dispatch_replays={_dispatchReplays.Take()} dispatch_replay_miss=") +
+            (parts.Count == 0 ? "none" : string.Join(",", parts));
+    }
+
+    private bool TryReplayDispatch(ResolvedDispatch record, ComputeProgram computeProgram, ComputeInputInfo input, in PipelineHandle pipeline)
+    {
+        if (!_dispatchReplayValid)
+        {
+            return false;
+        }
+
+        _dispatchReplayValid = false;
+        if (!DispatchReplayEnabled || record.IndirectArgumentsAddress != 0 || record.GpuThreadCounts || record.ThreadsOnGpu || MeshDrawTrace.Active ||
+            RenderExecutor.SkipsComputeProgram(input.Stage.Program!.Hash))
+        {
+            return false;
+        }
+
+        var sequence = _host.CurrentItemSequence;
+        if (sequence == 0 || sequence != _dispatchReplaySequence + 1)
+        {
+            return DispatchMiss(0);
+        }
+
+        if (pipeline.Pipeline != _dispatchReplayPipeline.Pipeline || pipeline.Layout != _dispatchReplayPipeline.Layout)
+        {
+            return DispatchMiss(1);
+        }
+
+        var stage = input.Stage;
+        if (stage.GpuThreadLimits || _dispatchReplayStage.GpuThreadLimits)
+        {
+            return DispatchMiss(7);
+        }
+
+        if (StageInputMismatch(in stage, in _dispatchReplayStage, compareThreadLimits: false) is var mismatch and >= 0)
+        {
+            return DispatchMiss(2 + mismatch);
+        }
+
+        if (!_host.TryReplayDispatch(in pipeline, in stage))
+        {
+            return DispatchMiss(11);
+        }
+
+        var chain = _dispatchChain ??= new DispatchChain();
+        if (chain.NeedsHazardBarrier(record, in stage, _host.DeferredBarrierPromotions))
+        {
+            _host.ShaderWriteHazardBarrier();
+        }
+
+        var (groupsX, groupsY, groupsZ) = PhysicalGroups(input, record);
+        RenderExecutor.TraceFrameDispatch(_host, record.HasStorageWrites ? "dispatched-writes" : "dispatched", record.ShaderAddress, stage.Program!.Hash,
+            record.GroupsX, record.GroupsY, record.GroupsZ, record.IndirectArgumentsAddress);
+        _host.BeginCheckedDispatch();
+        _host.BindPipeline(GpuBindPoint.Compute, in pipeline);
+        _host.NextDispatchMayOverlap = chain.KeepsOverlap(record.MayOverlap);
+        _host.Dispatch(groupsX, groupsY, groupsZ);
+        _host.EndCheckedDispatch();
+        chain.Commit(_host.TryDeferShaderAccessBarrier(), _host.DeferredBarrierPromotions);
+        if (computeProgram.KnownWrite is { } known)
+        {
+            _host.NoteKnownGpuContents(known.Address, known.Words);
+            known.Release();
+        }
+
+        _dispatchReplayStage = stage;
+        _dispatchReplaySequence = sequence;
+        _dispatchReplayValid = true;
+        _host.SealDispatchReplay();
+        _dispatchReplays.Increment();
+        return true;
     }
 
     // The host consumers, in the order the dispatch is offered to them. disposition names the one
@@ -677,12 +844,15 @@ internal sealed partial class RenderRecorder
         return _host.TryDispatchThreadsIndirect(argumentsAddress, input.ThreadsX, input.ThreadsY, input.ThreadsZ, axisOrder);
     }
 
-    // The indirect form hands the host the group axis order so it can permute the counts it reads.
-    private bool TryDispatchIndirect(ComputeInputInfo input, ulong argumentsAddress)
+    // The indirect form hands the host the group axis order so it can permute the counts it reads: from arguments the
+    // host registered before the bindings (PrepareIndirectDispatchArguments), or from the guest address.
+    private bool TryDispatchIndirect(ResolvedDispatch record, IIndirectDispatchArguments? arguments, ComputeInputInfo input)
     {
         Span<int> axisOrder = stackalloc int[3];
         GroupAxisOrder(input, axisOrder);
-        return _host.TryDispatchIndirect(argumentsAddress, axisOrder);
+        return arguments is not null
+            ? _host.TryDispatchIndirect(arguments, axisOrder)
+            : _host.TryDispatchIndirect(record.IndirectArgumentsAddress, axisOrder);
     }
 
     // The shader's local workgroup axes may have been remapped at compile time (see

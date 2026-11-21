@@ -33,18 +33,25 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     // The vertex user data register that carries the draw's first instance, or -1 (the draw packet's).
     public int StartInstanceUserData;
 
+    // The vertex user data register that carries the draw's base vertex, or -1 (DrawIndexedArguments.BaseVertexUserData).
+    public int BaseVertexUserData;
+
+    // An automatic indirect mesh draw launched by the task stage (MeshTaskLaunch).
+    public bool TaskLaunch;
+
     public static GraphicsProgramInputs Create()
     {
         var inputs = new GraphicsProgramInputs();
         ((Span<ColorComponentMap>)inputs.Mapping).Fill(ColorComponentMap.Identity);
         inputs.StartInstanceUserData = -1;
+        inputs.BaseVertexUserData = -1;
         return inputs;
     }
 
     public readonly bool Equals(GraphicsProgramInputs other) =>
         PixelActive == other.PixelActive && DepthBound == other.DepthBound && DepthAspectBound == other.DepthAspectBound &&
         StencilAspectBound == other.StencilAspectBound && TriangleList == other.TriangleList && Indexed == other.Indexed &&
-        StartInstanceUserData == other.StartInstanceUserData &&
+        StartInstanceUserData == other.StartInstanceUserData && BaseVertexUserData == other.BaseVertexUserData && TaskLaunch == other.TaskLaunch &&
         ((ReadOnlySpan<ColorComponentMap>)Mapping).SequenceEqual(other.Mapping);
 
     public override readonly bool Equals(object? obj) => obj is GraphicsProgramInputs other && Equals(other);
@@ -64,6 +71,8 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
         hash.Add(TriangleList);
         hash.Add(Indexed);
         hash.Add(StartInstanceUserData);
+        hash.Add(BaseVertexUserData);
+        hash.Add(TaskLaunch);
         return hash.ToHashCode();
     }
 }
@@ -251,7 +260,7 @@ public sealed partial class RenderExecutor
             }
 
             return _pipelines.GetMeshGraphicsPrograms(
-                banks, userConfig, inputs.Mapping, inputs.PixelActive, inputs.DepthBound);
+                banks, userConfig, inputs.Mapping, inputs.PixelActive, inputs.DepthBound, inputs.TaskLaunch);
         }
 
         return _pipelines.GetGraphicsPrograms(
@@ -262,7 +271,8 @@ public sealed partial class RenderExecutor
             inputs.DepthAspectBound,
             inputs.StencilAspectBound,
             inputs.TriangleList,
-            inputs.StartInstanceUserData);
+            inputs.StartInstanceUserData,
+            inputs.BaseVertexUserData);
     }
 
     // A dispatch's program resolved ahead of it (ParallelProgramPrefetch), or null with the reason it cannot stand for it.

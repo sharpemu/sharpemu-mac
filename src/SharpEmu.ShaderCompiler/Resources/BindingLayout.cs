@@ -40,6 +40,11 @@ public static class PushData
     public static bool CanFit(uint start, uint size) => size != 0 && start <= DwordCount && size <= DwordCount - start;
 
     public static uint StartFor(uint cursor, uint size) => CanFit(cursor, size) ? cursor : NoStart;
+
+    // The start of data placed at the top of the range, when it fits above cursor: it depends on the data's size alone, so
+    // the stage that takes it (a graphics pipeline's vertex or mesh stage, after its pixel stage) has one place whichever
+    // stage comes before it. NoStart when it does not fit, exactly where StartFor finds no room.
+    public static uint TopFor(uint cursor, uint size) => CanFit(cursor, size) ? DwordCount - size : NoStart;
 }
 
 public sealed record DescriptorBinding(DescriptorBindingKind Kind, IReadOnlyList<uint> Resources);
@@ -375,6 +380,10 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint PushDataStartDword { get; init; } = PushData.NoStart;
     public uint AllocationCursor { get; init; }
+
+    // The shader data takes the top of the push range when it fits above the cursor (PushData.TopFor), not the cursor's
+    // place; the allocation cursor is then the start it took, or the end of the range when it did not fit.
+    public bool PushDataAtTop { get; init; }
     public uint ShaderBaseDword { get; init; } = NoShaderBase;
     public uint MemoryOffsetDword { get; init; }
     public uint MemoryOffsetCount { get; init; }
@@ -397,8 +406,22 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     // The addresses of the module's callees (Gen5ShaderCallLinker.CallTargets), two dwords each.
     public uint CallTargetCount { get; init; }
-    // The program reads call records through descriptor set 1 (see BindlessHeap).
+
+    // The V# stride of every buffer binding, two to a dword (16 bits each), when some access indexes its buffer
+    // (ShaderResourceInfo.UsesIndexedBuffers); otherwise none.
+    public uint BufferStrideCount { get; init; }
+
+    // The store channel map (RuntimeImageSwizzle.StoreChannelMap) of every written image that takes its destination select
+    // from shader data (ShaderResourceInfo.UsesRuntimeImageSwizzles), in image order, two to a dword (16 bits each).
+    public uint StorageImageSwizzleCount { get; init; }
+
+    // The component width code of every other written integer storage image (ImageStoreWidth), 16 to a dword.
+    public uint StorageImageWidthCount { get; init; }
+    // The program reads bindless heap records through descriptor set 1 (see BindlessHeap).
     public bool UsesBindlessHeap { get; init; }
+
+    // Where the elements of each heap view of the program are for the draw (HeapView), two dwords each.
+    public uint HeapViewCount { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
 
@@ -432,13 +455,28 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint CallTargetsDword => CallArgumentsDword + CallArgumentCount * 2;
 
-    public uint ShaderDataDwordCount => CallTargetsDword + CallTargetCount * 2;
+    public uint BufferStridesDword => CallTargetsDword + CallTargetCount * 2;
+
+    public uint StorageImageSwizzlesDword => BufferStridesDword + (BufferStrideCount + 1) / 2;
+
+    public uint HeapViewsDword => StorageImageSwizzlesDword + (StorageImageSwizzleCount + 1) / 2;
+
+    public uint StorageImageWidthsDword => HeapViewsDword + HeapViewCount * HeapView.DwordCount;
+
+    public uint ShaderDataDwordCount => StorageImageWidthsDword + ImageStoreWidth.DwordCount(StorageImageWidthCount);
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
     public uint FirstBufferWordDword() => MemoryOffsetDword + (UsesTableBlock ? 2u : (MemoryOffsetCount + 3) / 4);
 
     public bool UsesShaderBase => ShaderBaseDword != NoShaderBase;
+
+    // The push data start this layout takes after cursor: a permutation serves a stage whose cursor gives its own start.
+    // Tessellation runtime data never takes push data.
+    public uint PushStartFor(uint cursor) =>
+        UsesTessellationData ? PushData.NoStart
+        : PushDataAtTop ? PushData.TopFor(cursor, ShaderDataDwordCount)
+        : PushData.StartFor(cursor, ShaderDataDwordCount);
 
     public void AdvancePushData(ref uint cursor)
     {
@@ -685,6 +723,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesMeshDrawParameters = false,
         uint callArgumentCount = 0,
         uint callTargetCount = 0,
+        bool pushDataAtTop = false,
         bool? portableBuffers = null,
         bool tableBlock = false,
         bool usesBufferLengths = false,
@@ -703,11 +742,18 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             .DefaultIfEmpty(0u)
             .Max();
         usesBufferLengths &= memoryOffsetCount != 0 && !usesTableBlock;
+        var bufferStrideCount = info.UsesIndexedBuffers ? (uint)info.Buffers.Count : 0u;
+        var storageImageSwizzleCount = info.UsesRuntimeImageSwizzles ? RuntimeImageSwizzle.SlotCount(info.Images) : 0u;
+        var storageImageWidthCount = ImageStoreWidth.SlotCount(info.Images, info.UsesRuntimeImageSwizzles);
         var shaderDataDwords = memoryOffsetDword + (usesTableBlock ? 2u : (memoryOffsetCount + 3) / 4) + bufferWordCount +
             (usesBufferLengths ? memoryOffsetCount : 0) +
             (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u) +
-            (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + callArgumentCount * 2 + callTargetCount * 2;
-        var pushStart = usesTessellationData ? PushData.NoStart : PushData.StartFor(pushDataStartDword, shaderDataDwords);
+            (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + callArgumentCount * 2 + callTargetCount * 2 +
+            (bufferStrideCount + 1) / 2 + (storageImageSwizzleCount + 1) / 2 + info.HeapViewCount * HeapView.DwordCount +
+            ImageStoreWidth.DwordCount(storageImageWidthCount);
+        var pushStart = usesTessellationData ? PushData.NoStart
+            : pushDataAtTop ? PushData.TopFor(pushDataStartDword, shaderDataDwords)
+            : PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
         if (info.Buffers.Count != 0 && !usesTableBlock)
         {
@@ -800,7 +846,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         return new BindingLayout
         {
             PushDataStartDword = pushStart,
-            AllocationCursor = pushDataStartDword,
+            AllocationCursor = !pushDataAtTop ? pushDataStartDword : pushStart != PushData.NoStart ? pushStart : PushData.DwordCount,
+            PushDataAtTop = pushDataAtTop,
             ShaderBaseDword = shaderBaseDword,
             MemoryOffsetDword = memoryOffsetDword,
             MemoryOffsetCount = memoryOffsetCount,
@@ -816,7 +863,11 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             UsesMeshDrawParameters = usesMeshDrawParameters,
             CallArgumentCount = callArgumentCount,
             CallTargetCount = callTargetCount,
+            BufferStrideCount = bufferStrideCount,
+            StorageImageSwizzleCount = storageImageSwizzleCount,
+            StorageImageWidthCount = storageImageWidthCount,
             UsesBindlessHeap = info.UsesBindlessHeap,
+            HeapViewCount = info.HeapViewCount,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
         };
@@ -832,6 +883,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
         if (other is null ||
             PushDataStartDword != other.PushDataStartDword ||
+            PushDataAtTop != other.PushDataAtTop ||
             ShaderBaseDword != other.ShaderBaseDword ||
             MemoryOffsetDword != other.MemoryOffsetDword ||
             MemoryOffsetCount != other.MemoryOffsetCount ||
@@ -847,7 +899,11 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             UsesMeshDrawParameters != other.UsesMeshDrawParameters ||
             CallArgumentCount != other.CallArgumentCount ||
             CallTargetCount != other.CallTargetCount ||
+            BufferStrideCount != other.BufferStrideCount ||
+            StorageImageSwizzleCount != other.StorageImageSwizzleCount ||
+            StorageImageWidthCount != other.StorageImageWidthCount ||
             UsesBindlessHeap != other.UsesBindlessHeap ||
+            HeapViewCount != other.HeapViewCount ||
             !SameValues(UserDataRegisters, other.UserDataRegisters))
         {
             return false;
@@ -929,7 +985,7 @@ public static class BindingLayoutValidator
         var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare,
             usesFlattenedTable, usesShaderBase, layout.AllocationCursor,
             layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters, layout.CallArgumentCount, layout.CallTargetCount,
-            portableBuffers: layout.BufferWordCount != 0,
+            pushDataAtTop: layout.PushDataAtTop, portableBuffers: layout.BufferWordCount != 0,
             tableBlock: layout.UsesTableBlock, usesBufferLengths: layout.UsesBufferLengths, usesTessellationData: layout.UsesTessellationData);
         if (!expected.Equals(layout))
         {
@@ -940,7 +996,7 @@ public static class BindingLayoutValidator
     }
 
     private static string Describe(BindingLayout layout) =>
-        $"push={layout.PushDataStartDword} base={layout.ShaderBaseDword} offsets={layout.MemoryOffsetDword}+{layout.MemoryOffsetCount} table={layout.UsesTableBlock} " +
+        $"push={layout.PushDataStartDword}{(layout.PushDataAtTop ? "(top)" : "")} base={layout.ShaderBaseDword} offsets={layout.MemoryOffsetDword}+{layout.MemoryOffsetCount} table={layout.UsesTableBlock} " +
         $"words={layout.BufferWordCount} " +
         $"user=[{string.Join(",", layout.UserDataRegisters)}] " +
         string.Join(" ", layout.Descriptors.Select(binding => $"{binding.Kind}:{string.Join(",", binding.Resources)}"));

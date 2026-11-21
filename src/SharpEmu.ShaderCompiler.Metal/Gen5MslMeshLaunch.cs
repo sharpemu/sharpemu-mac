@@ -67,7 +67,8 @@ public static class Gen5MslMeshLaunch
     /// Writes the draw-info words of a draw of whole subgroups (no cached meshlets: words
     /// 16-18 stay zero). <paramref name="words"/> is <see cref="Gen5MslMeshInfo.DrawInfoDwordCount"/>
     /// dwords the caller has cleared. <paramref name="indexType"/> is 1 for 16-bit and 2 for
-    /// 32-bit indices; a non-indexed draw has no first index and no base vertex.
+    /// 32-bit indices; a non-indexed draw has no first index, and <paramref name="firstIndex"/> is its first
+    /// vertex, which word 5 (the base vertex) carries.
     /// </summary>
     public static void FillDrawInfo(
         Gen5MslMeshInfo mesh,
@@ -86,9 +87,10 @@ public static class Gen5MslMeshLaunch
         words[2] = indexed ? count : 0;
         words[3] = indexed ? indexType : 0;
         words[4] = indexed ? firstIndex : 0;
-        // An amplified draw's workgroup index is its point's vertex index, so a non-indexed
-        // one counts on from the first vertex.
-        words[5] = mesh.Amplified && !indexed ? firstIndex : unchecked((uint)baseVertex);
+        // A non-indexed draw's vertex index counts on from its first vertex, which travels as
+        // the base vertex (an amplified draw's workgroup index is its point's vertex index too),
+        // as the vertex path's [[base_vertex]] is vertexStart for a non-indexed draw.
+        words[5] = indexed ? unchecked((uint)baseVertex) : firstIndex;
         words[6] = instanceCount;
         words[7] = firstInstance;
         // A GS half learns where each subgroup's share of input primitives starts and how
@@ -144,7 +146,7 @@ public static class Gen5MslMeshLaunch
 
     /// <summary>
     /// The parameters of one non-indexed rectangle-list slot: the kernel writes Gen5RectDraw
-    /// (vertex_base = firstVertex) and MTLDrawPatchIndirectArguments with one patch per
+    /// (vertex_base = base_vertex = firstVertex) and MTLDrawPatchIndirectArguments with one patch per
     /// rectangle, as the CPU draw does.
     /// </summary>
     public static void WriteRectangleParameters(Span<uint> parameters, ulong argumentsOffset, ulong maxThreadgroups)
@@ -198,7 +200,7 @@ public static class Gen5MslMeshLaunch
             const ulong limit = ulong(p.max_threadgroups_low) | (ulong(p.max_threadgroups_high) << 32);
 
             // A non-indexed rectangle list: Gen5RectDraw (vertex_base, vertex_offset,
-            // index_type, first_index), then (patchCount, instanceCount, patchStart,
+            // index_type, first_index, base_vertex), then (patchCount, instanceCount, patchStart,
             // baseInstance), one patch per {{Gen5MslRectangleList.VerticesPerRectangle}} vertices.
             if (p.rectangle_list != 0u)
             {
@@ -207,6 +209,7 @@ public static class Gen5MslMeshLaunch
                 block[1] = 0u;
                 block[2] = 0u;
                 block[3] = 0u;
+                block[4] = arguments[2];
                 grid[0] = ulong(patches) * ulong(arguments[1]) > limit ? 0u : patches;
                 grid[1] = arguments[1];
                 grid[2] = 0u;
@@ -255,7 +258,7 @@ public static class Gen5MslMeshLaunch
             block[2] = p.indexed != 0u ? count : 0u;
             block[3] = p.indexed != 0u ? p.index_type : 0u;
             block[4] = first_index;
-            block[5] = p.amplified != 0u && p.indexed == 0u ? arguments[2] : base_vertex;
+            block[5] = p.indexed != 0u ? base_vertex : arguments[2];
             block[6] = instances;
             block[7] = first_instance;
             for (uint word = 8u; word < 13u; word++)

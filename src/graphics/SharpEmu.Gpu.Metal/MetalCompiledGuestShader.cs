@@ -48,6 +48,48 @@ internal sealed class MetalCompiledGuestShader(Gen5MslShader shader, ShaderCompi
 
     public string PayloadFileExtension => "msl";
 
+    /// <summary>The source and every reflection field, behind its request's stage and hash
+    /// (<see cref="Gen5MslShaderPayload"/>): what the translation disk cache keeps, and
+    /// <see cref="FromCachePayload"/> reads back. A fixed shader has no translation to keep.</summary>
+    public byte[] CachePayload => _request is { } request
+        ? Gen5MslShaderPayload.Write(AcquireShader(), request.Stage, request.Hash)
+        : throw new InvalidOperationException("A shader without its request is not a translation the cache keeps.");
+
+    private static long _cachePayloadsRefused;
+
+    /// <summary>Cache payloads <see cref="FromCachePayload"/> refused in this process.</summary>
+    internal static long CachePayloadsRefused => Interlocked.Read(ref _cachePayloadsRefused);
+
+    /// <summary>
+    /// The shader a cache payload holds, for the request it is taken for: the same shader a translation of
+    /// <paramref name="request"/> constructs, request included, so its source can be dropped and translated again
+    /// like a fresh one's. Null, counted and logged, when the payload is damaged, of another format, or was made
+    /// for another stage or program.
+    /// </summary>
+    internal static MetalCompiledGuestShader? FromCachePayload(byte[] payload, ShaderCompileRequest request)
+    {
+        string reason;
+        if (!Gen5MslShaderPayload.TryRead(payload, out var shader, out var stage, out var hash, out var error))
+        {
+            reason = error;
+        }
+        else if (stage != request.Stage || hash != request.Hash)
+        {
+            reason = $"made for {stage} 0x{hash:X16}, taken for {request.Stage} 0x{request.Hash:X16}";
+        }
+        else
+        {
+            return new MetalCompiledGuestShader(shader, request);
+        }
+
+        if (Interlocked.Increment(ref _cachePayloadsRefused) <= 8)
+        {
+            Console.Error.WriteLine($"[METAL-V2][TRANSLATION_CACHE] cached shader for 0x{request.Hash:X16} refused: {reason}.");
+        }
+
+        return null;
+    }
+
     public uint FlattenedTableMinimumWords => Shader.FlattenedTableMinimumWords;
 
     /// <summary>XxHash3 of the UTF-8 <see cref="Payload"/>, computed once and kept.</summary>

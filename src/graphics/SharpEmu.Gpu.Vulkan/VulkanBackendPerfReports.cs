@@ -30,7 +30,8 @@ internal static class VulkanBackendPerfReports
     private static string TakeStreamReport() =>
         "[PERF][FAST_PATHS_VULKAN] " +
         FormattableString.Invariant($"stream_cleaned={Interlocked.Exchange(ref GuestBufferCache.StreamCleaned, 0)} stream_uses={Interlocked.Exchange(ref GuestBufferCache.StreamUses, 0)} ") +
-        FormattableString.Invariant($"gpu_version_bumps={GuestBufferCache.TakeGpuVersionBumps()}");
+        FormattableString.Invariant($"gpu_version_bumps={GuestBufferCache.TakeGpuVersionBumps()} ") +
+        GuestBufferCache.TakeObtainMemoReport();
 
     private static string TakeDirtyTrackingReport() =>
         "[PERF][DIRTY_TRACKING_VULKAN] " + GuestBufferCache.TakeDirtyTrackingReport() + " " + GpuBuffer.CopyRun.TakeReport();

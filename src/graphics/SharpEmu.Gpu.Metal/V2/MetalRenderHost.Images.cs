@@ -42,6 +42,15 @@ internal sealed partial class MetalRenderHost
             imageIdentifier = _imageCache.FindImage(ref request, exactFormat: false);
         }
 
+        // A level past the texture's chain (a colour target rendered past its 1x1 level) renders into the texture's
+        // last level, which is 1x1 too, as upstream's ClampToHostLevels does: the view, the pass and what it marks
+        // written name that level.
+        var hostLevels = MetalImageTransfer.HostLevels(in request.Description);
+        if (request.View.BaseLevel >= hostLevels && hostLevels != 0)
+        {
+            request = request with { View = request.View with { BaseLevel = hostLevels - 1, LevelCount = 1 } };
+        }
+
         var metadataClear = _imageCache.TryConsumeDccAttachmentClear(
             in request, in target.Resolution, out var clearValue);
         // BeginRendering, or a clear's drain, decides the upload of a CPU-written target.

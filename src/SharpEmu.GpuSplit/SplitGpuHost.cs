@@ -584,6 +584,10 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                     return 0;
                 }
 
+                case GpuRemoteSyncOpcode.ResidencyRange:
+                    MirrorResidencyRange(GpuSplitWire.Read<ResidencyRangeRequest>(request));
+                    return 0;
+
                 case GpuRemoteSyncOpcode.Query:
                     return Query(GpuSplitWire.Read<QueryRequest>(request), response);
 
@@ -599,6 +603,38 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             return 0;
         }
     }
+
+    // A PRT aperture or the AMM area the guest process's kernel set, moved or dropped (PartiallyResidentRanges): image
+    // reads here answer from it as the kernel answers there (ResidentImageBacking), and an aperture the kernel registered
+    // as lazily backed GPU memory is registered with this process's manager as GuestGpuMemoryHook.NoteLazyRange does
+    // there, so a managed write into it reaches the caches here and the ledger stays the guest process's.
+    private void MirrorResidencyRange(in ResidencyRangeRequest call)
+    {
+        var range = new PartiallyResidentRanges.Range(call.Id, call.Address, call.Size, call.LazilyBacked != 0);
+        _ = PartiallyResidentRanges.Mirror(range);
+        var memory = _memory!;
+        lock (_lazyRanges)
+        {
+            if (_lazyRanges.Remove(call.Id, out var lazy))
+            {
+                memory.UnregisterLazyRange(lazy.Address, lazy.Size);
+            }
+
+            if (range.LazilyBacked && GuestGpuMemoryHook.IsWithinGpuAddressSpace(range.Address, range.Size))
+            {
+                _lazyRanges[call.Id] = (range.Address, range.Size);
+                memory.RegisterLazyRange(range.Address, range.Size);
+            }
+        }
+
+        Interlocked.Increment(ref _residencyChanges);
+    }
+
+    private readonly Dictionary<int, (ulong Address, ulong Size)> _lazyRanges = [];
+    private long _residencyChanges;
+
+    /// <summary>PRT/AMM range changes the guest process sent (<see cref="GpuRemoteSyncOpcode.ResidencyRange"/>).</summary>
+    internal long ResidencyChanges => Interlocked.Read(ref _residencyChanges);
 
     private int BeginBracket(in BracketBeginRequest call, Span<byte> response, out int status)
     {

@@ -28,6 +28,9 @@ public sealed class ResourceSnapshot
     // starts without one.
     public object? BindingPacket;
 
+    // The heap V#s the draw's bindless heap records are read from, one per heap.
+    public BindlessHeapDescriptor[] Heaps { get; init; } = [];
+
     public static uint MipStatisticsOf(uint word5, uint word6) =>
         (word6 & MipStatisticsSlotWordMask) | ((word5 & MipStatisticsEnableWordMask) != 0 ? MipStatisticsEnabled : 0u);
 
@@ -53,6 +56,7 @@ public sealed class ResourceSnapshot
                 DeviceAddressRanges = DeviceAddressRanges,
                 BindlessImages = BindlessImages,
                 MipStatistics = MipStatistics,
+                Heaps = Heaps,
                 // Origin stays unset: the copy's user data differs from its entry's, so it must
                 // not take the entry's fast revalidation.
             };

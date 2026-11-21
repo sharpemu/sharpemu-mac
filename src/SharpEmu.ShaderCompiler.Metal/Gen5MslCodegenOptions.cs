@@ -237,6 +237,13 @@ public sealed record Gen5MslCodegenOptions(
     /// SHARPEMU_MSL_PACKED_FORMAT_LOADS=0 restores component loads; partial trailing elements retain the decoder.</summary>
     public bool PackedFormatLoads { get; init; } = true;
 
+    /// <summary>A BUFFER_LOAD_FORMAT_* whose word 3 is known at translate time bounds each selected component
+    /// at its own 32-bit address (elementAddress + offset, wrapping at 2^32) when the selected run does not
+    /// fit as a whole, as the hardware and upstream's SPIR-V do (7cf0ac568): a component past the top of the
+    /// byte space reads the binding's first bytes. The run that fits stays one compare.
+    /// SHARPEMU_METAL_FORMAT_LOAD_COMPONENT_BOUNDS=0 bounds the whole run again.</summary>
+    public bool FormatLoadComponentBounds { get; init; } = true;
+
     /// <summary>A program with at least this many BUFFER_LOAD_FORMAT_* decodes the formats only known on the device
     /// through one helper (format_load_prelude.msl) instead of inline at every load, which Metal compiles in seconds
     /// instead of minutes for a program with hundreds. The whole-dword fast path stays inline. Below it the program is
@@ -330,6 +337,18 @@ public sealed record Gen5MslCodegenOptions(
     /// keeps the cases.</summary>
     public bool IndexedImageCandidates { get; init; } = true;
 
+    /// <summary>The copies of one callee that a program linked per record holds at a call site share one body, entered
+    /// from each record's entry with the record's slot (Gen5MslTranslator.SharedCalls.cs), instead of one inlined copy
+    /// per record. SHARPEMU_METAL_SHARED_CALL_BODIES=0 inlines every copy.</summary>
+    public bool SharedCallBodies { get; init; } = true;
+
+    /// <summary>The stand-in for S_MEMTIME / S_MEMREALTIME (MSL has no shader clock) moves 2^32 + 1 ahead per read
+    /// instead of 1, as upstream's SPIR-V fallback moves 2^32 (Gen5SpirvTranslator.ReadShaderClock): a guest wait on
+    /// the 64-bit difference of two reads for fewer than 2^32 ticks then ends at its next read, where a step of 1
+    /// spun the loop once per tick; a wait on the low dword alone still sees it move by 1 per read.
+    /// SHARPEMU_METAL_SHADER_CLOCK_STEP=0 steps by 1 again.</summary>
+    public bool ShaderClockWideStep { get; init; } = true;
+
     public static Gen5MslCodegenOptions FromEnvironment { get; } = new(
         StructuredControlFlow: Environment.GetEnvironmentVariable("SHARPEMU_MSL_STRUCTURED") != "0",
         RegisterAllocation: Environment.GetEnvironmentVariable("SHARPEMU_MSL_REGALLOC") != "0",
@@ -370,6 +389,7 @@ public sealed record Gen5MslCodegenOptions(
         LaneExactUnobservedWrites = Environment.GetEnvironmentVariable("SHARPEMU_MSL_UNOBSERVED_LANES") != "0",
         GeometryOutputCapacity = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GEOMETRY_CAPACITY") == "1",
         PackedFormatLoads = Environment.GetEnvironmentVariable("SHARPEMU_MSL_PACKED_FORMAT_LOADS") != "0",
+        FormatLoadComponentBounds = Environment.GetEnvironmentVariable("SHARPEMU_METAL_FORMAT_LOAD_COMPONENT_BOUNDS") != "0",
         FormatFetch = Environment.GetEnvironmentVariable("SHARPEMU_MSL_FORMAT_FETCH") != "0",
         DecodedFormatLoadThreshold = int.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_DECODED_FORMAT_LOADS"), out var decodedLoads)
@@ -389,6 +409,8 @@ public sealed record Gen5MslCodegenOptions(
         GroupUniformBarriers = Environment.GetEnvironmentVariable("SHARPEMU_MSL_GROUP_BARRIERS") != "0",
         HalfLocalWaveLoops = Environment.GetEnvironmentVariable("SHARPEMU_MSL_HALF_LOOPS") != "0",
         IndexedImageCandidates = Environment.GetEnvironmentVariable("SHARPEMU_MSL_INDEXED_CANDIDATES") != "0",
+        SharedCallBodies = Environment.GetEnvironmentVariable("SHARPEMU_METAL_SHARED_CALL_BODIES") != "0",
+        ShaderClockWideStep = Environment.GetEnvironmentVariable("SHARPEMU_METAL_SHADER_CLOCK_STEP") != "0",
         MeshDeviceLdsThresholdBytes = uint.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MSL_MESH_LDS_THRESHOLD"), out var threshold)
                 ? Math.Min(threshold, 16384u) : 12288u,

@@ -79,6 +79,7 @@ public static partial class Gen5MslTranslator
             {
                 _body.Clear();
                 _indent = 0;
+                ForgetHeapMarks();
                 if (!TryEmitBlockBody(blocks, index, out var terminator, out error))
                 {
                     error = $"block=0x{blocks[index].StartPc:X}: {error}";

@@ -483,7 +483,13 @@ internal sealed class MaterializationProgram
             var levels = new Level[levelCount];
             for (var level = 0; level < levelCount; level++)
             {
-                levels[level] = new Level { Reads = [.. reads[level]], Steps = [.. steps[level]] };
+                ReadStep[] levelReads = [.. reads[level]];
+                if (StaticReadOrder)
+                {
+                    Array.Sort(levelReads, CompareReadOrder);
+                }
+
+                levels[level] = new Level { Reads = levelReads, Steps = [.. steps[level]] };
             }
 
             return new MaterializationProgram(_constants.Count, [.. _constants], [.. _constantValid], levels, sourceWords, tableWords, tableOffsets,
@@ -902,11 +908,8 @@ internal sealed class MaterializationProgram
         var low = _rangeLow[index];
         var high = _rangeHigh[index];
         var plannedRange = low >= 0 && valid[low] && valid[high];
-        var handleBase = plannedRange ? ((uint)values[low] | ((ulong)(uint)values[high] << 32)) & AddressMask : 0;
-        var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
-        var baseAddress = plannedRange ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
-        var size = range.Bounded ? range.Extent : DeviceAddressRangePlanner.MaxRangeBytes;
-        return new DeviceAddressRange(range.Handle, baseAddress, plannedRange ? size : 0, plannedRange, range.Written);
+        return DeviceAddressRangePlanner.EvaluateRange(range, plannedRange,
+            plannedRange ? (uint)values[low] : 0, plannedRange ? (uint)values[high] : 0);
     }
 
     private bool Run(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Scratch scratch, bool[] activeSources,
@@ -1013,6 +1016,23 @@ internal sealed class MaterializationProgram
                 return;
             }
         }
+    }
+
+    // A level's reads are put in a fixed order of base, offset and immediate once, when the program is built, so their
+    // addresses mostly arrive in order; ReadLevel still puts them in address order (ReadOrder) before it finds runs.
+    // SHARPEMU_STATIC_READ_ORDER=0 keeps the order they were added in.
+    private static readonly bool StaticReadOrder = Environment.GetEnvironmentVariable("SHARPEMU_STATIC_READ_ORDER") != "0";
+
+    private static int CompareReadOrder(ReadStep left, ReadStep right)
+    {
+        var order = left.Low.CompareTo(right.Low);
+        if (order == 0) order = left.High.CompareTo(right.High);
+        if (order == 0) order = left.Offset.CompareTo(right.Offset);
+        if (order == 0) order = left.Records.CompareTo(right.Records);
+        if (order == 0) order = left.Word3.CompareTo(right.Word3);
+        if (order == 0) order = left.Kind.CompareTo(right.Kind);
+        if (order == 0) order = (left.Immediate + left.ConstantOffset).CompareTo(right.Immediate + right.ConstantOffset);
+        return order != 0 ? order : left.Target.CompareTo(right.Target);
     }
 
     // ReadLevel for a FixedReads level, with the same words, runs and fallbacks; false, reading nothing, when the base is

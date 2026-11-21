@@ -48,6 +48,33 @@ internal static partial class MetalNative
     public static DeviceTable CreateBindlessTable(byte[] entries, IReadOnlyList<nint> textures) =>
         new(DescriptorBindingKind.Buffers, SharedBuffer(entries), (uint)(entries.Length / 16), textures);
 
+    /// <summary>The bindless heap's element table as the v2 host writes it: 8 bytes per element, slot-major.</summary>
+    public static DeviceTable CreateHeapElements(byte[] elements, IReadOnlyList<nint> residents) =>
+        new(DescriptorBindingKind.Buffers, SharedBuffer(elements), (uint)(elements.Length / 8), residents);
+
+    /// <summary>The bindless heap's feedback words (mark bitsets, then element classes), as given.</summary>
+    public static DeviceTable CreateHeapFeedback(uint[] words) => CreateWordTable(DescriptorBindingKind.Buffers, words);
+
+    /// <summary>The words of a table's buffer as the GPU left them.</summary>
+    public static uint[] ReadWords(DeviceTable table)
+    {
+        var bytes = ReadSharedBuffer(table.Buffer, (int)table.Count * sizeof(uint));
+        var words = new uint[table.Count];
+        Buffer.BlockCopy(bytes, 0, words, 0, bytes.Length);
+        return words;
+    }
+
+    /// <summary>A normalized-coordinate sampler with the given min/mag filter (0 nearest, 1 linear), clamped to edge.</summary>
+    public static nint CreateFilterSampler(nuint filter)
+    {
+        var descriptor = Send(Send(objc_getClass("MTLSamplerDescriptor"), Selector("alloc")), Selector("init"));
+        SendVoidBool(descriptor, Selector("setSupportArgumentBuffers:"), true);
+        SendInteger(descriptor, Selector("setNormalizedCoordinates:"), 1);
+        SendInteger(descriptor, Selector("setMinFilter:"), filter);
+        SendInteger(descriptor, Selector("setMagFilter:"), filter);
+        return Send(Device.Value, Selector("newSamplerStateWithDescriptor:"), descriptor);
+    }
+
     /// <summary>A read-only table bound to one pointer field, holding the given words.</summary>
     public static DeviceTable CreateWordTable(DescriptorBindingKind kind, uint[] words)
     {

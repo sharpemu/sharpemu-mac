@@ -485,6 +485,7 @@ public sealed partial class ResourceMaterializationCache
                 UserData = userData,
                 DeviceAddressRanges = previous.DeviceAddressRanges,
                 BindlessImages = previous.BindlessImages,
+                Heaps = previous.Heaps,
             };
 
         var recorder = TakeRecorder();

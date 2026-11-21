@@ -173,7 +173,9 @@ public sealed partial class RenderExecutor
             depthBiasPerFace ? back.Item2 : 0f,
             pointLine.Item1,
             pointLine.Item2,
-            context.DepthCountControl);
+            context.DepthCountControl,
+            depthState.FrontOperations,
+            depthState.BackOperations);
         if (ScissorTrace.Instance is { Active: true } trace)
             trace.Draw(banks, submitId, packetAddress, framebufferWidth, framebufferHeight,
                 state.ColorCount > 0 ? state.Colors[0].Resolution.BaseAddress : 0,

@@ -1104,6 +1104,8 @@ public static partial class KernelRuntimeCompatExports
         }
 
         SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.NoteLazyRange(apertureId, residentBase, apertureSize);
+        // The GPU process of the split has no kernel to ask (ContainsPrtRange): it is told instead.
+        SharpEmu.HLE.GpuMemory.PartiallyResidentRanges.Publish(apertureId, residentBase, apertureSize, lazilyBacked: true);
         Console.Error.WriteLine(
             $"[LOADER][TRACE] set_prt_aperture: id={apertureId} base=0x{apertureBase:X16} size=0x{apertureSize:X16}" +
             (residentBase != apertureBase ? $" relocated=0x{residentBase:X16}" : string.Empty));
@@ -1159,6 +1161,8 @@ public static partial class KernelRuntimeCompatExports
     {
         if (size == 0 || address > ulong.MaxValue - size)
             return false;
+        if (Ampr.AmprExports.ContainsAmmRange(address, size))
+            return true;
         address = GuestVaHole.TranslateRange(address, size);
         lock (_prtApertureGate)
         {

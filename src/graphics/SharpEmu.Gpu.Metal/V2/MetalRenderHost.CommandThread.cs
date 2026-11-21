@@ -123,6 +123,8 @@ internal sealed partial class MetalRenderHost
     // held: they change the caches it reads.
     private void RunRelayBetweenCommandItems()
     {
+        // An item ended (MetalRenderHost.Replay.cs: CurrentItemSequence).
+        _replayItemSequence++;
         if (!_relay.HasPendingCommands)
         {
             return;

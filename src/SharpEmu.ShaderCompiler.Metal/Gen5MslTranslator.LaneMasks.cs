@@ -124,6 +124,8 @@ public static partial class Gen5MslTranslator
             var start = _body.Length;
             var indent = _indent;
             _indent = 0;
+            // The captured lines are placed elsewhere: nothing kept for heap marks crosses them (HeapMarks).
+            ForgetHeapMarks();
             try
             {
                 ok = emit();
@@ -131,6 +133,7 @@ public static partial class Gen5MslTranslator
             finally
             {
                 _indent = indent;
+                ForgetHeapMarks();
             }
 
             var captured = _body.ToString(start, _body.Length - start);

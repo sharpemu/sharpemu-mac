@@ -26,12 +26,21 @@ public static class ResourcePlanBuildCounters
         Interlocked.Increment(ref _totalMethods);
     }
 
+    private static long _descriptorTableRefusals;
+
+    // A plan whose device-address ranges stay on the interpreter for its device-descriptor tables
+    // (CompiledDeviceAddressRanges.DescriptorTablesRefusal); counted for the whole session.
+    internal static void RecordDescriptorTableRefusal() => Interlocked.Increment(ref _descriptorTableRefusals);
+
+    internal static long DescriptorTableRefusals => Interlocked.Read(ref _descriptorTableRefusals);
+
     /// <summary>The builds since the previous call, as one report line.</summary>
     public static string TakeReport()
     {
         var methods = Interlocked.Exchange(ref _evaluatorMethods, 0);
         var transactions = Interlocked.Exchange(ref _transactions, 0);
         return FormattableString.Invariant(
-            $"[PERF][PLAN_BUILDS] dynamic_methods={methods} transactions={transactions} total={Volatile.Read(ref _totalMethods)}");
+            $"[PERF][PLAN_BUILDS] dynamic_methods={methods} transactions={transactions} total={Volatile.Read(ref _totalMethods)} ") +
+            FormattableString.Invariant($"descriptor_table_refusals={DescriptorTableRefusals}");
     }
 }

@@ -872,6 +872,7 @@ public sealed partial class ResourceMaterializationCache
                     UserData = current,
                     DeviceAddressRanges = snapshot.DeviceAddressRanges,
                     BindlessImages = snapshot.BindlessImages,
+                    Heaps = snapshot.Heaps,
                     Origin = snapshot.Origin,
                 };
         }
@@ -1666,6 +1667,8 @@ public sealed partial class ResourceMaterializationCache
         out ResourceMaterializationFailure failure,
         ref MaterializationTiming timing)
     {
+        if (plan.DeviceRecordCounts is { } counts && inputs.ComputeState is { } compute)
+            inputs = inputs.WithComputeState(compute with { DeviceCountProofRevision = counts.MaterializationRevision(inputs) });
         // A frontend image conversion can depend on GPU attachments or detile guest
         // texels. Unchanged descriptor bytes do not prove that its result is current.
         if (plan.NormalizeImageDescriptor is not null && plan.Info.Images.Count != 0 && plan.ImageNormalizationVersion is null)
@@ -1753,6 +1756,13 @@ public sealed partial class ResourceMaterializationCache
                     descriptorChanged = true;
                 }
 
+                // The heaps are named by words the entry may have learned to move with a base: they are read again.
+                BindlessHeapDescriptor[] heaps = [];
+                if (validated && !ResourceMaterializer.TryEvaluateHeaps(plan, inputs, out heaps))
+                {
+                    validated = false;
+                }
+
                 if (validated)
                 {
                     if (previous is not null)
@@ -1767,7 +1777,7 @@ public sealed partial class ResourceMaterializationCache
                     variant.VolatilePeriod = 0;
                     Hits++;
                     _totalHits.Increment();
-                    snapshot = HitSnapshot(variant, inputs.UserData, rebase);
+                    snapshot = WithHeaps(HitSnapshot(variant, inputs.UserData, rebase), heaps);
                     if (_statisticsDiffer)
                     {
                         snapshot = WithMipStatistics(snapshot, MipStatisticsOf(variant));
@@ -1879,7 +1889,7 @@ public sealed partial class ResourceMaterializationCache
                     _outcome = MaterializeOutcome.RebaseHit;
                     Hits++;
                     _totalHits.Increment();
-                    snapshot = rebased;
+                    snapshot = WithCurrentHeaps(plan, inputs, rebased);
                     specialization = refreshedFrom.Specialization;
                     failure = default;
                     return true;
@@ -1911,11 +1921,13 @@ public sealed partial class ResourceMaterializationCache
                         refreshed.Next = cached;
                         CountDiagnostic(Diagnostic.RefreshOlderVariant);
                     }
+                    // Learning history may still own this replaced entry, but not its variant chain.
+                    variant.Next = null;
                     Store(key, refreshed);
                     _outcome = MaterializeOutcome.TableRefresh;
                     TableRefreshes++;
                     _totalRefreshes.Increment();
-                    snapshot = HitSnapshot(refreshed, inputs.UserData, rebase);
+                    snapshot = WithCurrentHeaps(plan, inputs, HitSnapshot(refreshed, inputs.UserData, rebase));
                     specialization = refreshed.Specialization;
                     failure = default;
                     return true;
@@ -1980,6 +1992,7 @@ public sealed partial class ResourceMaterializationCache
                 ComputeState = inputs.ComputeState,
                 TablePhase = NoteTablePhase,
                 NullsOffClassLoopRecords = inputs.NullsOffClassLoopRecords,
+                IsRangeMapped = inputs.IsRangeMapped,
             };
             // Keep the caller's outputs intact if the required recorded rewalk fails.
             var walkedSnapshot = snapshot;
@@ -2020,6 +2033,7 @@ public sealed partial class ResourceMaterializationCache
                     ComputeState = inputs.ComputeState,
                     TablePhase = recorder.TablePhase,
                     NullsOffClassLoopRecords = inputs.NullsOffClassLoopRecords,
+                    IsRangeMapped = inputs.IsRangeMapped,
                 };
             }
 
@@ -2218,6 +2232,7 @@ public sealed partial class ResourceMaterializationCache
                     UserData = previous.UserData,
                     DeviceAddressRanges = previous.DeviceAddressRanges,
                     BindlessImages = previous.BindlessImages,
+                    Heaps = previous.Heaps,
                 },
                 Specialization = cached.Specialization,
                 Next = cached.Next,
@@ -2442,6 +2457,30 @@ public sealed partial class ResourceMaterializationCache
                 return false;
         return true;
     }
+
+    // The snapshot with the heaps the draw's bindless records are read from now. A cached entry holds the heaps of the
+    // draw it was built for; the V# that names a heap can move with a base the entry rebases (a table the guest allocates
+    // per frame), and the host resolves the records of the heap it is told.
+    private static ResourceSnapshot WithHeaps(ResourceSnapshot snapshot, BindlessHeapDescriptor[] heaps) =>
+        snapshot.Heaps.AsSpan().SequenceEqual(heaps)
+            ? snapshot
+            : new ResourceSnapshot
+            {
+                Buffers = snapshot.Buffers,
+                Images = snapshot.Images,
+                Samplers = snapshot.Samplers,
+                FlattenedResourceTable = snapshot.FlattenedResourceTable,
+                UserData = snapshot.UserData,
+                DeviceAddressRanges = snapshot.DeviceAddressRanges,
+                BindlessImages = snapshot.BindlessImages,
+                MipStatistics = snapshot.MipStatistics,
+                Heaps = heaps,
+                Origin = snapshot.Origin,
+            };
+
+    // A draw served from an entry reads its heap V#s again; one that cannot be read has no heap (its records read null).
+    private static ResourceSnapshot WithCurrentHeaps(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot) =>
+        WithHeaps(snapshot, ResourceMaterializer.TryEvaluateHeaps(plan, inputs, out var heaps) ? heaps : []);
 
     // The snapshot a hit on the entry gives this draw (AddressRebase.Apply). A draw that differs from
     // the entry's in user data words its plan never reads differs on every hit, and so does a rebased
@@ -2919,6 +2958,7 @@ public sealed partial class ResourceMaterializationCache
             UserData = userData,
             DeviceAddressRanges = cached.DeviceAddressRanges,
             BindlessImages = cached.BindlessImages,
+            Heaps = cached.Heaps,
         };
 
     private readonly record struct RejectionSample(int Range, ulong Address, int Length, bool Clean, int WordOffset, uint Word)
@@ -3173,6 +3213,7 @@ public sealed partial class ResourceMaterializationCache
         DeviceAddressRanges = snapshot.DeviceAddressRanges,
         BindlessImages = snapshot.BindlessImages,
         MipStatistics = statistics,
+        Heaps = snapshot.Heaps,
         Origin = snapshot.Origin,
     };
 
@@ -3492,7 +3533,8 @@ public sealed partial class ResourceMaterializationCache
             var table = _tableInputs;
             if (table is null || !ReferenceEquals(table.ReadMemory, read) || !ReferenceEquals(table.ReadCleanMemory, clean) ||
                 !ReferenceEquals(table.ReadResidentMemory, resident) || table.ReadsClean != inputs.ReadsClean ||
-                !ReferenceEquals(table.DataWritePending, inputs.DataWritePending))
+                !ReferenceEquals(table.DataWritePending, inputs.DataWritePending) ||
+                !ReferenceEquals(table.IsRangeMapped, inputs.IsRangeMapped))
             {
                 _tableInputs = table = new ResourceRuntimeInputs
                 {
@@ -3501,6 +3543,7 @@ public sealed partial class ResourceMaterializationCache
                     ReadResidentMemory = resident,
                     ReadsClean = inputs.ReadsClean,
                     DataWritePending = inputs.DataWritePending,
+                    IsRangeMapped = inputs.IsRangeMapped,
                 };
             }
 
