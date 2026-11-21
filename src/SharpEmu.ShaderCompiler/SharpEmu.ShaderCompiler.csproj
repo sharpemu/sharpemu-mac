@@ -14,6 +14,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="ZstdSharp.Port" />
     <InternalsVisibleTo Include="SharpEmu.ShaderCompiler.Tests" />
     <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
   </ItemGroup>
