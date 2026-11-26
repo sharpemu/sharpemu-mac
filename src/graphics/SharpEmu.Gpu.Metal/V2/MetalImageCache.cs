@@ -348,7 +348,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var resolved = _slots[result];
             var formatMismatch = exactFormat && resolved.Description.PixelFormat != request.Description.PixelFormat;
             var fewerResources = resolved.Description.Resources < request.Description.Resources;
-            if (formatMismatch || fewerResources || !resolved.SupportsViewType(request.View))
+            // A volume view needs a 3D image, and only a volume request makes one: an image made again from any
+            // other request is flat too, so each lookup would replace the image with another that never serves
+            // the view. A program that reads a 2D texture as a volume through a bindless heap looked it up every
+            // frame and filled device memory with copies of it (upstream 957d1dc90). The image is kept; the caller
+            // refuses or warns on the view as before (MetalCachedImage.GetOrCreateView, the bindless heap's check).
+            var wrongViewType = !resolved.SupportsViewType(request.View) &&
+                (request.View.Type != GpuImageViewType.Type3D || request.Description.IsVolume);
+            if (formatMismatch || fewerResources || wrongViewType)
             {
                 var cause = formatMismatch
                     ? MetalImageReleaseCause.FormatMismatch
