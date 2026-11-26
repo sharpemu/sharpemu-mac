@@ -195,7 +195,7 @@ internal sealed partial class MetalRenderHost
 
     private enum ReplayMiss
     {
-        Off, Unsealed, Serial, Scope, Stages, Images, Buffers, Vertex, Patch, Count,
+        Off, Unsealed, Serial, Scope, Stages, Images, Buffers, Vertex, Patch, Table, Count,
     }
 
     private static readonly string[] ReplayRefusalNames =
@@ -204,7 +204,7 @@ internal sealed partial class MetalRenderHost
         "argument_field", "traces", "memo_off", "epoch_moved", "vertex_map", "labels", "thread_limits", "not_in_place", "bindings",
     ];
 
-    private static readonly string[] ReplayMissNames = ["off", "unsealed", "serial", "scope", "stages", "images", "buffers", "vertex", "patch"];
+    private static readonly string[] ReplayMissNames = ["off", "unsealed", "serial", "scope", "stages", "images", "buffers", "vertex", "patch", "table"];
 
     private readonly long[] _drawCaptureRefusals = new long[(int)ReplayRefusal.Count];
     private readonly long[] _dispatchCaptureRefusals = new long[(int)ReplayRefusal.Count];
@@ -934,7 +934,9 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
-    public bool TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage)
+    // replaceTable (the stage differs from the sealed one only in its flattened resource table) is not replayed here:
+    // the replay rebinds the captured table, so such a dispatch misses and records in full.
+    public bool TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage, bool replaceTable)
     {
         var capture = _dispatchReplay;
         if (!DispatchReplayEnabled)
@@ -950,6 +952,11 @@ internal sealed partial class MetalRenderHost
         }
 
         capture.Sealed = false;
+        if (replaceTable)
+        {
+            return MissDispatch(ReplayMiss.Table);
+        }
+
         if (_commandBuffer == 0 || capture.Serial != _submissionSerial)
         {
             return MissDispatch(ReplayMiss.Serial);
