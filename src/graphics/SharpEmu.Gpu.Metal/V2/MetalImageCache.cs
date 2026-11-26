@@ -388,7 +388,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             request.View = request.View with { BaseLayer = (uint)viewLayer };
         }
 
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         return result;
     }
 
@@ -1559,7 +1559,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // now must see it the way the acquire left it before the wait existed.
         DrainDeferredRefreshesLocked();
         var image = _slots[imageIdentifier];
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         var traced = TracedImageAddress != 0 && image.Description.Data.Address == TracedImageAddress &&
             (_tracedAcquires++ < 64 || request.Role == ImageRole.StorageImage && _tracedAcquires < 4000);
         if (traced)
@@ -1668,7 +1668,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             if (stamp is { } taken)
             {
-                taken.Image.LastAccessTick = _collectionTick;
+                TouchImage(taken.Image);
                 taken.Image.NoteUse(serial);
             }
         }
@@ -1701,7 +1701,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             return false;
         }
 
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         FitResidentLevelsLocked(image, in request.View);
         if (image.BindingVersion != stamp.ImageVersion)
         {
@@ -1834,7 +1834,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         DrainOverlappingDeferredRefreshesLocked(image);
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         PromoteLinearView(image);
         EnsureViewUsageLocked(image, in request.View);
         WatchImage(imageIdentifier);
@@ -1915,7 +1915,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         DrainOverlappingDeferredRefreshesLocked(image);
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         PromoteLinearView(image);
         writes |= !ReadOnlyDepthPassesEnabled;
 
@@ -2567,7 +2567,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         ref var cachedInfo = ref cached.Description;
         var role = request.Role;
-        var safeToDelete = _collectionTick - Math.Min(_collectionTick, cached.LastAccessTick) > TicksBeforeRemoval;
+        var safeToDelete = !UsedThisFrameForOverlap(cached) &&
+            _collectionTick - Math.Min(_collectionTick, cached.LastAccessTick) > TicksBeforeRemoval;
         var requestedBlock = requested.BytesPerBlock * requested.Samples;
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
         var requestedExtent = requested.BlockExtent;

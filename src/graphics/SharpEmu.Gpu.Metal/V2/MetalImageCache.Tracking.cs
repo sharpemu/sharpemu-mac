@@ -656,6 +656,7 @@ internal sealed partial class MetalImageCache
     public void MarkFrame()
     {
         using var held = _lock.Hold();
+        _secondPreviousFrameStartTick = _previousFrameStartTick;
         _previousFrameStartTick = _frameStartTick;
         _frameStartTick = _collectionTick;
         _idleClock.MarkFrame(_collectionTick);

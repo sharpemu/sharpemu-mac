@@ -4,12 +4,14 @@
 using SharpEmu.Gpu.Metal.V2;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Abstractions;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using Xunit;
 
 namespace SharpEmu.Gpu.Metal.Tests;
 
-// Lookups ported from upstream's GuestImageCacheTests (ImageTypes 957d1dc90, BlockAlias cb790c35e).
+// Lookups ported from upstream's GuestImageCacheTests (ImageTypes 957d1dc90, BlockAlias cb790c35e) and its overlap rule
+// for aliases a frame uses (c30081163).
 public sealed unsafe partial class MetalImageAliasTests
 {
     // A program can read a two-dimensional texture as a volume. Its image is not 3D, and an image made from the
@@ -187,5 +189,68 @@ public sealed unsafe partial class MetalImageAliasTests
         Assert.True(texture.Description.IsBlock);
         var level0 = new Range((int)levels[0].Offset, (int)(levels[0].Offset + levels[0].Size));
         Assert.Equal(blocks[level0], ReadTexture(rig, texture)[level0]);
+    }
+
+    public enum FrameUse
+    {
+        ThisFrame,
+        EachOfTheTwoFramesBefore,
+        OnlyTheFrameBefore,
+    }
+
+    // Past the tick window, an overlapping request releases a cached image only when neither the current frame used it
+    // nor each of the two frames before did: two aliases a title uses every frame keep both registered, and a one-off
+    // image the frame before placed there is released as before.
+    [Theory]
+    [InlineData(FrameUse.ThisFrame, true, true)]
+    [InlineData(FrameUse.EachOfTheTwoFramesBefore, true, true)]
+    [InlineData(FrameUse.OnlyTheFrameBefore, true, false)]
+    [InlineData(FrameUse.EachOfTheTwoFramesBefore, false, false)]
+    public void AnOverlappingRequestKeepsAnAliasTheFramesUse(FrameUse use, bool frameAliases, bool kept)
+    {
+        if (!RequireDevice()) return;
+        using var rig = new Rig(Device.Value);
+        rig.Cache.FrameAliases = frameAliases;
+
+        // Past the tick window, the last submission of the frame completed, and then the flip.
+        void NextFrame()
+        {
+            for (var tick = 0; tick < 40; tick++)
+            {
+                rig.Cache.Collect();
+            }
+
+            rig.Cache.MarkFrame();
+        }
+
+        NextFrame();
+        var aliasId = ResourceSlotIdentifier.Invalid;
+        switch (use)
+        {
+            case FrameUse.ThisFrame:
+                aliasId = rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+                break;
+            case FrameUse.EachOfTheTwoFramesBefore:
+                aliasId = rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+                NextFrame();
+                Assert.Equal(aliasId, rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture));
+                NextFrame();
+                break;
+            case FrameUse.OnlyTheFrameBefore:
+                NextFrame();
+                aliasId = rig.Acquire(ImageAddress, LargeSide, ImageRole.Texture);
+                NextFrame();
+                break;
+        }
+
+        for (var tick = 0; tick < 40; tick++)
+        {
+            rig.Cache.Collect();
+        }
+
+        // The same bytes as a 128x32 surface: no view of the 64x64 one, and not the same surface either.
+        var other = rig.Acquire(Rig.Request(ImageAddress, LargeSide * 2, LargeSide / 2, ImageRole.Texture));
+        Assert.NotEqual(aliasId, other);
+        Assert.Equal(kept, rig.Cache.TryGetImage(aliasId, out _));
     }
 }

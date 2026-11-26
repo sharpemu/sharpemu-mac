@@ -290,7 +290,7 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         WatchImage(imageIdentifier);
         SynchronizeAliases(imageIdentifier, takesGpuOwnership: true);
         return true;
