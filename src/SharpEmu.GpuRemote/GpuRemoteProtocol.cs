@@ -14,8 +14,10 @@ public static class GpuRemoteProtocol
     /// 4: frame-boundary messages. 5: input-change and display reservations.
     /// 6: pending-writeback pages. 7: combined frame, input and writeback layout.
     /// 8: <see cref="GpuRemoteSyncOpcode.ResidencyRange"/>.
-    /// 9: <see cref="GpuSplitGamepadOutput.HapticRumble"/> and <see cref="GamepadOutputMessage.DurationMs"/>.</remarks>
-    public const uint Version = 9;
+    /// 9: <see cref="GpuSplitGamepadOutput.HapticRumble"/> and <see cref="GamepadOutputMessage.DurationMs"/>.
+    /// 10: the pad orientation in <see cref="GamepadStateWire"/>, <see cref="GpuSplitGamepadOutput.ResetOrientation"/>
+    /// and <see cref="GpuSplitGamepadOutput.TiltCorrection"/>.</remarks>
+    public const uint Version = 10;
 
 }
 

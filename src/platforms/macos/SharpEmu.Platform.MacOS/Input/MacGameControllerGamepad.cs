@@ -217,6 +217,7 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
                 "setModeOff");
         _supportsTouchpad = MacObjC.Responds(_profile, "touchpadPrimary");
         CreateHaptics();
+        var motionFed = _outputEnabled && MacMotionFeed.Attach(_controller);
         // A fresh pad starts from the configured lightbar colour and silent motors.
         lock (_outputGate)
         {
@@ -227,7 +228,7 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
 
         Console.Error.WriteLine(
             $"[PAD][INFO] GameController gamepad connected: {_name} type={_type} " +
-            $"adaptive_triggers={_supportsAdaptiveTriggers} touchpad={_supportsTouchpad}");
+            $"adaptive_triggers={_supportsAdaptiveTriggers} touchpad={_supportsTouchpad} motion_feed={motionFed}");
     }
 
     /// <summary>
@@ -281,6 +282,11 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
 
     private void CloseController()
     {
+        if (_outputEnabled)
+        {
+            MacMotionFeed.Detach(_controller);
+        }
+
         _leftHandle?.Dispose();
         _rightHandle?.Dispose();
         _leftTriggerMotor?.Dispose();
@@ -400,27 +406,18 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
             return default;
         }
 
-        var hasAcceleration = !MacObjC.Responds(motion, "hasGravityAndUserAcceleration") ||
-            MacObjC.SendBool(motion, MacObjC.Selector("hasGravityAndUserAcceleration"));
-        var hasRotation = !MacObjC.Responds(motion, "hasRotationRate") ||
-            MacObjC.SendBool(motion, MacObjC.Selector("hasRotationRate"));
+        var hasAcceleration = MacMotionFeed.TryReadAcceleration(motion, out var acceleration);
+        var hasRotation = MacMotionFeed.HasRotationRate(motion);
         if (!hasAcceleration && !hasRotation)
         {
             return default;
         }
 
-        var acceleration = default(MacVector3);
-        if (hasAcceleration)
-        {
-            // GCMotion splits the accelerometer into gravity and user
-            // acceleration, both in g; SDL_SENSOR_ACCEL reported m/s^2, so sum
-            // them and scale to keep guest-visible magnitudes identical.
-            var gravity = MacObjC.SendVector3(motion, MacObjC.Selector("gravity"));
-            var user = MacObjC.SendVector3(motion, MacObjC.Selector("userAcceleration"));
-            acceleration.X = (gravity.X + user.X) * StandardGravity;
-            acceleration.Y = (gravity.Y + user.Y) * StandardGravity;
-            acceleration.Z = (gravity.Z + user.Z) * StandardGravity;
-        }
+        // GCMotion reports acceleration in g; SDL_SENSOR_ACCEL reported m/s^2, so
+        // scale to keep guest-visible magnitudes identical.
+        acceleration.X *= StandardGravity;
+        acceleration.Y *= StandardGravity;
+        acceleration.Z *= StandardGravity;
 
         // GCMotion rotationRate is radians/second, the same unit SDL's gyro used.
         var rotation = hasRotation

@@ -108,7 +108,8 @@ internal sealed class GuestProcessSide : ISplitGuestSide
         HostWindowInput.SetKeys(keys);
         if (gamepad.Connected)
         {
-            HostWindowInput.SetGamepad(gamepadName, gamepad);
+            // The GPU process feeds the sensor readings to its own orientation and sends the result.
+            HostWindowInput.SetGamepad(gamepadName, gamepad, sourceOrientation: true);
         }
         else
         {
