@@ -99,6 +99,9 @@ internal sealed class GuestProcessSide : ISplitGuestSide
             case GpuSplitNotice.SelectedGpuName:
                 VideoOutBackendServices.SetSelectedGpuName(text);
                 break;
+            case GpuSplitNotice.TypedText:
+                SystemDialogInput.OnText(text);
+                break;
         }
     }
 

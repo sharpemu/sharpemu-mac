@@ -9,9 +9,11 @@ using SharpEmu.HLE.Host;
 using SharpEmu.Host.MacOS;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Overlay;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
+using SkiaSharp;
 using Xunit;
 
 namespace SharpEmu.GpuSplit.Tests;
@@ -442,6 +444,92 @@ public sealed unsafe class SplitInProcessTests
         finally
         {
             HostWindowInput.Disconnect();
+        }
+    }
+
+    [MacOSFact]
+    public void OverlayLayersArePaintedForTheGpuSidesSurfaceAndCrossInPieces()
+    {
+        using var split = new InProcessSplit();
+        var layer = new SolidLayer();
+        split.Session.OverlayLayerSender.Layers = () => [layer];
+        var store = split.Host.GuestOverlayLayers;
+
+        // Nothing is painted before the GPU side reports its drawable.
+        layer.Show();
+        split.Session.OverlayLayerSender.SendChanges();
+        Assert.Empty(Collect(store, 1280, 720));
+
+        split.Host.SendOverlaySurface(1280, 720);
+        Wait.Until(() => Collect(store, 1280, 720).Count == 1, "the painted layer");
+        var frame = Assert.Single(Collect(store, 1280, 720));
+        // The layer's 600x400 bounds are centred; its render used 300 rows, centred in them as the
+        // Vulkan presenter places them. 600 * 300 * 4 bytes take several ring records.
+        Assert.Equal((340, 160 + 50, 600, 300), (frame.Left, frame.Top, frame.Width, frame.Height));
+        Assert.True(frame.Pixels.Length > SplitOverlayLayerSender.PieceBytes);
+        Assert.Equal(new byte[] { 30, 20, 10, 255 }, frame.Pixels[^4..]);
+        var version = store.Version;
+
+        // An unchanged layer is not sent again; a new drawable size repaints it.
+        split.Session.OverlayLayerSender.SendChanges();
+        split.Host.SendOverlaySurface(1920, 1080);
+        Wait.Until(() => Collect(store, 1920, 1080).Count == 1, "the layer repainted for the new size");
+        Assert.Empty(Collect(store, 1280, 720));
+        Assert.Equal(version + 1, store.Version);
+
+        layer.Hide();
+        Wait.Until(() => Collect(store, 1920, 1080).Count == 0, "the hidden layer");
+
+        // Typed text goes back to the guest; the guest's dialog says when the window should type.
+        split.Host.SendTypedText("é1");
+        Wait.Until(() => split.GuestSide.Notices.Contains((GpuSplitNotice.TypedText, "é1")), "the typed text");
+        try
+        {
+            Assert.True(split.Session.Writer.Write(
+                GpuRemoteMessage.Control, new ControlMessage { Kind = (uint)GpuSplitControl.TextInput, Width = 1 }));
+            Wait.Until(() => HostWindowInput.WantsText, "the window taking text");
+            Assert.True(split.Session.Writer.Write(
+                GpuRemoteMessage.Control, new ControlMessage { Kind = (uint)GpuSplitControl.TextInput, Width = 0 }));
+            Wait.Until(() => !HostWindowInput.WantsText, "the window no longer taking text");
+        }
+        finally
+        {
+            HostWindowInput.SetPeerWantsText(false);
+        }
+    }
+
+    private static List<OverlayLayerFrame> Collect(IOverlayLayerSource source, int width, int height)
+    {
+        var frames = new List<OverlayLayerFrame>();
+        source.Collect(width, height, frames);
+        return frames;
+    }
+
+    private sealed class SolidLayer : OverlayLayer
+    {
+        private volatile bool _visible;
+
+        public override bool IsVisible => _visible;
+
+        public void Show()
+        {
+            _visible = true;
+            Invalidate();
+        }
+
+        public void Hide()
+        {
+            _visible = false;
+            Invalidate();
+        }
+
+        public override SKRectI Bounds(int surfaceWidth, int surfaceHeight) =>
+            Centered(surfaceWidth, surfaceHeight, 600, 400);
+
+        public override int Render(SKCanvas canvas, int width, int height, float unit)
+        {
+            canvas.Clear(new SKColor(10, 20, 30));
+            return 300;
         }
     }
 

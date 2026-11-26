@@ -31,7 +31,8 @@ page watches 100-2600/s (batch); submissions 30 and 200-350/s; SubmitDone/flips 
 
 All records are little-endian blittable structs (`GpuSplitMessages.cs`) on the transport rings; synchronous calls use
 `SyncCallTable` both ways: A → B (`SyncCalls`, signal-safe on the A side) and B → A (`ReverseSyncCalls`, ordinary B
-threads). Add new kinds at the end of the enums; bump `GpuRemoteProtocol.Version` (now 7).
+threads). Add new kinds at the end of the enums; bump `GpuRemoteProtocol.Version` (now 10; the history is in its
+remarks).
 
 Revision 7 combines frame-boundary messages, input-change/display reservations and
 the pending-writeback page summary. Independent revisions 4, 5 and 6 are rejected
@@ -56,8 +57,9 @@ fused program.
 | `CpuWrite` | address, size | A managed write that has landed, only for ranges the GPU-interest summary marks. B calls its stores' `MarkCpuWriteLanded` in ring order, before any later submission. |
 | `ShaderHeader` | codeAddress, headerAddress | Mirrors `AgcExports._shaderHeadersByCode` into B (lookups stay local in B). |
 | `FusedProgram` | entry, entryHeader, continuation, continuationHeader (zeros: unregistered) | Mirrors `Gen5ShaderTranslator`'s fused-program registry, which B's command streams read, keyed by B's address space. |
-| `Control` | EnsureStarted(w,h), HideSplashScreen, RequestClose, CountShaderCompilation | One-way calls of `IGuestGpuBackend`. RequestClose also requests B's session shutdown. |
+| `Control` | EnsureStarted(w,h), HideSplashScreen, RequestClose, CountShaderCompilation, TextInput(on) | One-way calls of `IGuestGpuBackend`. RequestClose also requests B's session shutdown. TextInput follows A's `SystemDialogInput.WantsText` (the IME keyboard is up): B's window then turns key presses into typed text. |
 | `HostFrame` | width, height, total, offset + piece | `Submit` of a CPU frame (splash, video), in pieces of 256 KiB written back to back. |
+| `OverlayLayer` | id, visible, revision, surface size, place, size, total, offset + piece | An in-game overlay layer (IME keyboard, save data list) A painted for B's drawable (`SplitOverlayLayerSender`), in pieces of 256 KiB written back to back; visible 0 hides it. B's presenter draws it over every frame (`RemoteOverlayLayers` is its `OverlayLayerOutput.Source`). |
 | `GamepadOutput` | rumble, trigger rumble, adaptive triggers, lightbar | To the pad, which lives with B's window. |
 | `VideoOptions` | window options | Options configured after the start. |
 | `FrameBoundary` | ticket | The ordering half of a split `SubmitDone` (`BeginSubmitDone`): B queues the boundary behind the submissions before it and keeps its wait for `WaitFrameBoundary`. A sends it under its submission gate and waits after releasing it. |
@@ -88,7 +90,8 @@ many, so they come after A's earlier records.
 | `ProtectRequest` | sequence, address, size, guest access, access, flags | B's `PageGuard` (watch arm/drop, ledger changes). A applies it at once on its inbound thread (`TryApplyDerivedProtection`, skipping memory A no longer registers) and raises the shared protection counter (below). A request that takes rights away waits in B until it is applied; one that gives them back does not (the fault path waits instead). |
 | `Interrupt` | eventId, contextId | `EndOfPipeEvents.Deliver` in A, for an interrupt raised on B's ring thread. Elsewhere interrupts are calls (below). |
 | `FlipEvent` | kind, flipRequestId | Flip steps sent from B's ring thread (a refused `FlipRequest`). Elsewhere flip steps are calls (below). |
-| `VideoOutNotice` | kind, text | CancelOutstandingFlips, PresentationWindowClosed, ReportPresentedFrame, SelectedGpuName. |
+| `VideoOutNotice` | kind, text | CancelOutstandingFlips, PresentationWindowClosed, ReportPresentedFrame, SelectedGpuName, TypedText (`SystemDialogInput.OnText` in A). |
+| `OverlaySurface` | width, height | B's drawable size, at the start and on every change: A paints the overlay layers for it. |
 | `Input` | focus, pressed keys, gamepad state and name | B polls its `HostWindowInput` every 4 ms and sends it when it changed; A applies it to its own `HostWindowInput`. |
 
 A's inbound thread applies protections itself and hands everything else to an event thread, in order, so a slow event
