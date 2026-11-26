@@ -1764,6 +1764,7 @@ internal sealed partial class MetalImageCache
                 ClearMask = RegisteredHtileClearMaskLocked(address, in description, "none"),
                 Size = description.Metadata.Range.Size,
             });
+            NoteHtileClearPendingLocked();
             return;
         }
 
@@ -1775,6 +1776,9 @@ internal sealed partial class MetalImageCache
             metadata.Kind = SurfaceMetadataKind.HTile;
             metadata.FillValue = 0xffffffff;
             metadata.FillSize = 0;
+            // Nor is the depth clear value of the last bind (MetalImageCache.SampledDepthClear.cs).
+            metadata.HasDepthClearValue = false;
+            NoteHtileClearPendingLocked();
         }
 
         if (metadata.Kind == SurfaceMetadataKind.HTile)
@@ -1840,6 +1844,11 @@ internal sealed partial class MetalImageCache
         }
 
         found.SetSliceClear(slice, isClear);
+        if (isClear && found.Kind == SurfaceMetadataKind.HTile)
+        {
+            NoteHtileClearPendingLocked();
+        }
+
         return true;
     }
 
@@ -1857,7 +1866,13 @@ internal sealed partial class MetalImageCache
             return false;
         }
 
+        var newlyClear = found.ClearMask != uint.MaxValue;
         found.ClearMask = uint.MaxValue;
+        if (newlyClear && found.Kind == SurfaceMetadataKind.HTile)
+        {
+            NoteHtileClearPendingLocked();
+        }
+
         return true;
     }
 

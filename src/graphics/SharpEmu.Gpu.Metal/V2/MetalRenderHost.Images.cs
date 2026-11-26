@@ -167,6 +167,13 @@ internal sealed partial class MetalRenderHost
             }
         }
 
+        // The value a later pending HTILE clear loads at the next bind, and what a sample before that bind reads
+        // (MetalImageCache.SampledDepthClear.cs).
+        if (resolution.HasHtile)
+        {
+            _imageCache.NoteDepthClearValue(resolution.HtileAddress, depth.Target.State.DepthClearValue);
+        }
+
         var image = _imageCache.GetImage(imageIdentifier);
         if (_dumpSnapshots)
         {
