@@ -96,7 +96,7 @@ public sealed unsafe class GpuRemoteChannelTests
         using var host = GpuRemoteChannel.Create(SharedMemoryRegion.CreateUniqueName("setest"));
         using (var raw = SharedMemoryRegion.Open(host.Name))
             ((RegionHeader*)raw.Pointer)->Version = version;
-        Assert.Equal(10u, GpuRemoteProtocol.Version);
+        Assert.Equal(11u, GpuRemoteProtocol.Version);
         Assert.Throws<InvalidDataException>(() => GpuRemoteChannel.Attach(host.Name));
     }
 
