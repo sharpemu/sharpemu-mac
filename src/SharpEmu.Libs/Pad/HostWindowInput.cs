@@ -80,6 +80,7 @@ public static class HostWindowInput
     public static void SetKeys(ReadOnlySpan<int> keys)
     {
         bool changed;
+        List<int>? pressed = null;
         lock (Gate)
         {
             var before = PressedKeys.Count;
@@ -89,6 +90,10 @@ public static class HostWindowInput
                 if (PressedKeys.Contains(key))
                 {
                     kept++;
+                }
+                else
+                {
+                    (pressed ??= []).Add(key);
                 }
             }
 
@@ -102,8 +107,49 @@ public static class HostWindowInput
             Bump();
         }
 
+        // A key that went down since the last state is a press for a system dialog, as SetKey reports it.
+        if (pressed is not null)
+        {
+            foreach (var key in pressed)
+            {
+                SystemDialogInput.OnKeyDown(key);
+            }
+        }
+
         // The guest process's pad history (PadExports.RecordInputChange) sees the split's key changes too.
         if (changed) Changed?.Invoke();
+    }
+
+    private static int _peerWantsText;
+
+    /// <summary>
+    /// Whether the window should turn key presses into typed text: a system dialog of this process
+    /// takes text, or (in the split's GPU process, which owns the window) one of the guest process's.
+    /// </summary>
+    public static bool WantsText => SystemDialogInput.WantsText || Volatile.Read(ref _peerWantsText) != 0;
+
+    /// <summary>The split's GPU process: the guest process's system dialog started or stopped taking text.</summary>
+    public static void SetPeerWantsText(bool wanted) => Volatile.Write(ref _peerWantsText, wanted ? 1 : 0);
+
+    /// <summary>Set by the split's GPU process: typed text goes to the guest process instead of this one.</summary>
+    public static Action<string>? TextForwarder { get; set; }
+
+    /// <summary>Text the user typed into the window (layout-translated characters, no control keys).</summary>
+    public static void SubmitText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        if (TextForwarder is { } forward)
+        {
+            forward(text);
+        }
+        else
+        {
+            SystemDialogInput.OnText(text);
+        }
     }
 
     public static void Connect(IHostGamepadOutput? gamepadOutput = null)

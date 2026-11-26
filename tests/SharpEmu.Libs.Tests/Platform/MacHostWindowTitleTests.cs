@@ -41,7 +41,7 @@ public sealed class MacHostWindowTitleTests
     [Theory]
     [InlineData("DualSense", HostGamepadType.DualSense)]
     [InlineData("DualShock 4", HostGamepadType.DualShock4)]
-    [InlineData("Xbox One", HostGamepadType.Generic)]
+    [InlineData("Xbox One", HostGamepadType.Xbox)]
     [InlineData("MFi", HostGamepadType.Generic)]
     [InlineData(null, HostGamepadType.Generic)]
     public void ProductCategoryMapsToTheHostPadType(string? productCategory, HostGamepadType expected)

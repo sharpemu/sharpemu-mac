@@ -247,6 +247,11 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
             return HostGamepadType.DualShock4;
         }
 
+        if (MacObjC.IsKindOf(profile, "GCXboxGamepad"))
+        {
+            return HostGamepadType.Xbox;
+        }
+
         return MapProductCategory(
             MacObjC.ReadNsString(MacObjC.Send(controller, MacObjC.Selector("productCategory"))));
     }
@@ -256,6 +261,8 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
     {
         "DualSense" => HostGamepadType.DualSense,
         "DualShock 4" => HostGamepadType.DualShock4,
+        // GCProductCategoryXboxOne ("Xbox One") also names the Series X|S pads.
+        { } category when category.StartsWith("Xbox", StringComparison.Ordinal) => HostGamepadType.Xbox,
         _ => HostGamepadType.Generic,
     };
 

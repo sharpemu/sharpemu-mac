@@ -737,11 +737,26 @@ public sealed class MacHostWindow : IMetalHostWindow
             return true;
         }
 
+        // While a system dialog takes text (the IME keyboard), a press, repeats included, also
+        // types its layout-translated characters, as SDL's text input events do for the other
+        // windows; the key itself still reaches the guest below. Command chords stay with the menu bar.
+        var typed = false;
+        if (down && !command && HostWindowInput.WantsText)
+        {
+            var text = MacKeyMap.TypedText(
+                MacObjC.ReadNsString(MacObjC.Send(nsEvent, MacObjC.Selector("characters"))));
+            if (text.Length != 0)
+            {
+                HostWindowInput.SubmitText(text);
+                typed = true;
+            }
+        }
+
         if (!MacKeyMap.TryMapVirtualKey(keyCode, out var virtualKey))
         {
             // Unmapped keys stay with AppKit so menu key equivalents and text
-            // input in system UI keep working.
-            return false;
+            // input in system UI keep working; one that typed text is taken.
+            return typed;
         }
 
         // Command chords belong to the menu bar, never to the guest.

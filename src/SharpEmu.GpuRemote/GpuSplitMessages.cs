@@ -21,6 +21,9 @@ public enum GpuSplitControl : uint
     HideSplashScreen = 2,
     RequestClose = 3,
     CountShaderCompilation = 4,
+
+    /// <summary>Width 1 while a system dialog in A takes typed text, 0 when it stops (<c>SystemDialogInput.WantsText</c>).</summary>
+    TextInput = 5,
 }
 
 /// <summary>The steps of a flip that B reports to A's video-out state (<see cref="GpuRemoteMessage.FlipEvent"/>).</summary>
@@ -57,6 +60,9 @@ public enum GpuSplitNotice : uint
 
     /// <summary>The text is the GPU's name, for the window title (<c>SetSelectedGpuName</c>).</summary>
     SelectedGpuName = 4,
+
+    /// <summary>The text is what the user typed into the window (<c>SystemDialogInput.OnText</c>).</summary>
+    TypedText = 5,
 }
 
 /// <summary>What a <see cref="GpuRemoteSyncOpcode.Query"/> asks.</summary>
@@ -243,6 +249,38 @@ public struct HostFrameMessage
 
     /// <summary>Where this record's piece goes in the frame.</summary>
     public uint Offset;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct OverlayLayerMessage
+{
+    /// <summary>The layer's index in A's overlay layer registry (its draw order).</summary>
+    public uint Id;
+
+    /// <summary>0: the layer is hidden and no pixels follow; 1: the pixels of a painted layer follow.</summary>
+    public uint Visible;
+    public long Revision;
+
+    /// <summary>The surface the layer was painted for (an <see cref="OverlaySurfaceMessage"/> of B's).</summary>
+    public uint SurfaceWidth;
+    public uint SurfaceHeight;
+    public int Left;
+    public int Top;
+    public uint Width;
+    public uint Height;
+
+    /// <summary>Bytes of the whole layer (Width * Height * 4); B takes it once every piece arrived.</summary>
+    public uint TotalBytes;
+
+    /// <summary>Where this record's piece goes in the layer.</summary>
+    public uint Offset;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct OverlaySurfaceMessage
+{
+    public uint Width;
+    public uint Height;
 }
 
 [StructLayout(LayoutKind.Sequential)]

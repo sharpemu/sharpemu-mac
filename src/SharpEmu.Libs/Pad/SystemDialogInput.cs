@@ -20,11 +20,22 @@ public static class SystemDialogInput
 
     public static bool WantsText => Volatile.Read(ref _wantsText) != 0;
 
+    /// <summary>Raised when <see cref="WantsText"/> changes; the split's guest process tells the window's process.</summary>
+    public static event Action<bool>? WantsTextChanged;
+
+    private static void SetWantsText(bool wanted)
+    {
+        if (Interlocked.Exchange(ref _wantsText, wanted ? 1 : 0) != (wanted ? 1 : 0))
+        {
+            WantsTextChanged?.Invoke(wanted);
+        }
+    }
+
     internal static void Capture(bool wantsText = false)
     {
         Keys.Clear();
         Texts.Clear();
-        Volatile.Write(ref _wantsText, wantsText ? 1 : 0);
+        SetWantsText(wantsText);
         Volatile.Write(ref _capturing, 1);
     }
 
@@ -71,7 +82,7 @@ public static class SystemDialogInput
     {
         Volatile.Write(ref _residualButtons, PadExports.ReadSystemDialogState().Buttons);
         PadExports.DiscardUnreadStates();
-        Volatile.Write(ref _wantsText, 0);
+        SetWantsText(false);
         Texts.Clear();
         Volatile.Write(ref _capturing, 0);
     }

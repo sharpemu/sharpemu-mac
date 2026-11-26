@@ -14,8 +14,10 @@ public static class GpuRemoteProtocol
     /// 4: frame-boundary messages. 5: input-change and display reservations.
     /// 6: pending-writeback pages. 7: combined frame, input and writeback layout.
     /// 8: <see cref="GpuRemoteSyncOpcode.ResidencyRange"/>.
-    /// 9: <see cref="GpuSplitGamepadOutput.HapticRumble"/> and <see cref="GamepadOutputMessage.DurationMs"/>.</remarks>
-    public const uint Version = 9;
+    /// 9: <see cref="GpuSplitGamepadOutput.HapticRumble"/> and <see cref="GamepadOutputMessage.DurationMs"/>.
+    /// 10: overlay layers (<see cref="GpuRemoteMessage.OverlayLayer"/>, <see cref="GpuRemoteMessage.OverlaySurface"/>)
+    /// and typed text (<see cref="GpuSplitControl.TextInput"/>, <see cref="GpuSplitNotice.TypedText"/>).</remarks>
+    public const uint Version = 10;
 
 }
 
@@ -101,6 +103,12 @@ public enum GpuRemoteMessage : uint
 
     /// <summary>A → B: <see cref="FrameBoundaryMessage"/>, the ordering half of a split <c>SubmitDone</c>.</summary>
     FrameBoundary = 26,
+
+    /// <summary>A → B: <see cref="OverlayLayerMessage"/>, then one piece of an overlay layer's BGRA pixels (none when hidden).</summary>
+    OverlayLayer = 27,
+
+    /// <summary>B → A: <see cref="OverlaySurfaceMessage"/>, the drawable size the overlay layers are painted for.</summary>
+    OverlaySurface = 28,
 }
 
 /// <summary>Opcodes of the A → B synchronous call table.</summary>

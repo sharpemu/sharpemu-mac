@@ -1495,6 +1495,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   VerticalAlignment="Center" />
                       </local:SettingRow>
 
+                      <local:SettingRow x:Name="DefaultProfileRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.DefaultProfile.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.DefaultProfile.Desc], Source={x:Static local:Localization.Instance}}">
+                        <TextBox x:Name="DefaultProfileBox"
+                                 Classes="optionValue"
+                                 MaxLength="16"
+                                 VerticalAlignment="Center" />
+                      </local:SettingRow>
+
                       <local:SettingRow x:Name="PortableDataRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.PortableData.Label], Source={x:Static local:Localization.Instance}}"
