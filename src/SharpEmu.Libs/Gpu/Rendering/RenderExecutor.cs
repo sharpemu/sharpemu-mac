@@ -656,7 +656,9 @@ public sealed partial class RenderExecutor
             drawn.BaseVertex + (drawn.BaseVertexInRegister ? ResolveVertexOffset(0, vertexInput) : 0),
             0,
             drawn.FirstInstance + (drawn.FirstInstanceInRegister ? ResolveInstanceOffset(vertexInput) : 0),
-            drawn.IndirectArgumentsAddress);
+            drawn.IndirectArgumentsAddress,
+            // As DrawIndexedCore bounds it (the fork's IndirectIndexLimit); a repeatable draw expands no indices.
+            drawn.UnboundedIndexBuffer ? uint.MaxValue : drawn.IndexCount);
         record.PacketAddress = drawn.PacketAddress;
         Record(record);
         return true;
