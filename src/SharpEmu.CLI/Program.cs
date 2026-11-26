@@ -1585,6 +1585,15 @@ internal static partial class Program
         {
             Environment.SetEnvironmentVariable(name, value);
         }
+        // The launcher's own settings (keyboard default text, overlay theme and language), under
+        // anything the launcher, a script or the game's custom variables already set.
+        foreach (var (name, value) in SharpEmu.GUI.EmulatorLaunchVariables.Build(launcher))
+        {
+            if (Environment.GetEnvironmentVariable(name) is null)
+            {
+                Environment.SetEnvironmentVariable(name, value);
+            }
+        }
         if (!HasOption(args, "--log-level") && SharpEmuLog.TryParseLevel(
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_LEVEL") ?? configured.Settings.LogLevel, out var configuredLogLevel))
         {

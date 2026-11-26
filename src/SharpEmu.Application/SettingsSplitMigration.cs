@@ -140,7 +140,8 @@ public static class SettingsSplitMigration
         if (legacy.OverlayMode == "TitleBar") legacy.OverlayMode = null;
         legacy.DisplayIndex = legacy.DisplayIndex is { } displayIndex ? Math.Max(0, displayIndex) : null;
         legacy.RefreshRate = legacy.RefreshRate is { } refreshRate ? Math.Clamp(refreshRate, 0, 1000) : null;
-        // Nothing reads SHARPEMU_DEFAULT_PROFILE any more; older files may still carry it.
+        // SHARPEMU_DEFAULT_PROFILE is the launcher's DefaultProfile setting now, set at every launch;
+        // an old per-game switch for it must not override that.
         legacy.EnvironmentToggles?.RemoveAll(entry => string.Equals(
             EnvironmentOverrides.Name(entry),
             "SHARPEMU_DEFAULT_PROFILE",

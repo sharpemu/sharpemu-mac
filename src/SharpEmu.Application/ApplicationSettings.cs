@@ -45,6 +45,9 @@ public sealed class ApplicationSettings
 
     public string GnmTrophyKey { get; set; } = string.Empty;
 
+    /// <summary>The on-screen keyboard's default text (a game asking for a name); machine-wide.</summary>
+    public string DefaultProfile { get; set; } = "Sharp";
+
     public string LibraryLayout { get; set; } = "Carousel";
 
     /// <summary>Cover size in the grid view, as a multiple of the size that fits the window.</summary>
@@ -133,6 +136,7 @@ public sealed class ApplicationSettings
         settings.GameFolders = FilterNullOrEmpty(settings.GameFolders);
         settings.ExcludedGames = FilterNullOrEmpty(settings.ExcludedGames);
         settings.Language ??= "en";
+        settings.DefaultProfile = NormalizeDefaultProfile(settings.DefaultProfile);
         settings.GnmTrophyKey = TryNormalizeTrophyKey(settings.GnmTrophyKey, out var trophyKey)
             ? trophyKey : string.Empty;
         settings.DiscordClientId ??= "1525606762248540221";
@@ -205,6 +209,12 @@ public sealed class ApplicationSettings
     {
         normalized = key?.Trim().ToUpperInvariant() ?? string.Empty;
         return normalized.Length == 0 || normalized.Length == 32 && normalized.All(char.IsAsciiHexDigit);
+    }
+
+    public static string NormalizeDefaultProfile(string? value)
+    {
+        var trimmed = value?.Trim();
+        return string.IsNullOrEmpty(trimmed) ? "Sharp" : trimmed;
     }
 
     internal static string NormalizeChoice(string? value, string fallback, params string[] choices) =>
