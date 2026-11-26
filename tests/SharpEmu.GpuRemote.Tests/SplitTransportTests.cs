@@ -216,7 +216,7 @@ public sealed unsafe class SplitTransportTests
         Assert.Equal(32, sizeof(SubmitCommandStreamMessage));
         Assert.Equal(40, sizeof(FlipRequestMessage));
         Assert.Equal(40, sizeof(ProtectRequestMessage));
-        Assert.Equal(40, sizeof(GamepadOutputMessage));
+        Assert.Equal(44, sizeof(GamepadOutputMessage));
         Assert.Equal(48, sizeof(DisplayBufferResponse));
         Assert.Equal(64, sizeof(ReserveFlipResponse));
         Assert.Equal(32, sizeof(SpanRequest));

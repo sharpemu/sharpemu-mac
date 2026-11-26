@@ -13,8 +13,9 @@ public static class GpuRemoteProtocol
     /// 3: <see cref="GpuRemoteMessage.TessellationRings"/>.
     /// 4: frame-boundary messages. 5: input-change and display reservations.
     /// 6: pending-writeback pages. 7: combined frame, input and writeback layout.
-    /// 8: <see cref="GpuRemoteSyncOpcode.ResidencyRange"/>.</remarks>
-    public const uint Version = 8;
+    /// 8: <see cref="GpuRemoteSyncOpcode.ResidencyRange"/>.
+    /// 9: <see cref="GpuSplitGamepadOutput.HapticRumble"/> and <see cref="GamepadOutputMessage.DurationMs"/>.</remarks>
+    public const uint Version = 9;
 
 }
 
