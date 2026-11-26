@@ -17,9 +17,18 @@ namespace SharpEmu.Libs.Pad;
 /// itself never reaches the speakers.
 /// </summary>
 /// <remarks>
-/// scePadSetVibration keeps working alongside: the host motors run at the
-/// stronger of the compat vibration and the haptic envelope, so a title that
-/// clears the compat vibration every frame does not cut its haptics.
+/// scePadSetVibration keeps working alongside: it sets the host pad's steady
+/// motors (<see cref="IHostInput.SetRumble"/>), while the haptic envelope goes
+/// out as timed rumble (<see cref="IHostInput.SetHapticRumble"/>) that the host
+/// layers over them at the stronger of the two, so a title that clears the
+/// compat vibration every frame does not cut its haptics. The timed level
+/// lapses <see cref="HapticDurationMs"/> after the last refresh, so a port the
+/// guest stops feeding (a stall, a hang) does not leave the motors running.
+/// Updates are rate-limited as upstream's HapticRumble was: a stop and a start
+/// go at once, a change of at least <see cref="HapticChangeThreshold"/> after
+/// <see cref="HapticMinimumIntervalMs"/>, and a running level is refreshed every
+/// <see cref="HapticRefreshIntervalMs"/>. <c>SHARPEMU_HAPTIC_RUMBLE_GAIN</c>
+/// scales the envelope (default 1; 0 turns audio-driven rumble off).
 /// </remarks>
 public static class PadHaptics
 {
@@ -27,14 +36,19 @@ public static class PadHaptics
     // so dither and DC-free noise floors do not keep the motors spinning.
     internal const double SilenceRms = 0.01;
 
+    internal const uint HapticDurationMs = 250;
+    internal const long HapticRefreshIntervalMs = 100;
+    internal const long HapticMinimumIntervalMs = 16;
+    internal const int HapticChangeThreshold = 6;
+
+    private static readonly float Gain = ReadGain();
+
     private static readonly object Gate = new();
-    private static byte _vibrationLarge;
-    private static byte _vibrationSmall;
-    private static byte _hapticLeft;
-    private static byte _hapticRight;
-    private static byte _appliedLarge;
-    private static byte _appliedSmall;
+    private static byte _sentHapticLeft;
+    private static byte _sentHapticRight;
+    private static long _sentHapticAt;
     private static IHostInput? _hostInputForTests;
+    private static Func<long>? _clockForTests;
 
     /// <summary>
     /// Reduces one chunk of interleaved haptic PCM to an intensity per
@@ -103,15 +117,29 @@ public static class PadHaptics
 
     /// <summary>
     /// Sets the actuator intensities derived from the latest haptic chunk.
-    /// The host motors are only updated when the combined level changes.
+    /// The host pad gets them as timed rumble, rate-limited (see the remarks).
     /// </summary>
     public static void SubmitAudioHaptics(byte left, byte right)
     {
+        if (Gain <= 0f)
+        {
+            return;
+        }
+
+        left = Scale(left);
+        right = Scale(right);
         lock (Gate)
         {
-            _hapticLeft = left;
-            _hapticRight = right;
-            ApplyLocked(force: false);
+            var now = (Volatile.Read(ref _clockForTests) ?? ClockMilliseconds)();
+            if (!ShouldSendHaptics(left, right, now - _sentHapticAt))
+            {
+                return;
+            }
+
+            _sentHapticLeft = left;
+            _sentHapticRight = right;
+            _sentHapticAt = now;
+            Input.SetHapticRumble(left, right, HapticDurationMs);
         }
     }
 
@@ -123,25 +151,47 @@ public static class PadHaptics
     {
         lock (Gate)
         {
-            _vibrationLarge = largeMotor;
-            _vibrationSmall = smallMotor;
-            ApplyLocked(force: true);
+            Input.SetRumble(largeMotor, smallMotor);
         }
     }
 
-    private static void ApplyLocked(bool force)
+    private static IHostInput Input => Volatile.Read(ref _hostInputForTests) ?? HostPlatform.Current.Input;
+
+    private static long ClockMilliseconds() => Environment.TickCount64;
+
+    // Caller holds Gate.
+    private static bool ShouldSendHaptics(byte left, byte right, long elapsedMs)
     {
-        var large = Math.Max(_vibrationLarge, _hapticLeft);
-        var small = Math.Max(_vibrationSmall, _hapticRight);
-        if (!force && large == _appliedLarge && small == _appliedSmall)
+        var wasRunning = (_sentHapticLeft | _sentHapticRight) != 0;
+        if ((left | right) == 0)
         {
-            return;
+            return wasRunning;
         }
 
-        _appliedLarge = large;
-        _appliedSmall = small;
-        (Volatile.Read(ref _hostInputForTests) ?? HostPlatform.Current.Input).SetRumble(large, small);
+        if (!wasRunning || elapsedMs >= HapticRefreshIntervalMs)
+        {
+            return true;
+        }
+
+        return elapsedMs >= HapticMinimumIntervalMs &&
+               (Math.Abs(left - _sentHapticLeft) >= HapticChangeThreshold ||
+                Math.Abs(right - _sentHapticRight) >= HapticChangeThreshold);
     }
+
+    private static byte Scale(byte level) =>
+        Gain == 1f ? level : (byte)Math.Clamp(MathF.Round(level * Gain), 0f, 255f);
+
+    private static float ReadGain()
+    {
+        var value = Environment.GetEnvironmentVariable("SHARPEMU_HAPTIC_RUMBLE_GAIN");
+        return float.TryParse(value, System.Globalization.NumberStyles.Float,
+                   System.Globalization.CultureInfo.InvariantCulture, out var gain) && float.IsFinite(gain)
+            ? Math.Max(0f, gain)
+            : 1f;
+    }
+
+    internal static void SetClockForTests(Func<long>? clock) =>
+        Volatile.Write(ref _clockForTests, clock);
 
     internal static void SetHostInputForTests(IHostInput? input) =>
         Volatile.Write(ref _hostInputForTests, input);
@@ -150,11 +200,11 @@ public static class PadHaptics
     {
         lock (Gate)
         {
-            _vibrationLarge = _vibrationSmall = 0;
-            _hapticLeft = _hapticRight = 0;
-            _appliedLarge = _appliedSmall = 0;
+            _sentHapticLeft = _sentHapticRight = 0;
+            _sentHapticAt = 0;
         }
 
         Volatile.Write(ref _hostInputForTests, null);
+        Volatile.Write(ref _clockForTests, null);
     }
 }
