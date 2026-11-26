@@ -17,7 +17,11 @@ public abstract class OverlayLayer
 
     public abstract int Render(SKCanvas canvas, int width, int height, float unit);
 
-    protected void Invalidate() => Interlocked.Increment(ref _revision);
+    protected void Invalidate()
+    {
+        Interlocked.Increment(ref _revision);
+        OverlayLayers.NoteChanged();
+    }
 
     protected static SKRectI Centered(int surfaceWidth, int surfaceHeight, int width, int height) =>
         SKRectI.Create((surfaceWidth - width) / 2, (surfaceHeight - height) / 2, width, height);
@@ -27,6 +31,13 @@ public static class OverlayLayers
 {
     private static readonly object Gate = new();
     private static OverlayLayer[] _layers = [];
+    private static long _version;
+
+    /// <summary>Moves whenever a layer is registered or changes (shown, hidden or redrawn).</summary>
+    public static long Version => Interlocked.Read(ref _version);
+
+    /// <summary>Raised after <see cref="Version"/> moved, on the thread that changed the layer.</summary>
+    public static event Action? Changed;
 
     public static T Register<T>(T layer) where T : OverlayLayer
     {
@@ -35,8 +46,15 @@ public static class OverlayLayers
             _layers = [.. _layers, layer];
         }
 
+        NoteChanged();
         return layer;
     }
 
     public static OverlayLayer[] Snapshot() => Volatile.Read(ref _layers);
+
+    internal static void NoteChanged()
+    {
+        Interlocked.Increment(ref _version);
+        Changed?.Invoke();
+    }
 }
