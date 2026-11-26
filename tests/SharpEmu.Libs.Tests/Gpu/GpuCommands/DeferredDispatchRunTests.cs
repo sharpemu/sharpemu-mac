@@ -99,6 +99,9 @@ public sealed class DeferredDispatchRunTests
         var runner = new StreamRunner();
         var runs = new FakeRuns(runner.Interpreter) { RewindTo = 1 };
         runner.Host.DispatchRuns = runs;
+        // The fork marks a dispatch reached through user data alone as one that may overlap the one before it (bit 31 of
+        // the initiator, DispatchOverlap); this test is about the rollback, so the initiators are compared unmarked.
+        runner.Interpreter.TrackDispatchOverlap = false;
 
         runner.Run(
             UserData(0xA), Dispatch(1),

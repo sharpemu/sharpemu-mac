@@ -139,9 +139,9 @@ public sealed class AgcPackedRegisterPacketTests
 
         Assert.Equal(PacketAddress, EmitShRegisters(memory, entries.Length));
 
-        // One read of the entries; each of the two packets (registers 0x10-0x12, then 0x20) reads the buffer state, moves
-        // the cursor and is written.
-        Assert.Equal((3, 4, 2), (memory.Reads, memory.Writes, memory.CursorWrites));
+        // One read of the entries. The fork coalesces the call's runs (AgcExports.CoalesceShRegisterRuns, default on): both
+        // packets (registers 0x10-0x12, then 0x20) take one buffer-state read, one write and one cursor move together.
+        Assert.Equal((2, 2, 1), (memory.Reads, memory.Writes, memory.CursorWrites));
         Assert.Equal(PacketAddress + 32, ReadUInt64(memory.Inner, CursorAddress));
 
         memory.ResetCounts();

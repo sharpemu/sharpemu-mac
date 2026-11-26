@@ -42,13 +42,18 @@ public sealed class GnmEndOfPipeTests
         Assert.Equal(0xFFFF_FFFF_5566_7788UL, runner.Host.ReadQword(Label));
     }
 
+    // Upstream keeps a list of accepted AGC event/action/index combinations and rejects this one. The fork decodes each
+    // EOP field on its own (GpuCommandInterpreter.WriteEndOfPipe): a timestamp event with a write-back cache action
+    // lands the low dword as a write-back, on AGC as on GNM.
     [Fact]
-    public void AgcEndOfPipeLowDword_WriteBackTimestampStaysRejected()
+    public void AgcEndOfPipeLowDword_WriteBackTimestampLandsTheLowDword()
     {
         var runner = new StreamRunner();
+        runner.Host.WriteQword(Label, 0xFFFF_FFFF_FFFF_FFFF);
 
-        var fatal = runner.RunExpectingFatal(EventWriteEop(0x04, 5, 0x38, 1, 0, Label, 0x1122_3344_5566_7788));
+        runner.Run(EventWriteEop(0x04, 5, 0x38, 1, 0, Label, 0x1122_3344_5566_7788));
 
-        Assert.Contains("type=0x04", fatal.Message);
+        Assert.Equal(EndOfPipeWriteKind.WriteBack32, Assert.Single(runner.Host.EndOfPipeWrites).Kind);
+        Assert.Equal(0xFFFF_FFFF_5566_7788UL, runner.Host.ReadQword(Label));
     }
 }

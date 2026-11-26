@@ -405,12 +405,19 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
 
         Enqueue(host, queue, Graphics, 2, ReleaseMemoryInterrupt(Label, 1));
-        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
 
-        // The GPU has not written the label, yet the compute head goes on.
-        Assert.Equal(0u, host.ReadDword(Label));
-        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        // The release first lets the older compute submission run (upstream's release order, YieldToOlderWork); that head
+        // is still blocked on the label, so the release then lands as a recorded label. The GPU has not written the label,
+        // yet the compute head goes on.
+        var results = new List<SliceResult>();
+        while (host.ReadDword(Label + 8) != 7u && results.Count < 8)
+        {
+            results.Add(queue.ProcessOne());
+        }
+
         Assert.Equal(7u, host.ReadDword(Label + 8));
+        Assert.Equal(0u, host.ReadDword(Label));
+        Assert.Equal(SliceResult.Completed, results[^1]);
 
         // Once that tick completes the label is memory's business again: the slot still
         // holds 0, so a later wait on it sleeps instead of seeing the old value.
