@@ -31,6 +31,10 @@ internal sealed unsafe class MacAudioRingBuffer : IDisposable
     private long _written;
     private long _read;
 
+    // Producer-set read position the consumer skips to before its next read (DiscardOldestBeyond): the oldest frames
+    // are dropped on the consumer's side, so the ring stays single-producer, single-consumer.
+    private long _discardTo;
+
     public MacAudioRingBuffer(int channels, int capacityFrames)
     {
         if (channels < 1)
@@ -62,12 +66,27 @@ internal sealed unsafe class MacAudioRingBuffer : IDisposable
             // Read the consumer's counter first: a concurrent advance of either
             // counter can then only make the result look deeper than it is,
             // which errs towards the guest waiting rather than overrunning.
-            var read = Volatile.Read(ref _read);
+            var read = Math.Max(Volatile.Read(ref _read), Volatile.Read(ref _discardTo));
             return Math.Max(0, Volatile.Read(ref _written) - read);
         }
     }
 
-    public long FreeFrames => _capacityFrames - QueuedFrames;
+    // Space the producer can write: frames still awaiting a discard occupy the ring until the consumer skips them.
+    public long FreeFrames => _capacityFrames - Math.Max(0, Volatile.Read(ref _written) - Volatile.Read(ref _read));
+
+    /// <summary>
+    /// Producer side: drops all but the newest <paramref name="keepFrames"/> queued frames. The consumer skips them on
+    /// its next read; <see cref="QueuedFrames"/> no longer counts them from now on. For a stream the guest is not
+    /// paced by, so a device stall leaves a gap near one block rather than a growing delay.
+    /// </summary>
+    public void DiscardOldestBeyond(long keepFrames)
+    {
+        var target = Volatile.Read(ref _written) - Math.Max(0, keepFrames);
+        if (target > Volatile.Read(ref _discardTo))
+        {
+            Volatile.Write(ref _discardTo, target);
+        }
+    }
 
     /// <summary>
     /// Producer side. Copies whole frames and returns how many fit; a short
@@ -117,10 +136,24 @@ internal sealed unsafe class MacAudioRingBuffer : IDisposable
         }
 
         var read = Volatile.Read(ref _read);
-        var available = Math.Max(0, Volatile.Read(ref _written) - read);
+        var written = Volatile.Read(ref _written);
+        var discardTo = Volatile.Read(ref _discardTo);
+        var skipped = false;
+        if (discardTo > read)
+        {
+            read = Math.Min(discardTo, written);
+            skipped = true;
+        }
+
+        var available = Math.Max(0, written - read);
         var count = (int)Math.Min(frames, available);
         if (count <= 0)
         {
+            if (skipped)
+            {
+                Volatile.Write(ref _read, read);
+            }
+
             return 0;
         }
 

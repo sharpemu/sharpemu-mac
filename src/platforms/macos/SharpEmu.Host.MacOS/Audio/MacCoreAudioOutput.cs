@@ -76,6 +76,120 @@ internal sealed class MacCoreAudioOutput : IHostPcmAudioOutput
             : OpenPcmStream(sampleRate, channels, format);
 
     /// <summary>
+    /// SHARPEMU_DUALSENSE_AUDIO=0 keeps the controller-less paths (the pad
+    /// speaker on the speakers, vibration as rumble) even with a DualSense.
+    /// </summary>
+    internal static readonly bool ControllerAudioEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_DUALSENSE_AUDIO") != "0";
+
+    /// <summary>
+    /// The DualSense's own output, as upstream's SDL host opens it: on USB its
+    /// four-channel CoreAudio device (speaker pair, then the two actuators),
+    /// on Bluetooth the audio output report with the actuator samples and the
+    /// speaker's Opus packets. Exactly one pad on the transport and, on USB,
+    /// exactly one matching device, or null: nothing ties a GameController pad
+    /// to its audio device, so anything else gives no stream rather than a
+    /// guess, and the callers keep their controller-less paths. While the
+    /// stream is open the pad's speaker plays the front pair (restored on
+    /// close). The stream drops its oldest audio past the cap instead of
+    /// blocking and does not report the guest audio clock.
+    /// </summary>
+    public IHostAudioStream? TryOpenControllerStream(uint sampleRate, int maxQueuedBytes, out int channels, bool routeSpeaker = true)
+    {
+        channels = 0;
+        if (!ControllerAudioEnabled)
+        {
+            return null;
+        }
+
+        IHostAudioStream stream;
+        string outputName;
+        MacDualSenseHid? usbPad = null;
+        MacAudioDeviceInfo device;
+        if (MacCoreAudioDevices.TrySelectControllerDevice(MacCoreAudioDevices.ListOutputDevices(), out device))
+        {
+            // The device exists only while the pad is wired. Its HID interface carries the speaker routing; without
+            // it (another process holds the pad exclusively) the audio still plays, unrouted.
+            usbPad = MacDualSenseHid.TryOpenSingle(MacDualSenseTransport.Usb);
+            try
+            {
+                stream = new MacCoreAudioStream(
+                    sampleRate,
+                    MacCoreAudioDevices.ControllerChannels,
+                    HostPcmFormat.Float32,
+                    maxQueuedBytes > 0
+                        ? maxQueuedBytes
+                        : LatencyCapBytes(sampleRate, MacCoreAudioDevices.ControllerChannels, HostPcmFormat.Float32),
+                    new MacAudioStreamTarget(device.Id, ReportsClock: false, DropOldest: true, RawChannels: true));
+            }
+            catch
+            {
+                usbPad?.Dispose();
+                throw;
+            }
+
+            outputName = $"\"{device.Name}\"";
+        }
+        else
+        {
+            device = default;
+            if (MacDualSenseBluetooth.TryOpen(sampleRate, maxQueuedBytes, routeSpeaker) is not { } bluetooth)
+            {
+                return null;
+            }
+
+            stream = bluetooth;
+            outputName = "DualSense over Bluetooth";
+        }
+
+        var route = new ControllerRoute(device.Id != 0, usbPad);
+        var routed = routeSpeaker && route.Send(MacDualSenseReports.AudioRoute(speaker: true));
+        channels = MacCoreAudioDevices.ControllerChannels;
+        Console.Error.WriteLine(
+            $"[LOADER][INFO] Controller audio: {outputName} (speaker {(routed ? "routed" : "not routed")})");
+        return new ControllerAudioStream(stream, route, routed);
+    }
+
+    /// <summary>
+    /// Where the routing effects go: the wired pad's HID interface (none when it would not open), or the Bluetooth
+    /// link's.
+    /// </summary>
+    private sealed class ControllerRoute(bool wired, MacDualSenseHid? usbPad) : IDisposable
+    {
+        public bool Send(ReadOnlySpan<byte> effects) =>
+            wired ? usbPad?.TrySendEffects(effects) == true : MacDualSenseBluetooth.TrySendEffects(effects);
+
+        public void Dispose() => usbPad?.Dispose();
+    }
+
+    private sealed class ControllerAudioStream(IHostAudioStream inner, ControllerRoute route, bool speakerRouted)
+        : IHostAudioStream
+    {
+        private int _disposed;
+
+        public int QueuedMilliseconds => inner.QueuedMilliseconds;
+
+        public bool Submit(ReadOnlySpan<byte> pcm) => inner.Submit(pcm);
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            // Restore the route while the Bluetooth link is still open.
+            if (speakerRouted)
+            {
+                route.Send(MacDualSenseReports.AudioRoute(speaker: false));
+            }
+
+            inner.Dispose();
+            route.Dispose();
+        }
+    }
+
+    /// <summary>
     /// Queue cap in guest bytes for <see cref="TargetQueuedMilliseconds"/> of
     /// audio in the guest's own format.
     /// </summary>
