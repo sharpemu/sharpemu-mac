@@ -154,6 +154,10 @@ public sealed class HostPackageBoundaryTests
         "libc",
         "libSystem.B.dylib",
         "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox",
+        // The DualSense's own audio: its CoreAudio device (USB) and its HID output reports (Bluetooth).
+        "/System/Library/Frameworks/CoreAudio.framework/CoreAudio",
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+        "/System/Library/Frameworks/IOKit.framework/IOKit",
     })]
     [InlineData(Linux, new[] { "libc", "libasound.so.2" })]
     [InlineData(Windows, new[] { "kernel32.dll", "kernelbase.dll", "winmm.dll" })]
