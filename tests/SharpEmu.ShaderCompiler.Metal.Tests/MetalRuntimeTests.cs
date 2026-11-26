@@ -552,6 +552,25 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
         Assert.False(Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Loop).PersistentThreads);
     }
 
+    // A depth prepass and the pass that tests its depth for equality compute one position in two programs; a compiler that
+    // fuses a multiply with an add in only one of them moves a vertex by an ulp and the second pass drops the triangle. A
+    // program before rasterization keeps each operation's rounding even when pixel and compute programs may fuse
+    // (SHARPEMU_MSL_CONTRACT=1); the twin of upstream's Gen5FloatContractionTests (cb790c35e).
+    [Fact]
+    public void ProgramsBeforeRasterizationKeepEachFloatRounding()
+    {
+        const string KeepRounding = "#pragma clang fp contract(off)";
+        foreach (var contract in new[] { false, true })
+        {
+            var options = Gen5MslCodegenOptions.FromEnvironment with { ContractPixelCompute = contract };
+            Assert.Contains(KeepRounding, Gen5ComputeFixtures.CompileVertexOrThrow(options: options).Source, StringComparison.Ordinal);
+            var pixel = Gen5ComputeFixtures.CompilePixelOrThrow(options: options).Source;
+            var compute = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.MadVersusFma, options: options).Source;
+            Assert.Equal(!contract, pixel.Contains(KeepRounding, StringComparison.Ordinal));
+            Assert.Equal(!contract, compute.Contains(KeepRounding, StringComparison.Ordinal));
+        }
+    }
+
     // V_MAD_F32 rounds its product like a separate multiply and add; V_FMA_F32 does not.
     [Fact]
     public void LegacyMadRoundsTheProductAndFmaDoesNot()
