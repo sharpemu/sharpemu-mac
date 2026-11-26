@@ -22,17 +22,20 @@ public sealed partial class GpuCommandInterpreter
     private const uint DrawIndirectArgumentsSize = 16;
     private const uint DrawIndexedIndirectArgumentsSize = 20;
 
-    private int TryDrawIndexedRun(in PacketContext packet, PacketWindow window)
+    private const int MaxIndexedRunDraws = 32;
+
+    // words: the dwords from this packet on (RunWords); fewer than two packets' worth looks for no run.
+    private int TryDrawIndexedRun(in PacketContext packet, ReadOnlySpan<uint> words)
     {
-        if (!_host.ResolvesIndirectDrawOnGpu || packet.Remaining < 10 || !window.Holds(packet.PacketAddress, 10) ||
+        // A draw that must execute (predication set, an occlusion query open: DrawsMustExecute) takes the packet's own
+        // handler, which passes MustExecute on; the run's arguments carry none.
+        if (!_host.ResolvesIndirectDrawOnGpu || DrawsMustExecute || words.Length < 10 ||
             IndexTypeAndSize > 1 || IndexBaseAddress == 0 || DrawIndirectArgumentsBase == 0 ||
             IndexedDrawTrace.Enabled || Rendering.RenderTrace.Enabled || Rendering.ScissorTrace.Instance is { Active: true } ||
             !Rendering.RenderExecutor.RunsPlainVertexProgram(TypedRegisters.Context.ShaderStages) ||
             TypedRegisters.UserConfig.PrimitiveType != (uint)Rendering.GuestPrimitiveType.TriangleList)
             return 0;
 
-        int start = window.IndexOf(packet.PacketAddress);
-        var words = window.Words.AsSpan(start, (int)Math.Min(window.DwordCount - (uint)start, packet.Remaining));
         if (words[5] != packet.Header || (words[4] & ~0x20u) != 2u) return 0;
         var locations = DrawRegisterLocations.FromPacket(words[2], words[3]);
         int vertex = VertexUserDataIndex(locations.BaseVertex);
@@ -41,7 +44,7 @@ public sealed partial class GpuCommandInterpreter
             (DrawRegisterLocations.Names(locations.BaseVertex) && vertex < 0) ||
             (DrawRegisterLocations.Names(locations.StartInstance) && instance < 0)) return 0;
 
-        int limit = Math.Min(32, words.Length / 5);
+        int limit = Math.Min(MaxIndexedRunDraws, words.Length / 5);
         var indexCount = IndexBufferSize;
         if (indexCount == 0)
         {
@@ -52,7 +55,7 @@ public sealed partial class GpuCommandInterpreter
         }
         if (indexCount == 0 || (ulong)indexCount * IndexElementSize > 64ul << 20) return 0;
 
-        Span<uint> offsets = stackalloc uint[32];
+        Span<uint> offsets = stackalloc uint[MaxIndexedRunDraws];
         ulong first = DrawIndirectArgumentsBase + words[1];
         if (first < DrawIndirectArgumentsBase) return 0;
         int count = 0;

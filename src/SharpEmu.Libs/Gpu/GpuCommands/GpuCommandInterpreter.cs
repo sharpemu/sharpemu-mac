@@ -815,9 +815,8 @@ public sealed partial class GpuCommandInterpreter
             var waitedBefore = SharpEmu.Libs.Diagnostics.PacketHandlerTally.WaitedTicks;
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketHandler))
             {
-                var run = header == PacketHeader.Make(5, PacketOpcode.DrawIndexIndirect) &&
-                    SharedPacketWindow(cursorIndex, packetAddress) is { } runWindow
-                    ? TryDrawIndexedRun(in packet, runWindow) : 0;
+                var run = header == PacketHeader.Make(5, PacketOpcode.DrawIndexIndirect)
+                    ? TryDrawIndexedRun(in packet, RunWords(cursorIndex, in cursor, in packet)) : 0;
                 consumed = run == 0 ? handler(this, in packet, payload) + 1 : (uint)run * 5;
                 if (run > 1)
                     _packetSerial += (uint)run - 1;
@@ -1045,11 +1044,37 @@ public sealed partial class GpuCommandInterpreter
 
     private const ulong PacketWindowPageBytes = 0x1000;
 
-    // The per-depth window (ObtainPacketWindow) that still holds this packet, or null: a packet served from a command
-    // block or a one-off read has none, and an indexed draw run (TryDrawIndexedRun) then is not looked for.
+    // The per-depth window (ObtainPacketWindow) that still holds this packet, or null.
     private PacketWindow? SharedPacketWindow(int depth, ulong packetAddress) =>
         depth < _packetWindowsByDepth.Count && _packetWindowsByDepth[depth] is var window &&
         window.Covers(packetAddress, _packetWindowGeneration) ? window : null;
+
+    // The dwords from this packet on in which an indexed draw run (TryDrawIndexedRun) is looked for: those of the per-depth
+    // window that still holds it, else those of the command block of this depth (a host that hands over command blocks,
+    // such as the Metal host, has no shared windows), else none, and no run is looked for: a packet behind a ring chunk
+    // advance, where the guest may still be appending, or one served by a one-off read.
+    private ReadOnlySpan<uint> RunWords(int depth, in PacketCursor cursor, in PacketContext packet)
+    {
+        if (packet.Remaining < 10)
+        {
+            return default;
+        }
+
+        if (SharedPacketWindow(depth, packet.PacketAddress) is { } window)
+        {
+            if (!window.Holds(packet.PacketAddress, 10))
+            {
+                return default;
+            }
+
+            var start = window.IndexOf(packet.PacketAddress);
+            return window.Words.AsSpan(start, (int)Math.Min(window.DwordCount - (uint)start, packet.Remaining));
+        }
+
+        return cursor.FollowedChunkAdvance
+            ? default
+            : BlockWords(depth, packet.PacketAddress, packet.Remaining, 10, Math.Min(packet.Remaining, MaxIndexedRunDraws * 5));
+    }
 
     private PacketWindow? ObtainPacketWindow(int depth, in PacketCursor cursor, ulong packetAddress)
     {

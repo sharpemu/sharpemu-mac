@@ -98,7 +98,9 @@ public static partial class AgcExports
         private CapturingSink? _joinSink;
         private readonly ConcurrentQueue<DeferredDraw> _spareDeferred = new();
 
-        private readonly Dictionary<(ulong Vertex, ulong Pixel), (bool Writes, long Registrations, bool Group)> _drawWrites = new();
+        // Concurrent: a host that resolves whole draws where they run (_defersWholeWork) learns on its render thread while the
+        // stream thread reads it for indexed draw runs (TryDrawIndexedRun).
+        private readonly ConcurrentDictionary<(ulong Vertex, ulong Pixel), (bool Writes, long Registrations, bool Group)> _drawWrites = new();
         private (ulong Vertex, ulong Pixel) _learningKey;
 
         // Only a draw whose shaders are known not to write memory resolves ahead of the stream: its
@@ -314,7 +316,7 @@ public static partial class AgcExports
             {
                 var args = next ?? deferred.IndexedArguments;
                 if (next is null && deferred.IndirectOffsets is { } offsets)
-                    executor.DrawIndexedCore(deferred.SubmitId, deferred.Banks, in args, offsets);
+                    executor.DrawIndexedRun(deferred.SubmitId, deferred.Banks, in args, offsets);
                 else
                     executor.DrawIndexed(deferred.SubmitId, deferred.Banks, in args);
             }
@@ -529,7 +531,7 @@ public static partial class AgcExports
                     if (work.Indexed)
                     {
                         if (work.IndirectOffsets is { } offsets)
-                            worker.Executor.DrawIndexedCore(work.SubmitId, work.Banks, in work.IndexedArguments, offsets);
+                            worker.Executor.DrawIndexedRun(work.SubmitId, work.Banks, in work.IndexedArguments, offsets);
                         else
                             worker.Executor.DrawIndexed(work.SubmitId, work.Banks, in work.IndexedArguments);
                     }

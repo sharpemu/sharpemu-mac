@@ -314,11 +314,41 @@ public sealed partial class RenderExecutor
     internal bool CanGroupIndexed(RegisterBanks banks, in DrawIndexedArguments first) =>
         CanDrawIndirectOnGpu(banks, in first) && DrawHasTargets(banks) && !MeshDrawTrace.Active;
 
+    // CanGroupIndexed for a thread other than the one this executor resolves on (the stream thread of a host that resolves
+    // whole draws where they run): the targets are resolved into scratch of the calling thread, not into the executor's
+    // cached DrawResolution, which the resolving thread owns.
+    internal bool CanGroupIndexedConcurrently(RegisterBanks banks, in DrawIndexedArguments first)
+    {
+        if (!CanDrawIndirectOnGpu(banks, in first) || MeshDrawTrace.Active || ConsumesColorMetadataOperation(banks.Context))
+        {
+            return false;
+        }
+
+        var colors = _groupColors ??= new ColorTargetResolution[RenderingState.ColorAttachmentCapacity];
+        var slots = _groupSlots ??= new uint[RenderingState.ColorAttachmentCapacity];
+        return ResolveColorTargets(banks.Context, colors, slots) != 0 ||
+            DepthTargetResolver.Resolve(banks.Context, _host.FormatSupport, HostFatal) is not null;
+    }
+
+    [ThreadStatic]
+    private static ColorTargetResolution[]? _groupColors;
+
+    [ThreadStatic]
+    private static uint[]? _groupSlots;
+
     internal static bool SafeForRun(ShaderProgramInfo? program) =>
         program is { UsesDeviceAddresses: false, CallRecordCallees.Count: 0 } && program.Frontend?.RequiresOrderedImagePreparation != true &&
         !Array.Exists(program.Buffers, static buffer => buffer.Written) && !WritesStorageImage(program) &&
         program.Bindings?.UsesBindlessHeap != true &&
         program.Bindings?.Find(SharpEmu.ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare) is null;
+
+    // An indexed draw run (GpuCommandInterpreter.TryDrawIndexedRun): one resolve whose record carries the run's indirect
+    // offsets. It takes the run's MustExecute as DrawIndexed takes a draw's, instead of the one the last draw left.
+    internal void DrawIndexedRun(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments, uint[] offsets)
+    {
+        _drawMustExecute = arguments.MustExecute;
+        DrawIndexedCore(submitId, banks, in arguments, offsets);
+    }
 
     internal void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments,
         uint[]? offsets = null, DrawIndexedArguments? originalIndirectIndexedDraw = null)
