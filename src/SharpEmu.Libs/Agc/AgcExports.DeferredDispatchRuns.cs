@@ -62,10 +62,20 @@ public static partial class AgcExports
 
         internal IDeferredDispatchRuns? DispatchRuns => _dispatchRuns;
 
+        // SHARPEMU_DEFERRED_DISPATCH_RUNS=0 keeps every direct dispatch on the command thread.
+        internal static readonly bool DeferredDispatchRunsEnabled =
+            Environment.GetEnvironmentVariable("SHARPEMU_DEFERRED_DISPATCH_RUNS") != "0";
+
+        // A host that resolves whole draws and dispatches where they run (_defersWholeWork: the Metal host) prefetches
+        // dispatch rebinds on its own resolve thread (ParallelProgramPrefetch) and serves no strict worker reads, so it
+        // takes no deferred runs and no compute tickets, and neither pool is made for it.
+        private bool UsesWorkerDispatchRebinds => !_defersWholeWork;
+
         private void ReplaceDispatchRuns(bool create)
         {
             _dispatchRuns?.Dispose();
-            _dispatchRuns = create && _executor is not null && _pipelines is { SupportsParallelResolution: true } && _host.RenderHost is { } renderHost
+            _dispatchRuns = create && DeferredDispatchRunsEnabled && UsesWorkerDispatchRebinds && _executor is not null &&
+                _pipelines is { SupportsParallelResolution: true } && _host.RenderHost is { } renderHost
                 ? new DeferredDispatchRuns(this, renderHost, DeferredDispatchWorkers)
                 : null;
         }
