@@ -454,6 +454,52 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
         return 0;
     }
 
+    /// <summary>
+    /// The kernel's own map over a range, for a failed guest mapping: the shadow tables only know what this process
+    /// mapped through them, so a range blocked by the runtime, Rosetta or dyld, or by the GPU carveout macOS 27 keeps
+    /// at [0x10_0000_0000, 0x70_0000_0000), reads as free there. Lists the first few native regions that intersect the
+    /// range (base, size, current/maximum protection, user tag) and says when the range touches the carveout.
+    /// </summary>
+    internal static string DescribeNativeRegion(ulong address, ulong size)
+    {
+        var end = size > ulong.MaxValue - address ? ulong.MaxValue : address + size;
+        var parts = new List<string>();
+        if (OperatingSystem.IsMacOSVersionAtLeast(27) && address < CarveoutEnd && end > CarveoutStart)
+        {
+            parts.Add($"macos27-carveout[0x{CarveoutStart:X},0x{CarveoutEnd:X}) {(CarveoutVirtual ? "virtual" : "unmappable")}");
+        }
+
+        var task = mach_task_self();
+        var info = stackalloc uint[VM_REGION_SUBMAP_SHORT_INFO_COUNT_64];
+        var cursor = address;
+        var listed = 0;
+        while (cursor < end && listed < 4)
+        {
+            var regionAddress = cursor;
+            ulong regionSize = 0;
+            uint depth = 0;
+            var count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+            if (mach_vm_region_recurse(task, ref regionAddress, ref regionSize, ref depth, info, ref count) != KERN_SUCCESS ||
+                regionSize == 0 || regionAddress >= end)
+            {
+                break;
+            }
+
+            // vm_region_submap_short_info_64 (pack 4): protection, max_protection, inheritance, offset (two words),
+            // user_tag.
+            parts.Add($"native[0x{regionAddress:X}+0x{regionSize:X} prot={info[0]}/{info[1]} tag={info[5]}]");
+            listed++;
+            if (regionSize > ulong.MaxValue - regionAddress)
+            {
+                break;
+            }
+
+            cursor = regionAddress + regionSize;
+        }
+
+        return parts.Count == 0 ? "native[none]" : string.Join(' ', parts);
+    }
+
     private static ulong AlignUp(ulong value, ulong alignment)
     {
         var remainder = value % alignment;

@@ -245,8 +245,20 @@ public static partial class KernelMemoryCompatExports
         var region = VirtualQuery((nint)address, out var info, 0) == 0
             ? "unknown"
             : $"base=0x{info.BaseAddress:X} allocation_base=0x{info.AllocationBase:X} size=0x{info.RegionSize:X} state=0x{info.State:X} type=0x{info.Type:X} protect=0x{info.Protect:X}";
+        // The provider tables above know only what this process mapped through them; the OS's own map names what
+        // else blocks the range (on macOS: the runtime, Rosetta, or the macOS 27 GPU carveout).
+        string? native;
+        try
+        {
+            native = SharpEmu.HLE.Host.HostMemoryAuthority.Current.DescribeNativeRegion(address, length);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException)
+        {
+            native = null;
+        }
+
         Console.Error.WriteLine($"[LOADER][WARN] map_direct failed={reason} address=0x{address:X} size=0x{length:X} offset=0x{directMemoryStart:X} " +
-            $"flags=0x{flags:X} host_region: {region}");
+            $"flags=0x{flags:X} host_region: {region}{(native is null ? string.Empty : $" host_map: {native}")}");
     }
 
     private static unsafe nuint VirtualQuery(nint lpAddress, out MemoryBasicInformation lpBuffer, nuint dwLength)

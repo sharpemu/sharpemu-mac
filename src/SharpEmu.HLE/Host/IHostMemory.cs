@@ -51,6 +51,13 @@ public interface IHostMemory
 
     bool Query(ulong address, out HostRegionInfo info);
 
+    /// <summary>
+    /// Diagnostic only: what the host OS itself has mapped in [<paramref name="address"/>, +<paramref name="size"/>),
+    /// including mappings no provider table records (the runtime's heaps, the translator's own memory, ranges the OS
+    /// keeps for itself). Null when the platform cannot tell; <see cref="Query"/> covers the providers' own tables.
+    /// </summary>
+    string? DescribeNativeRegion(ulong address, ulong size) => null;
+
     // This reports allocation bounds, not page protection or commit state.
     bool TryQueryAllocation(ulong address, out HostAddressRange range)
     {
