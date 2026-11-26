@@ -62,6 +62,20 @@ internal sealed class MacCoreAudioOutput : IHostPcmAudioOutput
         => OpenStream(sampleRate, channels, format, LatencyCapBytes(sampleRate, channels, format));
 
     /// <summary>
+    /// Guest-format stream with a caller-chosen backpressure cap in guest
+    /// bytes, for callers that pace the guest themselves (AudioOut2's context
+    /// mix): its device cushion, dropout reserve and producer naps read
+    /// <see cref="IHostAudioStream.QueuedMilliseconds"/> against a queue this
+    /// deep, so the cap must not fall back to the
+    /// <see cref="TargetQueuedMilliseconds"/> one. Zero or less keeps that
+    /// default, as the SDL backend does.
+    /// </summary>
+    public IHostAudioStream OpenPcmStream(uint sampleRate, int channels, HostPcmFormat format, int maxQueuedBytes)
+        => maxQueuedBytes > 0
+            ? OpenStream(sampleRate, channels, format, maxQueuedBytes)
+            : OpenPcmStream(sampleRate, channels, format);
+
+    /// <summary>
     /// Queue cap in guest bytes for <see cref="TargetQueuedMilliseconds"/> of
     /// audio in the guest's own format.
     /// </summary>
