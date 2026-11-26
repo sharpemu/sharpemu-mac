@@ -360,6 +360,23 @@ internal sealed partial class MaterializationProgram
             }
         }
 
+        // A plan that writes memory reads every predicate and written descriptor word through its write guard, which marks
+        // the read (ResourceBranchWriteGuard.ReadingWords) so a host whose clean reader would wait for a GPU write still
+        // landing in the word refuses it instead (Metal: MetalRenderHost.RefusesPendingGuardRead). The selection reads the
+        // same words, so it marks them too.
+        private bool ReadWord(GuestWordReader clean, ulong address, out uint word)
+        {
+            if (!_guarded)
+            {
+                return clean(address, out word);
+            }
+
+            using (ResourceBranchWriteGuard.EnterReads())
+            {
+                return clean(address, out word);
+            }
+        }
+
         // RuntimeValueEvaluator.EvaluateRawRead and ReadRawWord: the handle's low and high words, the offset, then a buffer's
         // records and word 3, and one aligned dword. Every predicate reader is clean, so a refused word reads as zero only
         // through a null base.
@@ -387,7 +404,7 @@ internal sealed partial class MaterializationProgram
                     return true;
             }
 
-            if (!clean(address, out var word))
+            if (!ReadWord(clean, address, out var word))
             {
                 return (baseAddress & ~3ul) == 0;
             }

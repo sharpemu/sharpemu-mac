@@ -59,6 +59,87 @@ public sealed class Gen5MslDivisionTests(ITestOutputHelper output)
         0xBF810000,             // s_endpgm
     ];
 
+    // `udiv i32` as llc -mcpu=gfx1011 lowers it, with the V_RCP_IFLAG_F32 its AMDGPU expansion takes as the reciprocal
+    // estimate (newer LLVM spells it V_RCP_F32): the estimate, scaled just under 2^32, refined once in integers and
+    // corrected twice. A reciprocal above the correctly rounded one can push the estimate past the true quotient, and the
+    // unsigned corrections then return a wrong quotient (upstream 5036e2761: divisors 27012373 and 91382283 on NVIDIA).
+    private static readonly uint[] UnsignedDivision =
+    [
+        0x342A0083,             // v_lshlrev_b32 v21, 3, v0                         (local id * 8)
+        0xE0341000, 0x80020015, // buffer_load_dwordx2 v[0:1], v21, s[8:11], 0 offen  (n, d)
+        0xBF8C3F70,             // s_waitcnt vmcnt(0)
+        0x7E040D01,             // v_cvt_f32_u32 v2, v1
+        0x4C060280,             // v_sub_nc_u32 v3, 0, v1
+        0x7E045702,             // v_rcp_iflag_f32 v2, v2
+        0x100404FF, 0x4F7FFFFE, // v_mul_f32 v2, 0x4f7ffffe, v2
+        0x7E040F02,             // v_cvt_u32_f32 v2, v2
+        0xD5690003, 0x02020503, // v_mul_lo_u32 v3, v3, v2
+        0xD56A0003, 0x02020702, // v_mul_hi_u32 v3, v2, v3
+        0x4A040702,             // v_add_nc_u32 v2, v2, v3
+        0xD56A0002, 0x02020500, // v_mul_hi_u32 v2, v0, v2
+        0xD5690003, 0x02020302, // v_mul_lo_u32 v3, v2, v1
+        0x4C000700,             // v_sub_nc_u32 v0, v0, v3
+        0x4A060481,             // v_add_nc_u32 v3, 1, v2
+        0x4C080300,             // v_sub_nc_u32 v4, v0, v1
+        0x7D8C0300,             // v_cmp_ge_u32 vcc, v0, v1
+        0x02040702,             // v_cndmask_b32 v2, v2, v3, vcc
+        0x02000900,             // v_cndmask_b32 v0, v0, v4, vcc
+        0x4A060481,             // v_add_nc_u32 v3, 1, v2
+        0x7D8C0300,             // v_cmp_ge_u32 vcc, v0, v1
+        0x02000702,             // v_cndmask_b32 v0, v2, v3, vcc
+        0xE0701000, 0x80020015, // buffer_store_dword v0, v21, s[8:11], 0 offen
+        0xBF810000,             // s_endpgm
+    ];
+
+    private static readonly uint[] IntegerReciprocal =
+    [
+        0x342A0082,             // v_lshlrev_b32 v21, 2, v0                         (local id * 4)
+        0xE0301000, 0x80020015, // buffer_load_dword v0, v21, s[8:11], 0 offen
+        0xBF8C3F70,             // s_waitcnt vmcnt(0)
+        0x7E005700,             // v_rcp_iflag_f32 v0, v0
+        0xE0701000, 0x80020015, // buffer_store_dword v0, v21, s[8:11], 0 offen
+        0xBF810000,             // s_endpgm
+    ];
+
+    // Every quotient of the integer division sequence is exact.
+    [Fact]
+    public void UnsignedDivisionThroughTheIntegerReciprocalIsExact()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            new Gen5ComputeFixture("udiv-u32", UnsignedDivision, StoreScalarResourceBase: 8, StoreBackingBytes: Threads * 8),
+            localSizeX: Threads);
+        if (!DeviceGateOpen())
+        {
+            return;
+        }
+
+        var inputs = UnsignedDivisionInputs();
+        var results = Run(shader, inputs.Select(pair => ((ulong)pair.N, (ulong)pair.D)).ToList(), 8, 4);
+        Report(inputs.Count, Enumerable.Range(0, inputs.Count)
+            .Select(index => ((ulong)inputs[index].N, (ulong)inputs[index].D, results[index], (ulong)(inputs[index].N / inputs[index].D))));
+    }
+
+    // V_RCP_IFLAG_F32 of a normal input with a normal reciprocal is the correctly rounded 1/x, which a plain division
+    // does not guarantee on every device (upstream 5036e2761 refines it with one fma Newton step); infinity, NaN and zero
+    // keep the division's result.
+    [Fact]
+    public void IntegerReciprocalIsCorrectlyRounded()
+    {
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(
+            new Gen5ComputeFixture("rcp-iflag", IntegerReciprocal, StoreScalarResourceBase: 8, StoreBackingBytes: Threads * 4),
+            localSizeX: Threads);
+        Assert.Contains("fma(", shader.Source, StringComparison.Ordinal);
+        if (!DeviceGateOpen())
+        {
+            return;
+        }
+
+        var inputs = ReciprocalInputs();
+        var results = Run(shader, inputs.Select(value => ((ulong)value, 0ul)).ToList(), 4, 4);
+        Report(inputs.Count, Enumerable.Range(0, inputs.Count)
+            .Select(index => ((ulong)inputs[index], 0ul, results[index], (ulong)Reciprocal(inputs[index]))));
+    }
+
     [Fact]
     public void Float64DivisionSequenceIsCorrectlyRounded()
     {
@@ -112,7 +193,7 @@ public sealed class Gen5MslDivisionTests(ITestOutputHelper output)
         Assert.True(failures == 0, $"{failures} of {count} mismatched:\n{mismatches}");
     }
 
-    // Each record holds n then d, `stride` bytes apart; the quotient overwrites n.
+    // Each record holds n then d (a 4-byte record holds n alone), `stride` bytes apart; the result overwrites n.
     private static ulong[] Run(Gen5MslShader shader, List<(ulong N, ulong D)> inputs, int stride, int size)
     {
         Assert.True(MetalNative.TryCompileLibrary(shader.Source, out var library, out var error), error + shader.Source);
@@ -133,7 +214,10 @@ public sealed class Gen5MslDivisionTests(ITestOutputHelper output)
                 else
                 {
                     BinaryPrimitives.WriteUInt32LittleEndian(record, (uint)n);
-                    BinaryPrimitives.WriteUInt32LittleEndian(record[4..], (uint)d);
+                    if (stride >= 8)
+                    {
+                        BinaryPrimitives.WriteUInt32LittleEndian(record[4..], (uint)d);
+                    }
                 }
             }
 
@@ -338,6 +422,74 @@ public sealed class Gen5MslDivisionTests(ITestOutputHelper output)
             return exponentN is > 0 and < 255 && exponentD is > 0 and < 255 && exponentN - exponentD >= 96 &&
                 float.IsInfinity(BitConverter.UInt32BitsToSingle(pair.Item1) / BitConverter.UInt32BitsToSingle(pair.Item2));
         });
+        return inputs;
+    }
+
+    private static uint Reciprocal(uint bits)
+    {
+        var value = BitConverter.UInt32BitsToSingle(bits);
+        return float.IsNaN(value) ? bits | 0x00400000 : BitConverter.SingleToUInt32Bits(1f / value);
+    }
+
+    private static List<(uint N, uint D)> UnsignedDivisionInputs()
+    {
+        var random = new Random(0x0D1F0032);
+        var divisors = new List<uint> { 1, 2, 3, 5, 7, 10, 255, 256, 65535, 65536, 65537, 27012373, 91382283, 0x7FFFFFFF,
+            0x80000000, 0x80000001, 0xFFFFFFFE, 0xFFFFFFFF };
+        for (var bit = 2; bit < 32; bit++)
+        {
+            divisors.Add((1u << bit) - 1);
+            divisors.Add((1u << bit) + 1);
+        }
+
+        var inputs = new List<(uint, uint)>();
+        foreach (var d in divisors)
+        {
+            // Numerators around the divisor's multiples, where an estimate one too high or low shows.
+            foreach (var n in new uint[] { 0, 1, d - 1, d, d + 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFE, 0xFFFFFFFF })
+            {
+                inputs.Add((n, d));
+            }
+
+            for (var i = 0; i < 48; i++)
+            {
+                var multiple = (ulong)random.NextInt64(0, (long)(uint.MaxValue / d) + 1) * d;
+                inputs.Add(((uint)Math.Min(multiple + (ulong)random.Next(-1, 2), uint.MaxValue), d));
+                inputs.Add(((uint)random.NextInt64(0, 1L << 32), d));
+            }
+        }
+
+        for (var i = 0; i < 4000; i++)
+        {
+            // Divisors of every width.
+            var d = (uint)random.NextInt64(1, 1L << random.Next(1, 33));
+            inputs.Add(((uint)random.NextInt64(0, 1L << 32), Math.Max(d, 1u)));
+        }
+
+        return inputs;
+    }
+
+    private static List<uint> ReciprocalInputs()
+    {
+        var random = new Random(0x0D1F0033);
+        var inputs = new List<uint> { 0x00000000, 0x80000000, 0x7F800000, 0xFF800000, 0x7FC00000 };
+        foreach (var integer in new uint[] { 27012373, 91382283, 1, 3, 7, 0xFFFFFFFF, 0x80000001 })
+        {
+            inputs.Add(BitConverter.SingleToUInt32Bits(integer));
+        }
+
+        for (var i = 0; i < 4000; i++)
+        {
+            // The u32 conversions the integer division takes the reciprocal of, every width.
+            inputs.Add(BitConverter.SingleToUInt32Bits((uint)random.NextInt64(1, 1L << random.Next(1, 33))));
+        }
+
+        for (var i = 0; i < 4000; i++)
+        {
+            // Normal inputs whose reciprocal is normal too.
+            inputs.Add(Normal32(random, 1, 252));
+        }
+
         return inputs;
     }
 
