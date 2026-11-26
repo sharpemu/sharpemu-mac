@@ -447,6 +447,7 @@ public partial class MainWindow : Window
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
         AddHandler(KeyDownEvent, OnPreviewKeyDown, RoutingStrategies.Tunnel);
         CtxLaunch.Click += (_, _) => LaunchSelected();
+        CtxLaunchVariables.Click += async (_, _) => await LaunchWithVariablesAsync();
         CtxCreateShortcut.Click += async (_, _) => await CreateSelectedGameShortcutAsync();
         CtxOpenFolder.Click += (_, _) => OpenSelectedGameFolder();
         CtxCopyPath.Click += async (_, _) => await CopySelectedGamePathAsync();
@@ -959,7 +960,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetGamepadConnected(true);
+        SetGamepadConnected(true, pad.Type);
         RefreshControllerHints();
         if ((pad.Buttons & ~_previousPadButtons) != HostGamepadButtons.None)
         {
@@ -1874,6 +1875,8 @@ public partial class MainWindow : Window
             _settings.Save();
         }
 
+        // A downloaded folder often holds .pkg files rather than an extracted game.
+        await InstallPackagesInFolderAsync(path);
         await RescanLibraryAsync(addingFolder: true);
     }
 
@@ -2433,6 +2436,7 @@ public partial class MainWindow : Window
 
         GameList.SelectedItem = game;
         CtxLaunch.IsEnabled = !_isRunning;
+        CtxLaunchVariables.IsEnabled = !_isRunning;
         CtxCopyTitleId.IsEnabled = game.TitleId is not null;
         CtxGameSettings.IsEnabled = true;
         CtxPackZar.IsEnabled = GameVersions.PackableForGame(_allGames, game).Count > 0;

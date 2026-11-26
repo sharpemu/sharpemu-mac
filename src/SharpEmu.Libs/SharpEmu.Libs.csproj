@@ -44,6 +44,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <PackageReference Include="FFmpeg.AutoGen" />
     <PackageReference Include="NLayer" />
+    <!-- Upstream's in-game overlay kit (Overlay/) paints with Skia and shapes text with HarfBuzz.
+         SkiaSharp ships its macOS native assets itself; the Linux ones stay in the Skia font adapter. -->
+    <PackageReference Include="SkiaSharp" />
+    <PackageReference Include="SkiaSharp.HarfBuzz" />
     <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
 

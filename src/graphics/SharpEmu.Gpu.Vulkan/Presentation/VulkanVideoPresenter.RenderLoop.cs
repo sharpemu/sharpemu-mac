@@ -445,6 +445,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"Unsupported translated guest draw: {presentation.DrawKind}.");
             }
 
+            RecordOverlayLayers(imageIndex, frameSlot);
+
             if (PerfOverlay.DrawOnScreen)
             {
                 RecordOverlay(imageIndex, frameSlot, presentation.IsHdr);

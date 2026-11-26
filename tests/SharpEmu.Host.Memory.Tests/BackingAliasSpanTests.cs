@@ -181,6 +181,7 @@ public sealed class BackingAliasSpanTests
         public bool ReleasePrivate(ulong address, ulong size) => true;
 
         public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection) => true;
+        public IReadOnlyList<HostPageAccess> QueryAccess(ulong address, ulong size) => []; // access is never tracked here
 
         public bool FreeOwnedRange(ulong address, ulong size) => true;
     }

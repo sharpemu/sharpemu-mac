@@ -340,6 +340,7 @@ internal static class MacBackingLifecycleWorker
         public bool CommitPrivate(ulong address, ulong size, HostPageProtection protection) => throw new NotSupportedException();
         public bool ReleasePrivate(ulong address, ulong size) => throw new NotSupportedException();
         public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection) => throw new NotSupportedException();
+        public IReadOnlyList<HostPageAccess> QueryAccess(ulong address, ulong size) => _inner.QueryAccess(address, size);
         public bool FreeOwnedRange(ulong address, ulong size) => throw new NotSupportedException();
     }
 }

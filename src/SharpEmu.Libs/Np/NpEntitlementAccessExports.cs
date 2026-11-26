@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Np;
 
@@ -17,8 +18,6 @@ public static class NpEntitlementAccessExports
 
     // libSceNpEntitlementAccess package / download codes observed on Prospero.
     // package_type 3 = PSAL (license-style add-on); download_status 4 = INSTALLED.
-    private const uint PackageTypePsal = 3;
-    private const uint DownloadStatusInstalled = 4;
     private const uint SkuFlagFull = 3;
 
     private const int NpEntitlementAccessErrorParameter = unchecked((int)0x817D0002);
@@ -32,58 +31,9 @@ public static class NpEntitlementAccessExports
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, int> Requests = new();
     private static long _nextRequestId;
 
-    // Offline entitlements queried by titles through NpEntitlementAccess.
-    // GTA V Enhanced (PPSA04264) gates Story Mode on these three labels; without
-    // them the frontend offers "Buy GTAV Story Mode" despite a full dump.
-    // Ghost of Yotei (PPSA26344) separately checks its application and base
-    // game entitlements before it creates the frontend.  These represent the
-    // locally installed main package only; optional editions and add-ons remain
-    // unowned.
-    private static readonly AddcontEntitlement[] GtaVEntitlements =
-    [
-        new("85y-je", PackageTypePsal, DownloadStatusInstalled),
-        new("5d5c48", PackageTypePsal, DownloadStatusInstalled),
-        new("_mtqu6", PackageTypePsal, DownloadStatusInstalled),
-    ];
-
-    private static readonly AddcontEntitlement[] GhostOfYoteiEntitlements =
-    [
-        new("GHOST2APP0000000", PackageTypePsal, DownloadStatusInstalled),
-        new("GHOST2BASE000000", PackageTypePsal, DownloadStatusInstalled),
-    ];
-
-    // A label lookup only names a label the title already knows, so lookups search every
-    // known label and need no title id (GTA V ships under several regional ids).
-    private static readonly AddcontEntitlement[] OwnedAddcontEntitlements =
-        [.. GtaVEntitlements, .. GhostOfYoteiEntitlements];
-
-    // The list call enumerates what is installed, so it reports only the running title's
-    // labels. A title outside this table owns no add-ons: AI LIMIT (PPSA27366) treated the
-    // GTA V labels it was handed as its own installed DLC and stopped booting. Only
-    // PPSA04264 was checked against a dump; the other GTA V ids are its store regions.
-    private static readonly Dictionary<string, AddcontEntitlement[]> AddcontEntitlementsByTitle =
-        new(StringComparer.Ordinal)
-        {
-            ["PPSA01721"] = GtaVEntitlements,
-            ["PPSA03420"] = GtaVEntitlements,
-            ["PPSA04264"] = GtaVEntitlements,
-            ["PPSA26344"] = GhostOfYoteiEntitlements,
-        };
-
-    private static AddcontEntitlement[] _titleAddcontEntitlements = [];
-
-    public static void ConfigureApplicationInfo(string? titleId) =>
-        Volatile.Write(
-            ref _titleAddcontEntitlements,
-            titleId is not null &&
-            AddcontEntitlementsByTitle.TryGetValue(titleId.Trim(), out var entitlements)
-                ? entitlements
-                : []);
-
-    private readonly record struct AddcontEntitlement(
-        string Label,
-        uint PackageType,
-        uint DownloadStatus);
+    // The owned labels of the running title, from AddcontEntitlements: the
+    // user/entitlements.json configuration (or the built-in defaults), plus the
+    // addcont packages installed next to the game image.
 
     [SysAbiExport(
         Nid = "jO8DM8oyego",
@@ -170,8 +120,8 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(NpEntitlementAccessErrorParameter);
         }
 
-        var entitlements = Volatile.Read(ref _titleAddcontEntitlements);
-        var hitNum = (uint)entitlements.Length;
+        var owned = AddcontEntitlements.Owned();
+        var hitNum = (uint)owned.Count;
         Span<byte> hitNumBytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(hitNumBytes, hitNum);
         if (!ctx.Memory.TryWrite(hitNumAddress, hitNumBytes))
@@ -197,7 +147,7 @@ public static class NpEntitlementAccessExports
                 if (!TryWriteAddcontEntitlementInfo(
                         ctx,
                         listAddress + index * (ulong)AddcontEntitlementInfoSize,
-                        entitlements[(int)index]))
+                        owned[(int)index]))
                 {
                     return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
@@ -238,13 +188,8 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        foreach (var entitlement in OwnedAddcontEntitlements)
+        if (AddcontEntitlements.TryGet(label, out var entitlement))
         {
-            if (!string.Equals(label, entitlement.Label, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
             if (!TryWriteAddcontEntitlementInfo(ctx, infoAddress, entitlement))
             {
                 return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -288,8 +233,7 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        return ctx.SetReturn(OwnedAddcontEntitlements.Any(entitlement =>
-            string.Equals(label, entitlement.Label, StringComparison.Ordinal))
+        return ctx.SetReturn(AddcontEntitlements.Owns(label)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : NpEntitlementAccessErrorNoEntitlement);
     }
@@ -473,7 +417,7 @@ public static class NpEntitlementAccessExports
     private static bool TryWriteAddcontEntitlementInfo(
         CpuContext ctx,
         ulong address,
-        AddcontEntitlement entitlement)
+        AddcontEntitlements.Entitlement entitlement)
     {
         Span<byte> info = stackalloc byte[AddcontEntitlementInfoSize];
         info.Clear();

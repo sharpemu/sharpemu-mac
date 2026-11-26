@@ -16,10 +16,21 @@ internal sealed class DispatchChain
     private const int MaxSpans = 1024;
     private const ulong IndirectArgumentBytes = 12;
 
-    private readonly List<GuestSpan> _touched = new();
+    // SHARPEMU_CHAIN_SAME_PROGRAM_WRITES (on unless "0"): inside a chain whose dispatches all run one program, a dispatch
+    // whose only overlaps with the chain are plain writes over plain writes, or atomic accesses over atomic accesses,
+    // takes no barrier. The guest orders compute dispatches only with its own wait and cache events, which end the chain
+    // with a full barrier; it put none between these dispatches, so it does not rely on their order (an append through
+    // an atomic counter is the common case). A read of a chain write, a write over a chain read, an atomic access against
+    // a plain one, image conflicts and a different program keep the barrier.
+    internal static bool SameProgramWrites { get; set; } =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_CHAIN_SAME_PROGRAM_WRITES"), "0", StringComparison.Ordinal);
+
+    private readonly List<GuestSpan> _read = new();
     private readonly List<GuestSpan> _written = new();
-    private readonly List<GuestSpan> _recordTouched = new();
+    private readonly List<GuestSpan> _atomic = new();
+    private readonly List<GuestSpan> _recordRead = new();
     private readonly List<GuestSpan> _recordWritten = new();
+    private readonly List<GuestSpan> _recordAtomic = new();
     private bool _open;
     private bool _conservative;
     private bool _readImages;
@@ -28,6 +39,12 @@ internal sealed class DispatchChain
     private bool _recordReadsImages;
     private bool _recordWritesImages;
     private long _promotions;
+    private ulong _recordProgram;
+    private ulong _program;
+    private bool _oneProgram;
+
+    // The chain's distinct spans (tests).
+    internal int SpanCount => _read.Count + _written.Count + _atomic.Count;
 
     // The dispatches recorded since the last one the stream ordered (DispatchOverlap): those an overlap-marked dispatch
     // runs beside on a host that honours the mark. Kept apart from the deferred-barrier chain above, which a host that
@@ -47,9 +64,13 @@ internal sealed class DispatchChain
     private readonly List<GuestSpan> _groupRead = new();
     private readonly List<GuestSpan> _groupPlainWritten = new();
     private readonly List<GuestSpan> _groupAtomic = new();
-    private readonly List<GuestSpan> _recordRead = new();
+    // This dispatch's spans for the group's checks, apart from the chain's (_recordRead, _recordWritten, _recordAtomic),
+    // which class an atomic binding by any atomic access rather than by atomic-only access.
+    private readonly List<GuestSpan> _groupRecordTouched = new();
+    private readonly List<GuestSpan> _groupRecordWritten = new();
+    private readonly List<GuestSpan> _groupRecordRead = new();
     private readonly List<GuestSpan> _recordPlainWritten = new();
-    private readonly List<GuestSpan> _recordAtomic = new();
+    private readonly List<GuestSpan> _groupRecordAtomic = new();
     private readonly List<GuestSpan> _recordImageRead = new();
     private readonly List<GuestSpan> _recordImageWritten = new();
     private bool _recordImagesUnresolved;
@@ -88,17 +109,17 @@ internal sealed class DispatchChain
         {
             cause = OverlapCause.Indirect;
         }
-        else if (Overlaps(_recordRead, _groupPlainWritten) || Overlaps(_recordRead, _groupAtomic) ||
-                 Overlaps(_recordAtomic, _groupPlainWritten))
+        else if (Overlaps(_groupRecordRead, _groupPlainWritten) || Overlaps(_groupRecordRead, _groupAtomic) ||
+                 Overlaps(_groupRecordAtomic, _groupPlainWritten))
         {
             cause = OverlapCause.BufferReadAfterWrite;
         }
         else if (Overlaps(_recordPlainWritten, _groupRead) || Overlaps(_recordPlainWritten, _groupAtomic) ||
-                 Overlaps(_recordAtomic, _groupRead))
+                 Overlaps(_groupRecordAtomic, _groupRead))
         {
             cause = OverlapCause.BufferWriteAfterRead;
         }
-        else if (Overlaps(_recordAtomic, _groupAtomic))
+        else if (Overlaps(_groupRecordAtomic, _groupAtomic))
         {
             // Atomics against atomics: the GPU performs each one whole, in whatever order the two dispatches reach the
             // bytes, as the console does with the two running together (an append counter both bump). Nothing else
@@ -193,11 +214,11 @@ internal sealed class DispatchChain
 
     private void AddToGroup()
     {
-        _groupTouched.AddRange(_recordTouched);
-        _groupWritten.AddRange(_recordWritten);
-        _groupRead.AddRange(_recordRead);
+        _groupTouched.AddRange(_groupRecordTouched);
+        _groupWritten.AddRange(_groupRecordWritten);
+        _groupRead.AddRange(_groupRecordRead);
         _groupPlainWritten.AddRange(_recordPlainWritten);
-        _groupAtomic.AddRange(_recordAtomic);
+        _groupAtomic.AddRange(_groupRecordAtomic);
         _groupConservative |= _recordConservative;
         _groupReadImages |= _recordReadsImages;
         _groupWroteImages |= _recordWritesImages;
@@ -220,23 +241,36 @@ internal sealed class DispatchChain
             return record.HasStorageWrites;
         }
 
-        if (_conservative || _recordConservative || _touched.Count > MaxSpans)
+        if (_conservative || _recordConservative || _read.Count > MaxSpans || _written.Count > MaxSpans || _atomic.Count > MaxSpans)
         {
             DispatchChainTally.Count(ChainDecision.Conservative);
             Reset();
             return true;
         }
 
-        if ((_recordReadsImages && _wroteImages) || (_recordWritesImages && (_wroteImages || _readImages)) ||
-            Overlaps(_recordTouched, _written) || Overlaps(_recordWritten, _touched))
+        var images = (_recordReadsImages && _wroteImages) || (_recordWritesImages && (_wroteImages || _readImages));
+        // An atomic access against a plain one is ordered like any other read and write.
+        var readAfterWrite = Overlaps(_recordRead, _written) || Overlaps(_recordRead, _atomic) || Overlaps(_recordAtomic, _written);
+        var writeAfterRead = Overlaps(_recordWritten, _read) || Overlaps(_recordWritten, _atomic) || Overlaps(_recordAtomic, _read);
+        if (!images && !readAfterWrite && !writeAfterRead)
         {
-            DispatchChainTally.Count(ChainDecision.Overlap);
-            Reset();
-            return true;
+            if (!Overlaps(_recordWritten, _written) && !Overlaps(_recordAtomic, _atomic))
+            {
+                DispatchChainTally.Count(ChainDecision.Skipped);
+                return false;
+            }
+
+            // A program without a hash is never "the same program".
+            if (SameProgramWrites && _oneProgram && _recordProgram != 0 && _recordProgram == _program)
+            {
+                DispatchChainTally.Count(ChainDecision.SameProgramWrites);
+                return false;
+            }
         }
 
-        DispatchChainTally.Count(ChainDecision.Skipped);
-        return false;
+        DispatchChainTally.Count(ChainDecision.Overlap);
+        Reset();
+        return true;
     }
 
     public void Commit(bool deferred, long promotions)
@@ -247,8 +281,19 @@ internal sealed class DispatchChain
             return;
         }
 
-        _touched.AddRange(_recordTouched);
-        _written.AddRange(_recordWritten);
+        if (!_open)
+        {
+            _program = _recordProgram;
+            _oneProgram = true;
+        }
+        else if (_recordProgram != _program)
+        {
+            _oneProgram = false;
+        }
+
+        AddMerged(_read, _recordRead);
+        AddMerged(_written, _recordWritten);
+        AddMerged(_atomic, _recordAtomic);
         _readImages |= _recordReadsImages;
         _wroteImages |= _recordWritesImages;
         _conservative |= _recordConservative;
@@ -258,21 +303,26 @@ internal sealed class DispatchChain
 
     private void Reset()
     {
-        _touched.Clear();
+        _read.Clear();
         _written.Clear();
+        _atomic.Clear();
         _open = false;
         _conservative = false;
         _readImages = false;
         _wroteImages = false;
+        _oneProgram = false;
     }
 
     private void Collect(ResolvedDispatch record, in ShaderStageResources stage)
     {
-        _recordTouched.Clear();
-        _recordWritten.Clear();
         _recordRead.Clear();
-        _recordPlainWritten.Clear();
+        _recordWritten.Clear();
         _recordAtomic.Clear();
+        _groupRecordTouched.Clear();
+        _groupRecordWritten.Clear();
+        _groupRecordRead.Clear();
+        _recordPlainWritten.Clear();
+        _groupRecordAtomic.Clear();
         _recordConservative = false;
         _recordReadsImages = false;
         _recordWritesImages = false;
@@ -280,12 +330,14 @@ internal sealed class DispatchChain
         _recordImageWritten.Clear();
         _recordImagesUnresolved = false;
         _recordIndirect = default;
+        _recordProgram = 0;
         if (stage.Program is not { } program)
         {
             _recordConservative = true;
             return;
         }
 
+        _recordProgram = program.Hash;
         var resources = stage.Resources;
         // Runtime callees and heap accesses can touch resources outside the snapshot below.
         // Keep their barriers until the chain can account for that complete access set.
@@ -322,17 +374,38 @@ internal sealed class DispatchChain
                 continue;
             }
 
+            // An atomic binding is its own kind. Otherwise only a buffer the program purely writes is not a read:
+            // scalar loads and anything not marked written count as reads.
             var span = new GuestSpan(descriptor.Address, footprint);
             var info = program.Buffers[index];
-            _recordTouched.Add(span);
+            if (info.Atomic)
+            {
+                _recordAtomic.Add(span);
+            }
+            else
+            {
+                if (!info.Written || info.Read || info.Scalar)
+                {
+                    _recordRead.Add(span);
+                }
+
+                if (info.Written)
+                {
+                    _recordWritten.Add(span);
+                }
+            }
+
+            // The overlap group's view of the same buffer (KeepsOverlap): only a buffer every access of which is an
+            // atomic is the group's atomic kind.
+            _groupRecordTouched.Add(span);
             if (info.Written)
             {
-                _recordWritten.Add(span);
+                _groupRecordWritten.Add(span);
             }
 
             if (info.AtomicOnly)
             {
-                _recordAtomic.Add(span);
+                _groupRecordAtomic.Add(span);
                 continue;
             }
 
@@ -344,7 +417,7 @@ internal sealed class DispatchChain
             // A buffer the shader neither reads nor writes per its info counts as read.
             if (info.Read || info.Atomic || !info.Written)
             {
-                _recordRead.Add(span);
+                _groupRecordRead.Add(span);
             }
         }
 
@@ -391,6 +464,7 @@ internal sealed class DispatchChain
             }
         }
 
+        // Device-address ranges always count as reads; written ones as writes too.
         foreach (var range in resources.DeviceAddressRanges)
         {
             if (!range.Planned || range.Size == 0)
@@ -400,12 +474,13 @@ internal sealed class DispatchChain
             }
 
             var span = new GuestSpan(range.Base, range.Size);
-            _recordTouched.Add(span);
-            // A device-address range does not say whether it is also read: it counts as read.
             _recordRead.Add(span);
+            _groupRecordTouched.Add(span);
+            _groupRecordRead.Add(span);
             if (range.Written)
             {
                 _recordWritten.Add(span);
+                _groupRecordWritten.Add(span);
                 _recordPlainWritten.Add(span);
             }
         }
@@ -418,8 +493,35 @@ internal sealed class DispatchChain
         if (record.IndirectArgumentsAddress != 0)
         {
             _recordIndirect = new GuestSpan(record.IndirectArgumentsAddress, IndirectArgumentBytes);
-            _recordTouched.Add(_recordIndirect);
             _recordRead.Add(_recordIndirect);
+            _groupRecordTouched.Add(_recordIndirect);
+            _groupRecordRead.Add(_recordIndirect);
+        }
+    }
+
+    // Adds the spans, widening an overlapping or adjacent one instead of growing the list, so a long run of dispatches
+    // over the same or neighbouring bytes keeps a short list.
+    private static void AddMerged(List<GuestSpan> target, List<GuestSpan> spans)
+    {
+        foreach (var span in spans)
+        {
+            var merged = false;
+            for (var index = 0; index < target.Count; index++)
+            {
+                var existing = target[index];
+                if (span.Address <= existing.End && existing.Address <= span.End)
+                {
+                    var begin = Math.Min(span.Address, existing.Address);
+                    target[index] = new GuestSpan(begin, Math.Max(span.End, existing.End) - begin);
+                    merged = true;
+                    break;
+                }
+            }
+
+            if (!merged)
+            {
+                target.Add(span);
+            }
         }
     }
 
@@ -475,6 +577,7 @@ public enum ChainDecision
     Skipped,
     Overlap,
     Conservative,
+    SameProgramWrites,
     Count,
 }
 
@@ -532,5 +635,5 @@ public static class DispatchChainTally
 
     public static string TakeReport() =>
         FormattableString.Invariant($"chain_open={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Open], 0)} chain_start={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Start], 0)} ") +
-        FormattableString.Invariant($"chain_skipped={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Skipped], 0)} chain_overlap={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Overlap], 0)} chain_conservative={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Conservative], 0)}");
+        FormattableString.Invariant($"chain_skipped={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Skipped], 0)} chain_overlap={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Overlap], 0)} chain_conservative={Interlocked.Exchange(ref _decisions[(int)ChainDecision.Conservative], 0)} chain_same_program={Interlocked.Exchange(ref _decisions[(int)ChainDecision.SameProgramWrites], 0)}");
 }

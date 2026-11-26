@@ -118,6 +118,8 @@ internal sealed class RecordingHostInput : IHostInput
 
     public void SetRumble(byte largeMotor, byte smallMotor) => Rumble.Add((largeMotor, smallMotor));
 
+    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs) => Rumble.Add((largeMotor, smallMotor));
+
     public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger)
     {
     }

@@ -424,6 +424,9 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             case GpuSplitGamepadOutput.Rumble:
                 input.SetRumble(message.A, message.B);
                 break;
+            case GpuSplitGamepadOutput.HapticRumble:
+                input.SetHapticRumble(message.A, message.B, message.DurationMs);
+                break;
             case GpuSplitGamepadOutput.TriggerRumble:
                 input.SetTriggerRumble((message.Flags & 1) != 0 ? message.A : null, (message.Flags & 2) != 0 ? message.B : null);
                 break;

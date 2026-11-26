@@ -16,6 +16,12 @@ internal sealed class SplitGamepadOutput(SplitWriter writer) : IHostGamepadOutpu
     public void SetRumble(byte largeMotor, byte smallMotor) =>
         Send(new GamepadOutputMessage { Kind = (uint)GpuSplitGamepadOutput.Rumble, A = largeMotor, B = smallMotor });
 
+    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs) =>
+        Send(new GamepadOutputMessage
+        {
+            Kind = (uint)GpuSplitGamepadOutput.HapticRumble, A = largeMotor, B = smallMotor, DurationMs = durationMs,
+        });
+
     public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger) =>
         Send(new GamepadOutputMessage
         {

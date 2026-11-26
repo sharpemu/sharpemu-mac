@@ -9,6 +9,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.Audio;
 
@@ -81,11 +82,17 @@ public static class AudioOutExports
     private const int MonitorTypeHdmi = 1;
     private const int HdmiMonitorInfoSize = 0x180;
 
+    // The pad speaker and vibration ports play on the controller's own four channels, when the host has the
+    // controller's output device: the speaker pair, then the actuators.
+    private const int ControllerChannels = 4;
+    private const int ControllerQueueMilliseconds = 80;
+
     private static readonly ConcurrentDictionary<int, PortState> Ports = new();
     private static readonly ConcurrentDictionary<int, PortState> ShutdownPorts = new();
     private static readonly object PortAllocationGate = new();
     private static int _initialized;
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
+    private static Func<uint, IHostAudioStream?>? _controllerFactoryForTests;
 
     // Diagnostic: confirm sceAudioOutOutput is actually called and whether the
     // guest submits real samples or silence. Gated so it costs nothing when off.
@@ -136,6 +143,8 @@ public static class AudioOutExports
         public bool PreservesGuestFormat { get; }
         public IHostAudioStream? Backend { get; }
         public string BackendName { get; }
+        // The first of the two controller channels this port plays on, or -1 for the speakers.
+        public int ControllerPair { get; init; } = -1;
         public object SubmissionGate { get; } = new();
         public volatile float Volume = 1.0f;
         public volatile int MixLevel;
@@ -143,7 +152,8 @@ public static class AudioOutExports
         public long LastOutputTime;
         public int BufferByteLength =>
             checked((int)BufferLength * Channels * BytesPerSample);
-        public bool IsHaptic => Type == PortTypeVibration;
+        // A vibration port the controller's output device does not take drives the pad actuators (PadHaptics).
+        public bool IsHaptic => Type == PortTypeVibration && ControllerPair < 0;
         public float Gain => Volume * (MixLevel / (float)UnityVolume);
 
         public void PaceSilence()
@@ -277,17 +287,34 @@ public static class AudioOutExports
 
         IHostAudioStream? backend = null;
         var preservesGuestFormat = false;
-        string backendName;
-        if (type is PortTypeVibration or PortTypeEx)
+        var controllerPair = type switch
         {
-            // A vibration port's waveform drives the pad actuators (PadHaptics)
-            // and an Ex port carries IEC 61937 bitstream bursts the host has no
-            // HDMI output for; neither may reach the speakers, so both are paced
-            // at their own rate without a host stream.
+            PortTypePadSpeaker => 0,
+            PortTypeVibration => 2,
+            _ => -1,
+        };
+        string backendName;
+        if (controllerPair >= 0 && TryOpenControllerBackend(frequency, speaker: controllerPair == 0) is { } controller)
+        {
+            // The controller's own output device takes the pad speaker pair or the actuator pair; the audio never
+            // reaches the speakers.
+            backend = controller;
+            backendName = "controller";
+        }
+        else if (type is PortTypeVibration or PortTypeEx)
+        {
+            // Without a controller output, a vibration port's waveform drives the
+            // pad actuators (PadHaptics) and an Ex port carries IEC 61937
+            // bitstream bursts the host has no HDMI output for; neither may reach
+            // the speakers, so both are paced at their own rate without a host stream.
+            controllerPair = -1;
             backendName = type == PortTypeVibration ? "pad-haptics" : "none";
         }
         else
         {
+            // A pad speaker port without a controller output plays on the
+            // speakers at its pad speaker mix level.
+            controllerPair = -1;
             try
             {
                 var streamFactory = Volatile.Read(ref _streamFactoryForTests);
@@ -333,7 +360,10 @@ public static class AudioOutExports
             isFloat,
             preservesGuestFormat,
             backend,
-            backendName);
+            backendName)
+        {
+            ControllerPair = controllerPair,
+        };
         var handle = 0;
         lock (PortAllocationGate)
         {
@@ -650,9 +680,7 @@ public static class AudioOutExports
                         continue;
                     }
 
-                    output.HostBufferLength = output.Port.PreservesGuestFormat
-                        ? output.Port.BufferByteLength
-                        : checked((int)output.Port.BufferLength * AudioPcmConversion.OutputFrameSize);
+                    output.HostBufferLength = HostBufferLength(output.Port);
                     output.HostBuffer = ArrayPool<byte>.Shared.Rent(output.HostBufferLength);
                     ConvertForHost(output.Port, source, output.HostBuffer.AsSpan(0, output.HostBufferLength));
                 }
@@ -669,7 +697,8 @@ public static class AudioOutExports
                 if (output.HostBuffer is null ||
                     output.Port.Backend is null ||
                     !output.Port.Backend.Submit(
-                        output.HostBuffer.AsSpan(0, output.HostBufferLength)))
+                        output.HostBuffer.AsSpan(0, output.HostBufferLength)) ||
+                    output.Port.ControllerPair >= 0)
                 {
                     if (pacingPort is null ||
                         HasLongerBufferDuration(output.Port, pacingPort))
@@ -763,8 +792,64 @@ public static class AudioOutExports
         return 0;
     }
 
+    private static int HostBufferLength(PortState port) =>
+        port.ControllerPair >= 0 ? checked((int)port.BufferLength * ControllerChannels * sizeof(float))
+        : port.PreservesGuestFormat ? port.BufferByteLength
+        : checked((int)port.BufferLength * AudioPcmConversion.OutputFrameSize);
+
+    // The controller's own output device for a pad speaker or vibration port, or null when the host has none (then the
+    // port keeps its controller-less path: the speakers for the pad speaker, PadHaptics for vibration).
+    private static IHostAudioStream? TryOpenControllerBackend(uint frequency, bool speaker)
+    {
+        if (Volatile.Read(ref _streamFactoryForTests) is not null)
+        {
+            // Tests choose the controller; without one there is none.
+            return Volatile.Read(ref _controllerFactoryForTests)?.Invoke(frequency);
+        }
+
+        if (HostPlatform.Current.Audio is not IHostPcmAudioOutput pcm)
+        {
+            return null;
+        }
+
+        try
+        {
+            var maxQueuedBytes = (int)(frequency * ControllerChannels * sizeof(float) * (long)ControllerQueueMilliseconds / 1000);
+            var stream = pcm.TryOpenControllerStream(frequency, maxQueuedBytes, out var channels, speaker);
+            if (stream is not null && channels != ControllerChannels)
+            {
+                stream.Dispose();
+                return null;
+            }
+
+            return stream;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] AudioOut controller output unavailable: {exception.Message}");
+            return null;
+        }
+    }
+
     private static void ConvertForHost(PortState port, ReadOnlySpan<byte> source, Span<byte> destination)
     {
+        if (port.ControllerPair >= 0)
+        {
+            var mix = MemoryMarshal.Cast<byte, float>(destination);
+            mix.Clear();
+            AudioOut2Exports.MixPortIntoController(
+                source,
+                mix,
+                checked((int)port.BufferLength),
+                port.Channels,
+                port.BytesPerSample,
+                port.IsFloat,
+                port.Volume,
+                port.ControllerPair);
+            return;
+        }
+
         if (port.PreservesGuestFormat)
         {
             AudioPcmConversion.CopyWithVolume(source, destination, port.IsFloat, port.Gain);
@@ -1133,6 +1218,9 @@ public static class AudioOutExports
     internal static void SetStreamFactoryForTests(Func<uint, IHostAudioStream?>? streamFactory) =>
         Volatile.Write(ref _streamFactoryForTests, streamFactory);
 
+    internal static void SetControllerFactoryForTests(Func<uint, IHostAudioStream?>? controllerFactory) =>
+        Volatile.Write(ref _controllerFactoryForTests, controllerFactory);
+
     internal static void ResetForTests()
     {
         foreach (var handle in Ports.Keys)
@@ -1148,6 +1236,7 @@ public static class AudioOutExports
         _outputCount = 0;
         Volatile.Write(ref _shutdown, false);
         Volatile.Write(ref _streamFactoryForTests, null);
+        Volatile.Write(ref _controllerFactoryForTests, null);
     }
 
     private static bool _shutdown;

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Gpu.Vulkan.Images;
 using SharpEmu.Libs.Gpu.Abstractions;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
@@ -76,11 +77,12 @@ public sealed partial class GuestImageCacheTests
     // A title submits dozens of command buffers per frame. An image it writes early in a frame and reads late in it
     // is past the removal window of submissions in between, and an unrelated image the frame requested inside its
     // memory deleted it with its contents: its next use uploaded stale guest memory. An image used this frame stays;
-    // after the frame ends, the overlapping request parks it with its contents.
+    // once its frame has ended, the overlapping request parks it with its contents.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void FindImage_AnUnrelatedImageInsideAnImageUsedThisFrameKeepsItsContents(bool frameEnded)
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void FindImage_AnUnrelatedImageInsideAnImageUsedThisFrameKeepsItsContents(int framesEnded)
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new CacheHarness(_vulkan);
@@ -91,16 +93,45 @@ public sealed partial class GuestImageCacheTests
             new GpuExtent3D(width, width, 1), 1, 4, 1);
         var writtenId = harness.Acquire(ref written);
         Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, width * width * 4, deviceValue)));
-        AgeBeyondTheRemovalWindow(harness, writtenId, endFrame: frameEnded);
+        AgeBeyondTheRemovalWindow(harness, writtenId, framesEnded);
 
         var inside = LinearRequest(address + 0x8000, 0x4000, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
             new GpuExtent3D(64, 64, 1), 1, 4, 1);
         harness.Acquire(ref inside);
 
         Assert.True(harness.Images.Contains(writtenId));
-        Assert.Equal(frameEnded, harness.Image(writtenId).Parked);
+        Assert.Equal(framesEnded != 0, harness.Image(writtenId).Parked);
         Assert.True(harness.Image(writtenId).IsGpuModified);
         Assert.Equal(Bytes(Enumerable.Repeat(deviceValue, (int)(width * width)).ToArray()), harness.ReadImageBytes(harness.Image(writtenId)));
+
+        harness.Shutdown();
+    }
+
+    // Two aliases of the same memory that a title uses every frame swapped at each one's first use in a frame, each
+    // request parking the other. An image used in each of the two frames before is a recurring alias and stays
+    // registered; an image used in one frame only is parked after it, as above.
+    [Fact]
+    public void FindImage_AnImageUsedInEachOfTheTwoFramesBeforeStaysRegistered()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 128;
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var first = LinearRequest(address, width * width * 4, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(width, width, 1), 1, 4, 1);
+        var recurringId = harness.Acquire(ref first);
+        harness.Worker.Run(() => harness.Images.RunGarbageCollector());
+        var second = LinearRequest(address, width * width * 4, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(width, width, 1), 1, 4, 1);
+        Assert.Equal(recurringId, harness.Acquire(ref second));
+        AgeBeyondTheRemovalWindow(harness, recurringId, framesEnded: 1);
+
+        var inside = LinearRequest(address + 0x8000, 0x4000, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new GpuExtent3D(64, 64, 1), 1, 4, 1);
+        harness.Acquire(ref inside);
+
+        Assert.True(harness.Images.Contains(recurringId));
+        Assert.False(harness.Image(recurringId).Parked);
 
         harness.Shutdown();
     }
@@ -117,7 +148,7 @@ public sealed partial class GuestImageCacheTests
             new GpuExtent3D(width, width, 1), 1, 4, 1);
         var filledId = harness.Acquire(ref filled);
         Assert.False(harness.Image(filledId).IsGpuModified);
-        AgeBeyondTheRemovalWindow(harness, filledId, endFrame: true);
+        AgeBeyondTheRemovalWindow(harness, filledId);
 
         var inside = LinearRequest(address + 0x8000, 0x4000, GpuFormat.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
             new GpuExtent3D(64, 64, 1), 1, 4, 1);

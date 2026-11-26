@@ -50,6 +50,11 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
     private byte _leftTriggerRumble;
     private byte _rightTriggerRumble;
     private bool _rumbleDirty;
+    // Timed rumble (SetHapticRumble) layered over the steady motors until it expires, as the SDL adapter does.
+    private byte _hapticLargeMotor;
+    private byte _hapticSmallMotor;
+    private long _hapticExpiresAt;
+    private bool _hapticApplied;
     private uint _lightbar = 0x000040;
     private bool _lightbarDirty = true;
     private HostAdaptiveTriggerEffect? _pendingLeftEffect;
@@ -519,6 +524,17 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
         }
     }
 
+    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs)
+    {
+        lock (_outputGate)
+        {
+            _hapticLargeMotor = largeMotor;
+            _hapticSmallMotor = smallMotor;
+            _hapticExpiresAt = Environment.TickCount64 + durationMs;
+            _rumbleDirty = true;
+        }
+    }
+
     public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger)
     {
         lock (_outputGate)
@@ -598,8 +614,16 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
         HostAdaptiveTriggerEffect? rightEffect;
         lock (_outputGate)
         {
-            largeMotor = _largeMotor;
-            smallMotor = _smallMotor;
+            var hapticActive = _hapticExpiresAt - Environment.TickCount64 > 0
+                && (_hapticLargeMotor | _hapticSmallMotor) != 0;
+            if (_hapticApplied && !hapticActive)
+            {
+                _rumbleDirty = true; // the timed rumble ran out: drop back to the steady motors
+            }
+
+            _hapticApplied = hapticActive;
+            largeMotor = Math.Max(_largeMotor, hapticActive ? _hapticLargeMotor : (byte)0);
+            smallMotor = Math.Max(_smallMotor, hapticActive ? _hapticSmallMotor : (byte)0);
             leftTriggerRumble = _leftTriggerRumble;
             rightTriggerRumble = _rightTriggerRumble;
             lightbar = _lightbar;

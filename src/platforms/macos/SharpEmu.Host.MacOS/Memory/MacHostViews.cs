@@ -592,6 +592,17 @@ internal sealed unsafe partial class MacHostViews : IHostViewMemory, IHostMapped
         }
     }
 
+    // The region table keeps every page's access as ChangeAccess/ChangeDerivedAccess set it (carveout pages included,
+    // whose access lives only in the table), so the shadow table is the authority, as on Linux.
+    public IReadOnlyList<HostPageAccess> QueryAccess(ulong address, ulong size)
+    {
+        lock (HostViewRegions.Gate)
+        {
+            return HostViewMemory.CollectAccess(address, size, static current =>
+                HostViewRegions.TryQuery(current, out var info) ? (true, info) : (false, default));
+        }
+    }
+
     public bool ChangeDerivedAccess(ulong address, ulong size, GuestPageProtection guestAccess,
         HostPageProtection derivedHostAccess, bool ordinaryEnrollment)
         => ChangeDerivedAccessCore(address, size, guestAccess, derivedHostAccess, ordinaryEnrollment, out _, out _);

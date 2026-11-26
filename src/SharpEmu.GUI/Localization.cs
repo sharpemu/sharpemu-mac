@@ -19,4 +19,5 @@ public sealed class Localization : INotifyPropertyChanged
     public string Format(string key, params object?[] args) => strings.Format(key, args);
     public List<LanguageInfo> DiscoverLanguages() => strings.DiscoverLanguages();
     public void Load(string code) => strings.Load(code);
+    public IReadOnlyDictionary<string, string> WithPrefix(string prefix) => strings.WithPrefix(prefix);
 }

@@ -97,6 +97,7 @@ public enum GpuSplitGamepadOutput : uint
     AdaptiveTriggers = 3,
     Lightbar = 4,
     ResetLightbar = 5,
+    HapticRumble = 6,
 }
 
 /// <summary>Status codes of the split's synchronous calls (0 is success).</summary>
@@ -269,6 +270,9 @@ public struct GamepadOutputMessage
     public byte Flags;
     public AdaptiveTriggerWire Left;
     public AdaptiveTriggerWire Right;
+
+    /// <summary>Haptic rumble: how long the motor levels in A and B hold.</summary>
+    public uint DurationMs;
 }
 
 /// <summary>Flags of a <see cref="ProtectRequestMessage"/>.</summary>

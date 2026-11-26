@@ -93,6 +93,7 @@ public sealed unsafe class ManagedWriteIntervalTests
         public bool CommitPrivate(ulong address, ulong size, HostPageProtection protection) => throw new NotSupportedException();
         public bool ReleasePrivate(ulong address, ulong size) => throw new NotSupportedException();
         public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection) => throw new NotSupportedException();
+        public IReadOnlyList<HostPageAccess> QueryAccess(ulong address, ulong size) => throw new NotSupportedException();
         public bool FreeOwnedRange(ulong address, ulong size) => throw new NotSupportedException();
         public void Dispose() { Backing?.Dispose(); if (pin.IsAllocated) pin.Free(); }
     }

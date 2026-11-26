@@ -77,19 +77,23 @@ public static partial class AjmExports
             return ctx.SetReturn(OrbisAjmErrorJobCreation);
         }
 
-        var status = ExecuteControl(ctx, instanceId, flags, inputAddress, inputSize);
-        if (outputSize >= AjmSidebandResultBytes)
+        // Runs in batch order with the other jobs (on the AJM thread when the batch is deferred).
+        RunOrDefer(ctx, infoAddress, c =>
         {
-            WriteBasicResult(ctx, outputAddress, status);
-        }
+            var status = ExecuteControl(c, instanceId, flags, inputAddress, inputSize);
+            if (outputSize >= AjmSidebandResultBytes)
+            {
+                WriteBasicResult(c, outputAddress, status);
+            }
 
-        if (TraceEnabled)
-        {
-            Trace(
-                $"batch_job_control instance=0x{instanceId:X8} flags=0x{flags:X} " +
-                $"in=0x{inputAddress:X16}+0x{inputSize:X} out=0x{outputAddress:X16}+0x{outputSize:X} " +
-                $"status=0x{status:X8}");
-        }
+            if (TraceEnabled)
+            {
+                Trace(
+                    $"batch_job_control instance=0x{instanceId:X8} flags=0x{flags:X} " +
+                    $"in=0x{inputAddress:X16}+0x{inputSize:X} out=0x{outputAddress:X16}+0x{outputSize:X} " +
+                    $"status=0x{status:X8}");
+            }
+        });
         return ctx.SetReturn(0);
     }
 
@@ -256,13 +260,17 @@ public static partial class AjmExports
         const uint ignoreRatio = 1u << 3;
         var validRatio = (flags & ignoreRatio) != 0
             || (float.IsFinite(ratio) && ratio is >= 0 and <= 4 && change == 0.0f);
-        var status = TryGetInstance(instanceId, out var instance) && validRatio
-            ? 0
-            : Atrac9DecodeState.ResultInvalidParameter;
-        if (status == 0)
-            instance.Opus?.SetResampleParameters(ratio, flags);
-        WriteBasicResult(ctx, resultAddress, status);
-        Trace($"batch_job_set_resample_parameters_ex instance=0x{instanceId:X8} ratio={ratio:R} change={change:R} flags=0x{flags:X8} status=0x{status:X8}");
+        RunOrDefer(ctx, infoAddress, c =>
+        {
+            var status = TryGetInstance(instanceId, out var instance) && validRatio
+                ? 0
+                : Atrac9DecodeState.ResultInvalidParameter;
+            if (status == 0)
+                instance!.Opus?.SetResampleParameters(ratio, flags);
+            WriteBasicResult(c, resultAddress, status);
+            if (TraceEnabled)
+                Trace($"batch_job_set_resample_parameters_ex instance=0x{instanceId:X8} ratio={ratio:R} change={change:R} flags=0x{flags:X8} status=0x{status:X8}");
+        });
         return ctx.SetReturn(0);
     }
 
@@ -289,11 +297,14 @@ public static partial class AjmExports
 
         if (resultAddress != 0)
         {
-            // SceAjmEncodeResult: Result + Stream.
-            Span<byte> sideband = stackalloc byte[AjmSidebandResultBytes + AjmSidebandStreamBytes];
-            sideband.Clear();
-            BinaryPrimitives.WriteInt32LittleEndian(sideband, Atrac9DecodeState.ResultInvalidParameter);
-            _ = ctx.Memory.TryWrite(resultAddress, sideband);
+            RunOrDefer(ctx, infoAddress, c =>
+            {
+                // SceAjmEncodeResult: Result + Stream.
+                Span<byte> sideband = stackalloc byte[AjmSidebandResultBytes + AjmSidebandStreamBytes];
+                sideband.Clear();
+                BinaryPrimitives.WriteInt32LittleEndian(sideband, Atrac9DecodeState.ResultInvalidParameter);
+                _ = c.Memory.TryWrite(resultAddress, sideband);
+            });
         }
 
         Trace($"batch_job_encode instance=0x{instanceId:X8} unsupported");

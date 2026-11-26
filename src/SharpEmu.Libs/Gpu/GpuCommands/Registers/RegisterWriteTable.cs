@@ -46,7 +46,10 @@ public static partial class RegisterWriteTable
     public static uint WriteShaderPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
     {
         uint consumed;
-        if (ScalarReuseEnabled && TryReuseScalarPacket(banks, offset, values))
+        // A packet that repeats the stored scalars and kinds leaves the state as it is (on by default; the trace writes every
+        // packet). SHARPEMU_REGISTER_IDENTICAL_SCALARS=1 takes the profiled comparison (TryReuseScalarPacket) instead.
+        if (!Rendering.RenderTrace.Enabled &&
+            (ScalarReuseEnabled ? TryReuseScalarPacket(banks, offset, values) : RegisterWriters.SameUserScalarPacket(banks, offset, values)))
         {
             // The packet still consumes its marker, even when its stored state is unchanged; the
             // stamps stay, since no stored word changed.

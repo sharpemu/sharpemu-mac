@@ -538,6 +538,7 @@ public sealed unsafe class SplitInProcessTests
         public string? DescribeConnectedGamepad() => null;
 
         public void SetRumble(byte largeMotor, byte smallMotor) => Calls.Add($"rumble {largeMotor} {smallMotor}");
+        public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs) => Calls.Add($"haptic {largeMotor} {smallMotor} {durationMs}");
 
         public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger) => Calls.Add($"triggers {leftTrigger} {rightTrigger}");
 

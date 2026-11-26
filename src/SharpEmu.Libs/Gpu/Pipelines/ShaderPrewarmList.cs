@@ -114,6 +114,7 @@ public sealed class ShaderCodeCapture
     public ulong FrontendDomain { get; init; }
     public uint[] FrontendUserData { get; init; } = [];
     public ulong FrontendContinuationOffset { get; init; }
+    public uint FrontendEntryCodeSize { get; init; }
 
     public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) Key =>
         (Hash, CodeSize, Address, Fused is { } fused ? unchecked(fused.ContinuationAddress - Address) : FrontendContinuationOffset);
@@ -1424,6 +1425,10 @@ public sealed partial class ShaderPrewarmList : IDisposable
             }
 
             writer.Write(code.FrontendContinuationOffset);
+            if (code.FrontendEntryCodeSize != 0)
+            {
+                writer.Write(code.FrontendEntryCodeSize);
+            }
         }
 
         writer.Flush();
@@ -1451,6 +1456,7 @@ public sealed partial class ShaderPrewarmList : IDisposable
         var frontendDomain = 0UL;
         uint[] frontendUserData = [];
         var frontendContinuationOffset = 0UL;
+        var frontendEntryCodeSize = 0u;
         if (reader.BaseStream.Position < reader.BaseStream.Length)
         {
             frontendDomain = reader.ReadUInt64();
@@ -1461,6 +1467,10 @@ public sealed partial class ShaderPrewarmList : IDisposable
             }
 
             frontendContinuationOffset = reader.ReadUInt64();
+            if (reader.BaseStream.Position < reader.BaseStream.Length)
+            {
+                frontendEntryCodeSize = reader.ReadUInt32();
+            }
         }
 
         return new ShaderCodeCapture
@@ -1474,6 +1484,7 @@ public sealed partial class ShaderPrewarmList : IDisposable
             FrontendDomain = frontendDomain,
             FrontendUserData = frontendUserData,
             FrontendContinuationOffset = frontendContinuationOffset,
+            FrontendEntryCodeSize = frontendEntryCodeSize,
         };
     }
 

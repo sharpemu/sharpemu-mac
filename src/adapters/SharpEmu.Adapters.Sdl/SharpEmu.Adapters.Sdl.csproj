@@ -38,6 +38,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Opus encoder for the DualSense Bluetooth speaker stream (SdlDualSenseBluetooth). -->
+    <PackageReference Include="Concentus" />
     <PackageReference Include="ppy.SDL3-CS" />
   </ItemGroup>
 

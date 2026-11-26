@@ -90,6 +90,8 @@ public static partial class KernelRuntimeCompatExports
         new (ulong Base, ulong Size, ulong GuestBase)[3];
     private static int _stackChkFailCount;
     private static long _usleepTraceCount;
+    // A nap at most this long never takes the audio producer's precise spin (upstream's spin limit).
+    private const ulong UsleepSpinLimitMicroseconds = 50;
     // SHARPEMU_USLEEP_SHORT_PUMP=1 restores the old behaviour of pumping the guest
     // scheduler on every sceKernelUsleep, including sub-millisecond ones.
     private static readonly bool _usleepShortPump =
@@ -276,6 +278,26 @@ public static partial class KernelRuntimeCompatExports
             {
                 dsPump = Stopwatch.GetTimestamp() - dsPump;
             }
+        }
+
+        // An audio producer that runs behind the device naps for the time it asks (a timer wait takes about 0.5 ms).
+        if (micros > UsleepSpinLimitMicroseconds && Audio.AudioOut2Exports.TryBeginPreciseNap(micros))
+        {
+            try
+            {
+                HostHighResolutionSleep.SpinMicroseconds(micros);
+            }
+            finally
+            {
+                Audio.AudioOut2Exports.EndPreciseNap();
+            }
+
+            ctx[CpuRegister.Rax] = 0;
+            if (dsUsleep)
+            {
+                DsSched.Usleep(ctx, micros, dsEnter, dsPump, 3);
+            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         var dsBranch = 2;

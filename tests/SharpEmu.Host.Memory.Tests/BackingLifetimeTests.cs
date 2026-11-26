@@ -385,6 +385,7 @@ public sealed class BackingLifetimeTests
         public bool CommitPrivate(ulong address, ulong size, HostPageProtection protection) => true;
         public bool ReleasePrivate(ulong address, ulong size) => true;
         public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection) => true;
+        public IReadOnlyList<HostPageAccess> QueryAccess(ulong address, ulong size) => []; // access is never tracked here
         public bool FreeOwnedRange(ulong address, ulong size) { Frees.Add(new(address, size)); return Frees.Count != FailFreeCall; }
     }
 }

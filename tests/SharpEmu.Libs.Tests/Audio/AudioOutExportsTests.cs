@@ -542,6 +542,64 @@ public sealed class AudioOutExportsTests : IDisposable
         Assert.Equal(samples, Assert.Single(Assert.Single(_streams).Submissions));
     }
 
+    [Theory]
+    [InlineData(4, 0)]
+    [InlineData(10, 2)]
+    public void ControllerPortsPlayOnTheirControllerPairAndNotOnTheSpeakers(int portType, int pair)
+    {
+        var controller = new RecordingAudioStream();
+        AudioOutExports.SetControllerFactoryForTests(_ => controller);
+        var handle = Open(type: portType);
+        if (portType == AudioOutExports.PortTypePadSpeaker)
+        {
+            // The fork applies the pad speaker mix level (default -9 dB) on the controller too; unity keeps the
+            // expected samples exact.
+            Assert.Equal(0, SetMixLevel(handle, 32768));
+        }
+
+        Span<byte> source = stackalloc byte[8];
+        BinaryPrimitives.WriteInt16LittleEndian(source, 16384);
+        BinaryPrimitives.WriteInt16LittleEndian(source[2..], -16384);
+        BinaryPrimitives.WriteInt16LittleEndian(source[4..], 8192);
+        BinaryPrimitives.WriteInt16LittleEndian(source[6..], -8192);
+        Assert.True(_memory.TryWrite(FirstSourceAddress, source));
+
+        // The fork's sceAudioOutOutput returns the port's frame count.
+        Assert.Equal(2, SubmitSingle(handle, FirstSourceAddress));
+
+        Assert.Empty(_streams);
+        var expected = new float[8];
+        expected[pair] = 0.5f;
+        expected[pair + 1] = -0.5f;
+        expected[4 + pair] = 0.25f;
+        expected[4 + pair + 1] = -0.25f;
+        var submitted = Assert.Single(controller.Submissions);
+        Assert.Equal(expected, System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(submitted.AsSpan()).ToArray());
+    }
+
+    [Fact]
+    public void ControllerPortsWithoutAControllerStaySilent()
+    {
+        // Without a controller output a vibration port falls back to PadHaptics, never to the speakers.
+        SharpEmu.Libs.Pad.PadHaptics.ResetForTests();
+        SharpEmu.Libs.Pad.PadHaptics.SetHostInputForTests(new SharpEmu.Libs.Tests.Pad.RecordingHostInput());
+        try
+        {
+            AudioOutExports.SetControllerFactoryForTests(_ => null);
+            var handle = Open(type: 10);
+            Assert.True(handle > 0);
+            Assert.True(_memory.TryWrite(FirstSourceAddress, new byte[] { 1, 0, 2, 0, 3, 0, 4, 0 }));
+
+            Assert.Equal(2, SubmitSingle(handle, FirstSourceAddress));
+
+            Assert.Empty(_streams);
+        }
+        finally
+        {
+            SharpEmu.Libs.Pad.PadHaptics.ResetForTests();
+        }
+    }
+
     public void Dispose() => AudioOutExports.ResetForTests();
 
     private int OpenPort(uint bufferLength) => Open(type: 0, bufferLength: bufferLength);

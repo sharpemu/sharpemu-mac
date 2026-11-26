@@ -11,7 +11,10 @@ namespace SharpEmu.Core.Cpu.Native;
 // touch it, belong to the per-OS execution integration (W10).
 public sealed unsafe partial class DirectExecutionBackend
 {
-    private const int HostStackStateBytes = 3 * sizeof(ulong);
+    // The host's stack pointer, its two stack bounds, then its MXCSR and x87 control word.
+    private const int HostStackStateBytes = 4 * sizeof(ulong);
+    private const byte HostMxcsrOffset = 3 * sizeof(ulong);
+    private const byte HostFpuControlWordOffset = HostMxcsrOffset + sizeof(uint);
 
     /// <summary>
     /// Bounds of the host mapping holding <paramref name="stackPointer"/>.

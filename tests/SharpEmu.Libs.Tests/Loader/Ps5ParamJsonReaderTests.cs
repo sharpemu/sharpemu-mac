@@ -39,7 +39,7 @@ public sealed class Ps5ParamJsonReaderTests
     {
         var json = "{\"contentId\":\"UP8103-PPSA18454_00-0936750542714392\",\"contentVersion\":\"01.000.000\"}";
 
-        var (_, titleId, version) = Ps5ParamJsonReader.TryReadPs5Param(Encoding.UTF8.GetBytes(json));
+        var (_, titleId, version, _) = Ps5ParamJsonReader.TryReadPs5Param(Encoding.UTF8.GetBytes(json));
 
         Assert.Equal("PPSA18454", titleId);
         Assert.Equal("01.000.000", version);
@@ -51,5 +51,27 @@ public sealed class Ps5ParamJsonReaderTests
         var json = "{\"titleId\":\"PPSA00001\",\"contentId\":\"UP8103-PPSA18454_00-0936750542714392\"}";
 
         Assert.Equal("PPSA00001", Ps5ParamJsonReader.TryReadPs5Param(Encoding.UTF8.GetBytes(json)).TitleId);
+    }
+
+    [Fact]
+    public void ReadsTheConceptIdSharedByRegionalReleases()
+    {
+        var json = """
+            { "titleId": "PPSA04263", "conceptId": "201930", "contentVersion": "01.000.000",
+              "localizedParameters": { "defaultLanguage": "en-US", "en-US": { "titleName": "Test" } } }
+            """;
+        var info = Ps5ParamJsonReader.TryReadPs5Param(Encoding.UTF8.GetBytes(json));
+        Assert.Equal("PPSA04263", info.TitleId);
+        Assert.Equal("201930", info.ConceptId);
+        Assert.Equal("Test", info.Title);
+        Assert.Equal("01.000.000", info.Version);
+    }
+
+    [Fact]
+    public void ConceptIdIsNullWhenParamJsonHasNone()
+    {
+        var info = Ps5ParamJsonReader.TryReadPs5Param(Encoding.UTF8.GetBytes("""{ "titleId": "PPSA00001" }"""));
+        Assert.Equal("PPSA00001", info.TitleId);
+        Assert.Null(info.ConceptId);
     }
 }
