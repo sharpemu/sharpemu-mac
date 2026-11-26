@@ -348,7 +348,14 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             var resolved = _slots[result];
             var formatMismatch = exactFormat && resolved.Description.PixelFormat != request.Description.PixelFormat;
             var fewerResources = resolved.Description.Resources < request.Description.Resources;
-            if (formatMismatch || fewerResources || !resolved.SupportsViewType(request.View))
+            // A volume view needs a 3D image, and only a volume request makes one: an image made again from any
+            // other request is flat too, so each lookup would replace the image with another that never serves
+            // the view. A program that reads a 2D texture as a volume through a bindless heap looked it up every
+            // frame and filled device memory with copies of it (upstream 957d1dc90). The image is kept; the caller
+            // refuses or warns on the view as before (MetalCachedImage.GetOrCreateView, the bindless heap's check).
+            var wrongViewType = !resolved.SupportsViewType(request.View) &&
+                (request.View.Type != GpuImageViewType.Type3D || request.Description.IsVolume);
+            if (formatMismatch || fewerResources || wrongViewType)
             {
                 var cause = formatMismatch
                     ? MetalImageReleaseCause.FormatMismatch
@@ -381,7 +388,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             request.View = request.View with { BaseLayer = (uint)viewLayer };
         }
 
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         return result;
     }
 
@@ -1435,7 +1442,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
     /// <summary>When a memoised sampled binding still holds; see <see cref="TryStampTextureLocked"/>.</summary>
     internal readonly record struct TextureMemoStamp(
         MetalCachedImage Image, long ImageVersion, ulong RangeStart, ulong RangeSize, long PageVersions, long StencilOwners,
-        MetalCachedImage[]? Others = null, long OthersVersion = 0);
+        MetalCachedImage[]? Others = null, long OthersVersion = 0, long DepthClears = -1);
 
     // The images over the same bytes a memoised binding can stand beside: past this many the
     // binding takes the full acquire every time.
@@ -1520,7 +1527,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         var aliases = others?.ToArray();
         return new TextureMemoStamp(image, image.BindingVersion, start, end - start,
             _pageOwners.VersionSum(start, end - start), _stencilOwnersVersion,
-            aliases, aliases is null ? 0 : AliasVersion(image, aliases));
+            aliases, aliases is null ? 0 : AliasVersion(image, aliases), SampledDepthClearStamp(image));
     }
 
     /// <summary>
@@ -1532,6 +1539,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         Volatile.Read(ref stamp.Image.BindingVersion) == stamp.ImageVersion &&
         stamp.StencilOwners == Volatile.Read(ref _stencilOwnersVersion) &&
         (stamp.Others is null || AliasVersion(stamp.Image, stamp.Others) == stamp.OthersVersion) &&
+        SampledDepthClearStampHolds(stamp.DepthClears) &&
         (imageSetUnchanged || _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) == stamp.PageVersions);
 
     /// <summary>
@@ -1542,6 +1550,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         !HasDeferredRefreshes &&
         Volatile.Read(ref stamp.Image.BindingVersion) == stamp.ImageVersion &&
         (stamp.Others is null || AliasVersion(stamp.Image, stamp.Others) == stamp.OthersVersion) &&
+        SampledDepthClearStampHolds(stamp.DepthClears) &&
         _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) == stamp.PageVersions;
 
     private nint AcquireTextureViewLocked(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ulong resourceId)
@@ -1550,7 +1559,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         // now must see it the way the acquire left it before the wait existed.
         DrainDeferredRefreshesLocked();
         var image = _slots[imageIdentifier];
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         var traced = TracedImageAddress != 0 && image.Description.Data.Address == TracedImageAddress &&
             (_tracedAcquires++ < 64 || request.Role == ImageRole.StorageImage && _tracedAcquires < 4000);
         if (traced)
@@ -1608,6 +1617,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
             image.NoteUse(_owner.CurrentSerial);
         }
 
+        // A depth surface sampled while its HTILE holds a clear the next depth bind would load reads the cleared value
+        // (MetalImageCache.SampledDepthClear.cs).
+        if (request.Role == ImageRole.Texture && SampleClearsDepthLocked(image) is { } pendingClear)
+        {
+            ClearDepthBeforeSampleLocked(imageIdentifier, image, pendingClear);
+        }
+
         MaterializeSampledDccClear(imageIdentifier, image, in request);
         if (request.Role == ImageRole.Texture && image.Description.IsDepth &&
             TryDepthTwinView(image, in request.View, out var depthView))
@@ -1652,7 +1668,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         {
             if (stamp is { } taken)
             {
-                taken.Image.LastAccessTick = _collectionTick;
+                TouchImage(taken.Image);
                 taken.Image.NoteUse(serial);
             }
         }
@@ -1679,12 +1695,13 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         if (_deferredRefreshes.Count != 0 || !ReferenceEquals(_slots.TryGet(imageIdentifier), image) ||
             image.BindingVersion != stamp.ImageVersion || _stencilOwnersVersion != stamp.StencilOwners ||
             (stamp.Others is not null && AliasVersion(image, stamp.Others) != stamp.OthersVersion) ||
+            !SampledDepthClearStampHolds(stamp.DepthClears) ||
             _pageOwners.VersionSum(stamp.RangeStart, stamp.RangeSize) != stamp.PageVersions)
         {
             return false;
         }
 
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         FitResidentLevelsLocked(image, in request.View);
         if (image.BindingVersion != stamp.ImageVersion)
         {
@@ -1817,7 +1834,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         DrainOverlappingDeferredRefreshesLocked(image);
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         PromoteLinearView(image);
         EnsureViewUsageLocked(image, in request.View);
         WatchImage(imageIdentifier);
@@ -1898,7 +1915,7 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         DrainOverlappingDeferredRefreshesLocked(image);
-        image.LastAccessTick = _collectionTick;
+        TouchImage(image);
         PromoteLinearView(image);
         writes |= !ReadOnlyDepthPassesEnabled;
 
@@ -2550,7 +2567,8 @@ internal sealed partial class MetalImageCache : IGuestImageStore, IDisposable
 
         ref var cachedInfo = ref cached.Description;
         var role = request.Role;
-        var safeToDelete = _collectionTick - Math.Min(_collectionTick, cached.LastAccessTick) > TicksBeforeRemoval;
+        var safeToDelete = !UsedThisFrameForOverlap(cached) &&
+            _collectionTick - Math.Min(_collectionTick, cached.LastAccessTick) > TicksBeforeRemoval;
         var requestedBlock = requested.BytesPerBlock * requested.Samples;
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
         var requestedExtent = requested.BlockExtent;
