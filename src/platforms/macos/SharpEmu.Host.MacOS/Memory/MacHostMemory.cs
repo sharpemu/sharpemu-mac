@@ -112,6 +112,9 @@ internal sealed unsafe partial class MacHostMemory : IHostMemoryRaw
             out rawOldProtection);
     }
 
+    public string? DescribeNativeRegion(ulong address, ulong size) =>
+        MacHostViews.DescribeNativeRegion(address, size);
+
     public bool Query(ulong address, out HostRegionInfo info)
     {
         if (QueryRaw(address, out var nativeInfo) == 0)

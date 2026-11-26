@@ -63,14 +63,43 @@ public sealed class PadHapticsTests : IDisposable
     }
 
     [Fact]
-    public void AudioHapticsCombineWithCompatVibration()
+    public void AudioHapticsAreTimedRumbleBesideCompatVibration()
     {
+        var now = 1_000L;
+        PadHaptics.SetClockForTests(() => now);
+
         PadHaptics.SubmitAudioHaptics(100, 20);
         PadHaptics.SubmitAudioHaptics(100, 20);
         PadHaptics.SetVibration(50, 60);
         PadHaptics.ReleaseAudioHaptics();
 
-        Assert.Equal([((byte)100, (byte)20), ((byte)100, (byte)60), ((byte)50, (byte)60)], _input.Rumble);
+        // The compat vibration holds the steady motors; the haptic envelope is a timed layer the host combines with
+        // them, so neither overwrites the other.
+        Assert.Equal([((byte)50, (byte)60)], _input.SteadyRumble);
+        Assert.Equal([((byte)100, (byte)20), ((byte)0, (byte)0)], _input.TimedRumble);
+        Assert.All(_input.TimedDurations, duration => Assert.Equal(PadHaptics.HapticDurationMs, duration));
+    }
+
+    [Fact]
+    public void AudioHapticsAreRateLimitedAndRefreshedWhileRunning()
+    {
+        var now = 1_000L;
+        PadHaptics.SetClockForTests(() => now);
+
+        PadHaptics.SubmitAudioHaptics(100, 100);
+        now += 5;
+        PadHaptics.SubmitAudioHaptics(200, 200); // too soon after the start
+        now += PadHaptics.HapticMinimumIntervalMs;
+        PadHaptics.SubmitAudioHaptics(102, 100); // below the change threshold
+        PadHaptics.SubmitAudioHaptics(200, 100); // a real change after the minimum interval
+        now += PadHaptics.HapticRefreshIntervalMs;
+        PadHaptics.SubmitAudioHaptics(200, 100); // same level: refreshed before it lapses
+        PadHaptics.SubmitAudioHaptics(0, 0); // a stop goes at once
+
+        Assert.Equal(
+            [((byte)100, (byte)100), ((byte)200, (byte)100), ((byte)200, (byte)100), ((byte)0, (byte)0)],
+            _input.TimedRumble);
+        Assert.True(PadHaptics.HapticRefreshIntervalMs < PadHaptics.HapticDurationMs);
     }
 
     [NativeX64Fact]
@@ -89,7 +118,8 @@ public sealed class PadHapticsTests : IDisposable
         Assert.True(_memory.TryWrite(Base + 0x100, new byte[] { 10, 90 }));
 
         Assert.Equal(0, PadExports.PadSetVibration(_ctx));
-        Assert.Equal(((byte)200, (byte)90), _input.Rumble[^1]);
+        Assert.Equal(((byte)10, (byte)90), _input.SteadyRumble[^1]);
+        Assert.Equal(((byte)200, (byte)0), _input.TimedRumble[^1]);
     }
 
     internal static byte[] Float32(params float[] samples)
@@ -106,7 +136,14 @@ public sealed class PadHapticsTests : IDisposable
 
 internal sealed class RecordingHostInput : IHostInput
 {
+    /// <summary>Every rumble change, steady and timed, in order.</summary>
     public List<(byte Large, byte Small)> Rumble { get; } = [];
+
+    public List<(byte Large, byte Small)> SteadyRumble { get; } = [];
+
+    public List<(byte Large, byte Small)> TimedRumble { get; } = [];
+
+    public List<uint> TimedDurations { get; } = [];
 
     public void EnsureStarted()
     {
@@ -116,9 +153,18 @@ internal sealed class RecordingHostInput : IHostInput
 
     public string? DescribeConnectedGamepad() => null;
 
-    public void SetRumble(byte largeMotor, byte smallMotor) => Rumble.Add((largeMotor, smallMotor));
+    public void SetRumble(byte largeMotor, byte smallMotor)
+    {
+        Rumble.Add((largeMotor, smallMotor));
+        SteadyRumble.Add((largeMotor, smallMotor));
+    }
 
-    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs) => Rumble.Add((largeMotor, smallMotor));
+    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs)
+    {
+        Rumble.Add((largeMotor, smallMotor));
+        TimedRumble.Add((largeMotor, smallMotor));
+        TimedDurations.Add(durationMs);
+    }
 
     public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger)
     {

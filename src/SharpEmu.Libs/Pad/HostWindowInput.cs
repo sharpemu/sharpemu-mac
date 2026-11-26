@@ -220,14 +220,21 @@ public static class HostWindowInput
         if (changed) Changed?.Invoke();
     }
 
-    public static void SetGamepad(string? name, HostGamepadState state)
+    public static void SetGamepad(string? name, HostGamepadState state) =>
+        SetGamepad(name, state, sourceOrientation: false);
+
+    /// <summary>
+    /// <paramref name="sourceOrientation"/>: the state already carries the pad's orientation, accumulated where the
+    /// gamepad's sensor readings arrive (the two-process split's GPU process), so it is kept instead of this process's.
+    /// </summary>
+    public static void SetGamepad(string? name, HostGamepadState state, bool sourceOrientation)
     {
         bool changed;
         lock (Gate)
         {
             changed = _gamepadConnected != state.Connected || _gamepadState.Buttons != state.Buttons ||
                       !SameContacts(_gamepadState.Touch, state.Touch);
-            if (state.Motion.Available)
+            if (state.Motion.Available && !sourceOrientation)
             {
                 var orientation = Orientation.Orientation;
                 state = state with
@@ -303,20 +310,31 @@ public static class HostWindowInput
         }
     }
 
-    internal static void ResetMotionOrientation()
+    // The game's reset and tilt correction also go to the gamepad output, which forwards them to the process that
+    // accumulates the orientation when that is another one (the two-process split). That process applies them with
+    // forwardToOutput false, so they never travel back.
+    public static void ResetMotionOrientation(bool forwardToOutput = true)
     {
+        IHostGamepadOutput? output;
         lock (Gate)
         {
             Orientation.Reset();
+            output = forwardToOutput ? _gamepadOutput : null;
         }
+
+        output?.ResetMotionOrientation();
     }
 
-    internal static void SetMotionTiltCorrection(bool enabled)
+    public static void SetMotionTiltCorrection(bool enabled, bool forwardToOutput = true)
     {
+        IHostGamepadOutput? output;
         lock (Gate)
         {
             Orientation.TiltCorrection = enabled;
+            output = forwardToOutput ? _gamepadOutput : null;
         }
+
+        output?.SetMotionTiltCorrection(enabled);
     }
 
     private static bool SameContacts(HostTouchState left, HostTouchState right) =>
@@ -451,4 +469,14 @@ public interface IHostGamepadOutput
     void SetLightbar(byte red, byte green, byte blue);
 
     void ResetLightbar();
+
+    /// <summary>scePadResetOrientation, for an output whose process accumulates the orientation elsewhere.</summary>
+    void ResetMotionOrientation()
+    {
+    }
+
+    /// <summary>scePadSetTiltCorrectionState, for an output whose process accumulates the orientation elsewhere.</summary>
+    void SetMotionTiltCorrection(bool enabled)
+    {
+    }
 }

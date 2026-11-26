@@ -577,10 +577,38 @@ public sealed unsafe class SplitInProcessTests
             output.ResetLightbar();
             _ = backend.SubmitDone(null!);
             Assert.Equal(new[] { "rumble 10 20", "triggers  7", "lightbar 1 2 3", "adaptive 11 none", "reset" }, source.Calls);
+
+            // The orientation accumulates on the GPU side, where the sensor readings arrive; the game's reset
+            // crosses to it, and the orientation crosses back with the pad state.
+            var motion = new HostGamepadState(
+                Connected: true, Buttons: 0, LeftX: 128, LeftY: 128, RightX: 128, RightY: 128, LeftTrigger: 0,
+                RightTrigger: 0, Type: HostGamepadType.DualSense, Connection: HostGamepadConnection.Unknown,
+                Motion: new HostMotionState(true, 0, -9.8f, 0, 0, 0, 0), Touch: default, BatteryPercent: 100);
+            HostWindowInput.ApplyGamepadMotion(angularVelocity: true, 0, 0, 1f, 1_000_000);
+            HostWindowInput.ApplyGamepadMotion(angularVelocity: true, 0, 0, 1f, 51_000_000);
+            HostWindowInput.SetGamepad("pad", motion);
+            _ = HostWindowInput.CopyState(stackalloc int[4], out _, out var turned, out _);
+            Assert.True(turned.Motion.OrientationW < 0.9999f);
+            var crossed = SplitConvert.FromWire(SplitConvert.ToWire(turned));
+            Assert.Equal(turned.Motion, crossed.Motion);
+
+            output.SetMotionTiltCorrection(true);
+            output.ResetMotionOrientation();
+            _ = backend.SubmitDone(null!);
+            HostWindowInput.SetGamepad("pad", motion);
+            _ = HostWindowInput.CopyState(stackalloc int[4], out _, out var reset, out _);
+            Assert.Equal(1f, reset.Motion.OrientationW);
+
+            // A state that carries its source's orientation keeps it.
+            HostWindowInput.SetGamepad("pad", crossed, sourceOrientation: true);
+            _ = HostWindowInput.CopyState(stackalloc int[4], out _, out var kept, out _);
+            Assert.Equal(crossed.Motion, kept.Motion);
         }
         finally
         {
             HostWindowInputSource.Clear(source);
+            HostWindowInput.SetMotionTiltCorrection(false, forwardToOutput: false);
+            HostWindowInput.ClearGamepad();
         }
 
         backend.RequestClose();

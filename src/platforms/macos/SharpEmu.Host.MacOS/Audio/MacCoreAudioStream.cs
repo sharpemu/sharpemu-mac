@@ -22,6 +22,20 @@ namespace SharpEmu.Host.MacOS;
 /// it, because a gap in the stream is an audible click and a few extra
 /// milliseconds of latency is not.
 /// </summary>
+/// <param name="DeviceId">The CoreAudio device to play on; 0 follows the user's default output.</param>
+/// <param name="ReportsClock">Whether this stream's playback position is the guest audio clock.</param>
+/// <param name="DropOldest">
+/// For a stream the guest is not paced by: Submit never waits, and audio past the cap drops the oldest queued frames.
+/// </param>
+/// <param name="RawChannels">
+/// The guest's channels go to the device's channels one to one, with no fold and no channel layout (the device must
+/// have exactly the guest's channel count).
+/// </param>
+internal readonly record struct MacAudioStreamTarget(uint DeviceId, bool ReportsClock, bool DropOldest, bool RawChannels)
+{
+    public static MacAudioStreamTarget DefaultOutput => new(0, ReportsClock: true, DropOldest: false, RawChannels: false);
+}
+
 [SupportedOSPlatform("macos")]
 internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
 {
@@ -47,6 +61,7 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
     private readonly float[]? _matrix;
     private readonly long _maximumQueuedFrames;
     private readonly MacAudioRingBuffer? _ring;
+    private readonly MacAudioStreamTarget _target;
 
     private GCHandle _selfHandle;
     private nint _unit;
@@ -74,8 +89,10 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
         uint sampleRate,
         int channels,
         HostPcmFormat format,
-        int maximumQueuedBytes)
+        int maximumQueuedBytes,
+        MacAudioStreamTarget? target = null)
     {
+        _target = target ?? MacAudioStreamTarget.DefaultOutput;
         _sampleRate = sampleRate;
         _guestChannels = channels;
         _format = format;
@@ -85,7 +102,8 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
         var description = new AudioComponentDescription
         {
             ComponentType = AudioUnitTypeOutput,
-            ComponentSubType = AudioUnitSubTypeDefaultOutput,
+            // A chosen device needs the HAL output unit; the default output unit follows the user's selection.
+            ComponentSubType = _target.DeviceId != 0 ? AudioUnitSubTypeHalOutput : AudioUnitSubTypeDefaultOutput,
             ComponentManufacturer = AudioUnitManufacturerApple,
         };
 
@@ -103,7 +121,27 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
             // documents no downmix for a client format wider than the device, so
             // the stream renders at the device's channel count and the fold from
             // the guest's layout happens in MacAudioChannelMap.
+            if (_target.DeviceId != 0)
+            {
+                var device = _target.DeviceId;
+                Check(
+                    AudioUnitSetProperty(
+                        _unit,
+                        PropertyCurrentDevice,
+                        ScopeGlobal,
+                        0,
+                        &device,
+                        sizeof(uint)),
+                    "AudioUnitSetProperty(CurrentDevice)");
+            }
+
             _renderChannels = QueryDeviceChannels();
+            if (_target.RawChannels && _renderChannels != _guestChannels)
+            {
+                throw new InvalidOperationException(
+                    $"CoreAudio device {_target.DeviceId} renders {_renderChannels} channels, not {_guestChannels}.");
+            }
+
             _matrix = MacAudioChannelMap.Build(_guestChannels, _renderChannels);
 
             // The client format keeps the guest's sample rate: the output unit
@@ -130,7 +168,10 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
                     (uint)sizeof(AudioStreamBasicDescription)),
                 "AudioUnitSetProperty(StreamFormat)");
 
-            TrySetChannelLayout();
+            if (!_target.RawChannels)
+            {
+                TrySetChannelLayout();
+            }
 
             var maximumFrames = MaximumFramesPerSlice;
             // Advisory (TN2321): only strictly needed when the device buffer is
@@ -218,7 +259,7 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
             var framesPerMillisecond = _sampleRate / 1_000.0;
             long queued;
             var overrun = false;
-            while ((queued = _ring.QueuedFrames) > _maximumQueuedFrames)
+            while ((queued = _ring.QueuedFrames) > _maximumQueuedFrames && !_target.DropOldest)
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
                 {
@@ -263,12 +304,22 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
             }
 
             WriteToRing(_scratch.AsSpan(0, converted * _renderChannels));
+            if (_target.DropOldest)
+            {
+                // Never wait for a device the guest is not paced by: past the cap
+                // the oldest audio goes, so a device stall leaves a short gap.
+                _ring.DiscardOldestBeyond(_maximumQueuedFrames);
+            }
 
             // Everything handed over minus what the device still holds is what
             // the player has actually heard; video decoded on the host follows
             // this clock rather than wall clock.
-            GuestAudioClock.Report(
-                Math.Max(0, _totalSubmittedFrames - queued) / (double)_sampleRate);
+            if (_target.ReportsClock)
+            {
+                GuestAudioClock.Report(
+                    Math.Max(0, _totalSubmittedFrames - queued) / (double)_sampleRate);
+            }
+
             _totalSubmittedFrames += converted;
             return true;
         }
@@ -442,8 +493,10 @@ internal sealed unsafe class MacCoreAudioStream : IHostAudioStream
         }
 
         var written = _ring.Write(samples);
-        if (written * _renderChannels >= samples.Length)
+        if (written * _renderChannels >= samples.Length || _target.DropOldest)
         {
+            // A stream that drops its oldest audio never waits for room: a ring
+            // this full means the device has stalled, and the tail goes instead.
             return;
         }
 

@@ -104,6 +104,12 @@ public enum GpuSplitGamepadOutput : uint
     Lightbar = 4,
     ResetLightbar = 5,
     HapticRumble = 6,
+
+    /// <summary>scePadResetOrientation: the GPU process restarts the orientation it accumulates.</summary>
+    ResetOrientation = 7,
+
+    /// <summary>scePadSetTiltCorrectionState: A is 1 for on, 0 for off.</summary>
+    TiltCorrection = 8,
 }
 
 /// <summary>Status codes of the split's synchronous calls (0 is success).</summary>
@@ -388,6 +394,10 @@ public struct GamepadStateWire
     public float AngularVelocityX;
     public float AngularVelocityY;
     public float AngularVelocityZ;
+    public float OrientationX;
+    public float OrientationY;
+    public float OrientationZ;
+    public float OrientationW;
     public uint FirstTouchActive;
     public uint FirstTouchId;
     public float FirstTouchX;

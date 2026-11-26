@@ -16,8 +16,10 @@ public static class GpuRemoteProtocol
     /// 8: <see cref="GpuRemoteSyncOpcode.ResidencyRange"/>.
     /// 9: <see cref="GpuSplitGamepadOutput.HapticRumble"/> and <see cref="GamepadOutputMessage.DurationMs"/>.
     /// 10: overlay layers (<see cref="GpuRemoteMessage.OverlayLayer"/>, <see cref="GpuRemoteMessage.OverlaySurface"/>)
-    /// and typed text (<see cref="GpuSplitControl.TextInput"/>, <see cref="GpuSplitNotice.TypedText"/>).</remarks>
-    public const uint Version = 10;
+    /// and typed text (<see cref="GpuSplitControl.TextInput"/>, <see cref="GpuSplitNotice.TypedText"/>).
+    /// 11: the pad orientation in <see cref="GamepadStateWire"/>, <see cref="GpuSplitGamepadOutput.ResetOrientation"/>
+    /// and <see cref="GpuSplitGamepadOutput.TiltCorrection"/>.</remarks>
+    public const uint Version = 11;
 
 }
 

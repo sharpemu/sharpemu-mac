@@ -462,6 +462,12 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             case GpuSplitGamepadOutput.ResetLightbar:
                 input.ResetLightbar();
                 break;
+            case GpuSplitGamepadOutput.ResetOrientation:
+                HostWindowInput.ResetMotionOrientation(forwardToOutput: false);
+                break;
+            case GpuSplitGamepadOutput.TiltCorrection:
+                HostWindowInput.SetMotionTiltCorrection(message.A != 0, forwardToOutput: false);
+                break;
         }
     }
 
