@@ -695,6 +695,40 @@ public sealed class CompiledBranchSelectionTests : ResourceBranchTests
         Assert.Equal(1, nested);
     }
 
+    // A plan that writes memory marks every word its selection reads (ResourceBranchWriteGuard.ReadingWords), through the
+    // compiled selection as through the evaluator's write guard, so a host refuses a word a GPU write still owns instead of
+    // waiting for it; a plan without writes reads unmarked.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AGuardedSelectionMarksEveryWordItReads(bool writes)
+    {
+        var plan = writes ? ExtractWithWrites(CountedSampleThenStore(), true) : Extract(LoadedPredicate());
+        Assert.Equal(writes, plan.ResourceBranchesWithWrites);
+        var memory = new WordMemory();
+        memory.Words[0x1000] = 0;
+        memory.Words[0x3000] = 1;
+        var marks = new List<bool>();
+        bool Marking(ulong address, out uint word)
+        {
+            marks.Add(ResourceBranchWriteGuard.ReadingWords);
+            return memory.Read(address, out word);
+        }
+
+        uint[] userData = writes
+            ? [0x1000, 0, 16, 0, 0x1800, 0, 64, 0, .. VolumeImage, 0, 0, 0, 0]
+            : [.. UserData(0), 0, 0, 0, 0x3000, 0];
+        var selection = Assert.IsType<MaterializationProgram.BranchSelection>(plan.BranchSelection);
+        Assert.True(selection.TrySelect(Inputs(userData, GeneralRead, Marking), new bool[selection.SourceCount]));
+        var compiled = marks.ToArray();
+        marks.Clear();
+        RuntimeValueEvaluator.EvaluateActiveSources(plan, Inputs(userData, GeneralRead, Marking));
+        Assert.NotEmpty(compiled);
+        Assert.All(compiled, mark => Assert.Equal(writes, mark));
+        Assert.Equal(compiled, marks);
+        Assert.False(ResourceBranchWriteGuard.ReadingWords);
+    }
+
     // A T# whose halves are scalar buffer reads at a uniform record offset is evaluated word by word; the arm that reads it
     // is pruned like any other, through the program's full and fast paths.
     [Theory]
