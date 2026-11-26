@@ -301,6 +301,8 @@ public static partial class AgcExports
             public SubmittedVertexSnapshot? VertexSnapshot;
             public SubmittedIndexSnapshot? IndexSnapshot;
             public ParallelProgramPrefetch.Job? Job;
+            // An indexed draw run's indirect offsets (TryDrawIndexedRun), or null for one draw.
+            public uint[]? IndirectOffsets;
         }
 
         // Only the interpreter/render thread's local queue owns reusable wrappers. A sink
@@ -327,6 +329,7 @@ public static partial class AgcExports
             draw.VertexSnapshot = state.CurrentVertexSnapshot;
             draw.IndexSnapshot = state.CurrentIndexSnapshot;
             draw.Job = job;
+            draw.IndirectOffsets = null;
             return draw;
         }
 
@@ -344,6 +347,7 @@ public static partial class AgcExports
             draw.VertexSnapshot = null;
             draw.IndexSnapshot = null;
             draw.Job = null;
+            draw.IndirectOffsets = null;
             _spareLocalDraws.Push(draw);
         }
 
@@ -402,7 +406,7 @@ public static partial class AgcExports
                     : null;
                 ReplaceDispatchRuns(value is not null);
                 _computeTicketPool?.Dispose();
-                _computeTicketPool = value is not null && _executor is not null && _pipelines is { SupportsParallelResolution: true } pipelines &&
+                _computeTicketPool = value is not null && UsesWorkerDispatchRebinds && _executor is not null && _pipelines is { SupportsParallelResolution: true } pipelines &&
                     ComputeTickets.Mode != ComputeTickets.TicketMode.Off
                     ? new ComputeTickets(pipelines, reads => _host.BeginWorkerResolve(long.MaxValue, reads), () => _host.EndWorkerResolve(),
                         reads => _host.ValidateTicketReads(reads), ComputeTickets.WorkerCount, verify: ComputeTickets.Mode == ComputeTickets.TicketMode.Verify)
@@ -478,7 +482,7 @@ public static partial class AgcExports
                     try
                     {
                         RunExecutorDraw(draw.SubmitId, draw.State, draw.Banks, draw.Indexed, draw.IndexedArguments, draw.AutoArguments,
-                            clearSnapshots: false);
+                            clearSnapshots: false, draw.IndirectOffsets);
                     }
                     finally
                     {
@@ -670,7 +674,8 @@ public static partial class AgcExports
 
                 try
                 {
-                    RunExecutorDraw(pending.SubmitId, state, pending.Banks, pending.Indexed, pending.IndexedArguments, pending.AutoArguments);
+                    RunExecutorDraw(pending.SubmitId, state, pending.Banks, pending.Indexed, pending.IndexedArguments, pending.AutoArguments,
+                        offsets: pending.IndirectOffsets);
                 }
                 finally
                 {
@@ -773,22 +778,7 @@ public static partial class AgcExports
 
             if (_defersWholeWork && (_parallel is not null || producing))
             {
-                var snapshot = banks.Snapshot();
-                var pending = TakePendingDraw(producing, submitId, state, snapshot, indexed, in indexedArguments, in autoArguments,
-                    _parallel?.SubmitDrawAhead(snapshot, producing ? (_drawsCrossDispatches ? Sink!.DispatchGate : Sink!.Gate) : 0,
-                        producing ? Sink!.Gate : 0, indexed,
-                        indexed ? indexedArguments.StartInstanceUserData : autoArguments.StartInstanceUserData));
-                if (producing)
-                {
-                    Sink!.EnqueueDeferred(pending, isDraw: true);
-                }
-                else
-                {
-                    _pendingDraws.Enqueue(pending);
-                }
-
-                state.CurrentIndexSnapshot = null;
-                state.CurrentVertexSnapshot = null;
+                DeferWholeDraw(producing, submitId, state, banks, indexed, in indexedArguments, in autoArguments, offsets: null);
                 return true;
             }
 
@@ -806,15 +796,42 @@ public static partial class AgcExports
             return true;
         }
 
+        // A draw (or an indexed draw run) deferred whole to where it runs, with its programs prefetched (_defersWholeWork).
+        private void DeferWholeDraw(bool producing, ulong submitId, SubmittedDcbState state, RegisterBanks banks, bool indexed,
+            in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments, uint[]? offsets)
+        {
+            var snapshot = banks.Snapshot();
+            var pending = TakePendingDraw(producing, submitId, state, snapshot, indexed, in indexedArguments, in autoArguments,
+                _parallel?.SubmitDrawAhead(snapshot, producing ? (_drawsCrossDispatches ? Sink!.DispatchGate : Sink!.Gate) : 0,
+                    producing ? Sink!.Gate : 0, indexed,
+                    indexed ? indexedArguments.StartInstanceUserData : autoArguments.StartInstanceUserData));
+            pending.IndirectOffsets = offsets;
+            if (producing)
+            {
+                Sink!.EnqueueDeferred(pending, isDraw: true);
+            }
+            else
+            {
+                _pendingDraws.Enqueue(pending);
+            }
+
+            state.CurrentIndexSnapshot = null;
+            state.CurrentVertexSnapshot = null;
+        }
+
         private void RunExecutorDraw(ulong submitId, SubmittedDcbState state, RegisterBanks banks, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments,
-            bool clearSnapshots = true)
+            bool clearSnapshots = true, uint[]? offsets = null)
         {
             var executor = _executor!;
             var drawStarted = DcbParseProfile.Begin();
             _learningKey = (banks.Shader.Vertex.ExportAddress, banks.Shader.Pixel.Address);
             try
             {
-                if (indexed)
+                if (indexed && offsets is not null)
+                {
+                    executor.DrawIndexedRun(submitId, banks, in indexedArguments, offsets);
+                }
+                else if (indexed)
                 {
                     executor.DrawIndexed(submitId, banks, in indexedArguments);
                 }
@@ -906,19 +923,39 @@ public static partial class AgcExports
             SelectSnapshots(state, arguments.PacketAddress, indexed: true, arguments.IndexAddress, arguments.IndexCount);
         }
 
-        internal bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets)
+        // A host that resolves whole draws where they run (_defersWholeWork: the Metal host) takes the run as one deferred
+        // draw carrying its offsets, as TryRunExecutorDraw defers a draw; a host with resolve workers defers it to them.
+        public bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets)
         {
             var state = RequireCurrent();
             var banks = RequireTypedRegisters(state);
-            if (_resolvePool is not { } pool || _executor is null || !Producing ||
+            var producing = Producing;
+            var whole = _defersWholeWork && (_parallel is not null || producing);
+            var pool = _resolvePool;
+            if ((!whole && (pool is null || !producing)) || _executor is null ||
                 state.ActiveVertexSnapshots is { Count: > 0 } || state.ActiveIndexSnapshots is { Count: > 0 } ||
                 !_drawWrites.TryGetValue((banks.Shader.Vertex.ExportAddress, banks.Shader.Pixel.Address), out var known) ||
-                !known.Group || known.Registrations != ShaderHeaderRegistry.Registrations || !_executor.CanGroupIndexed(banks, in first)) return false;
+                !known.Group || known.Registrations != ShaderHeaderRegistry.Registrations ||
+                !(whole ? _executor.CanGroupIndexedConcurrently(banks, in first) : _executor.CanGroupIndexed(banks, in first))) return false;
             Diagnostics.DispatchRunTally.NoteDraw();
             RecordIndexedDrawState(in first);
-            RecordKnownColorTargets(state, banks);
             var run = offsets.ToArray();
-            DeferDraw(pool, submitId, banks, true, in first, default, run);
+            if (whole)
+            {
+                if (!producing)
+                {
+                    // A whole draw deferred to the render thread records its targets there (RunDeferred).
+                    RecordKnownColorTargets(state, banks);
+                }
+
+                DeferWholeDraw(producing, submitId, state, banks, indexed: true, in first, default, run);
+            }
+            else
+            {
+                RecordKnownColorTargets(state, banks);
+                DeferDraw(pool!, submitId, banks, true, in first, default, run);
+            }
+
             state.FrameDrawCount += (uint)run.Length;
             state.SawIndexedDraw = true;
             state.CurrentIndexSnapshot = null;

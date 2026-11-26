@@ -2106,6 +2106,59 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
+    /// <summary>
+    /// Whether every indirect draw of an indexed draw run may take the bindings this stage was prepared and bound with once
+    /// (RenderRecorder: the run then issues one DrawIndexedIndirect per record). As upstream's host refuses: a storage
+    /// image, a host-movie plane, or a texture that is one of the draw's color or depth targets (the earlier draws of the
+    /// run write what the later ones would sample). Refused too when a fill held for the pass end lies on the records'
+    /// page: PrepareIndirectDraw lands such fills over the first record only, and each record of a run lies in its page
+    /// (GpuCommandInterpreter.TryDrawIndexedRun). A refused run records each offset in full.
+    /// </summary>
+    bool IRenderHost.CanShareIndexedBindings(IPreparedBindings stage, ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth)
+    {
+        if (!SharesIndexedBindings((MetalStageBindings)stage, colors, in depth))
+        {
+            Interlocked.Increment(ref _indexedRunsRefused);
+            return false;
+        }
+
+        Interlocked.Increment(ref _indexedRunsShared);
+        return true;
+    }
+
+    private bool SharesIndexedBindings(MetalStageBindings bindings, ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth)
+    {
+        if (bindings.MovieLuma >= 0 || bindings.MovieChroma >= 0 ||
+            DeferredFillsOver(_preparedIndirectAddress & ~0xFFFUL, 0x1000))
+        {
+            return false;
+        }
+
+        for (var index = 0; index < bindings.ImageCount; index++)
+        {
+            if (bindings.IsStorage[index])
+            {
+                return false;
+            }
+
+            var image = bindings.Images[index];
+            if (depth.HasTarget && image == depth.Image)
+            {
+                return false;
+            }
+
+            foreach (ref readonly var color in colors)
+            {
+                if (image == color.Image)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
     void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
     {
         using var overlapOp = SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Op(dispatch: false);
