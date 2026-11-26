@@ -336,7 +336,7 @@ public static partial class Gen5MslTranslator
                     : _options.FastReciprocals
                         ? $"fast::divide(1.0f, sharpemu_flush_f32_denorm({F(instruction, 0)}))"
                         : $"(1.0f / sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
-                "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
+                "VRcpIflagF32" => FloatResult(instruction, EmitIntegerReciprocal(F(instruction, 0))),
                 "VLogF32" => InvalidNanF32Result(instruction, "fast::log2"),
                 "VExpF32" => FloatResult(instruction, $"fast::exp2(sharpemu_flush_f32_denorm({F(instruction, 0)}))"),
                 // GCN sin/cos take revolutions; reduce to one cycle first, then mirror
@@ -1065,6 +1065,18 @@ public static partial class Gen5MslTranslator
             var offset = Temp("uint", $"(({RawSource(instruction, 1)}) & 3u) << 3");
             var baseValue = Temp("uint", RawSource(instruction, 2));
             return $"(({baseValue} & ~(0xFFu << {offset})) | (({converted} & 0xFFu) << {offset}))";
+        }
+
+        // V_RCP_IFLAG_F32, the reciprocal estimate of AMD's integer division, whose corrections can return a wrong quotient
+        // from a reciprocal one ulp above the correctly rounded one. Metal's 1.0f / x is one ulp high for 708 of 8012
+        // inputs (Gen5MslDivisionTests), so one fma Newton step refines it to the correctly rounded value (upstream
+        // 5036e2761); an infinite, NaN or zero quotient keeps the division's result.
+        private string EmitIntegerReciprocal(string source)
+        {
+            var value = Temp("float", source);
+            var estimate = Temp("float", $"(1.0f / {value})");
+            var refined = $"fma({estimate}, fma(-{value}, {estimate}, 1.0f), {estimate})";
+            return $"((isinf({estimate}) || isnan({estimate}) || {estimate} == 0.0f) ? {estimate} : {refined})";
         }
 
         private string EmitCvtPkrtzF16F32(Gen5ShaderInstruction instruction)
