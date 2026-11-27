@@ -114,7 +114,7 @@
   "Library.Pkg.FormatFolder": "Folder",
   "Library.Pkg.FormatZar": ".zar archive",
   "Library.Pkg.FormatFolderHint": "Unpacks the game into a normal folder. Needs free space for the whole game.",
-  "Library.Pkg.FormatZarHint": "Converts the game into one compressed .zar file that SharpEmu runs without unpacking. The .pkg stays where it is.",
+  "Library.Pkg.FormatZarHint": "Converts the game into one compressed .zar file that SharpEmu runs without unpacking.",
   "Library.Pkg.Consume": "Delete the .pkg as it is converted (needs far less free space)",
   "Library.Pkg.ConsumeWarning": "The .pkg cannot be recovered once conversion starts. Cancelling only pauses it: the .pkg stays partly converted until you resume and finish.",
   "Library.Pkg.ConsumeBusy": "Not available while a game is running.",
