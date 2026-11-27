@@ -115,6 +115,13 @@ public partial class MainWindow
             return;
         }
 
+        // A paused consuming conversion may have cut the package short, so it is not read first.
+        if (PkgZarConverter.FindPendingDestination(pkgPath) is { } pending)
+        {
+            await ResumePendingConversionAsync(pkgPath, pending);
+            return;
+        }
+
         if (!TryReadPackageInfo(pkgPath, out var titleId, out var folderName, out var isGame, out var category))
         {
             return;
@@ -123,6 +130,15 @@ public partial class MainWindow
         if (!isGame)
         {
             ReportSkippedNotGame(pkgPath, category);
+            return;
+        }
+
+        var format = new PkgConfirmDialog(
+            loc.Format("Library.Pkg.ConfirmOne", Path.GetFileName(pkgPath)),
+            offerFormat: true,
+            canConsume: !_isRunning);
+        if (await Sheets.ShowAsync(format) is not true)
+        {
             return;
         }
 
@@ -137,12 +153,67 @@ public partial class MainWindow
             return;
         }
 
-        if (!await InstallPackageIntoAsync(pkgPath, parent, folderName))
+        var succeeded = format.AsZar
+            ? await ConvertPackageToZarAsync(pkgPath, Path.Combine(parent, folderName + ".zar"), format.ConsumeSource)
+            : await InstallPackageIntoAsync(pkgPath, parent, folderName);
+        if (!succeeded)
         {
             return;
         }
 
         await RescanLibraryAsync(addingFolder: true);
+    }
+
+    // Offers to pick an unfinished consuming conversion up again. The package is partly consumed,
+    // so starting over is not possible; declining leaves it paused.
+    private async Task ResumePendingConversionAsync(string pkgPath, string destination)
+    {
+        var confirm = PkgConfirmDialog.ForResume(
+            Localization.Instance.Format("Library.Pkg.ResumeMessage", Path.GetFileName(pkgPath), destination));
+        if (await Sheets.ShowAsync(confirm) is true &&
+            await ConvertPackageToZarAsync(pkgPath, destination, consumeSource: true, resuming: true))
+        {
+            await RescanLibraryAsync(addingFolder: true);
+        }
+    }
+
+    // Shows the conversion sheet for one package. The caller owns the library rescan.
+    private async Task<bool> ConvertPackageToZarAsync(string pkgPath, string destination, bool consumeSource, bool resuming = false)
+    {
+        var loc = Localization.Instance;
+        if (!resuming && (File.Exists(destination) || File.Exists(PkgZarConverter.JournalPath(destination))))
+        {
+            AppendConsoleLine(loc.Format("Library.Pkg.AlreadyInstalled", Path.GetFileName(pkgPath), destination), DimLineBrush);
+            return false;
+        }
+
+        // A running game may hold files of the package open, so it is never consumed then.
+        consumeSource &= !_isRunning;
+        var gameName = resuming ? Path.GetFileNameWithoutExtension(destination) : Path.GetFileName(pkgPath);
+        var dialog = new PkgZarDialog(gameName, pkgPath, destination, consumeSource, resuming);
+        if (await Sheets.ShowAsync(dialog) is not true)
+        {
+            if (dialog.ErrorMessage is { } error)
+            {
+                AppendConsoleLine(loc.Format("Library.PkgZar.Failed", error), ErrorLineBrush);
+            }
+
+            return false;
+        }
+
+        AppendConsoleLine(loc.Format("Status.ConvertedZar", destination), SuccessLineBrush);
+        AddInstalledArchiveToLibrary(destination);
+        return true;
+    }
+
+    // A .zar is listed through the folder it sits in, so that folder joins the library unless a
+    // library folder already covers it.
+    private void AddInstalledArchiveToLibrary(string archive)
+    {
+        if (Path.GetDirectoryName(Path.GetFullPath(archive)) is { } folder)
+        {
+            AddInstalledGameToLibrary(folder);
+        }
     }
 
     // A folder picked by "Add folder" may hold downloaded .pkg files instead of extracted games.
@@ -173,8 +244,16 @@ public partial class MainWindow
         // Patches and DLC share the base game's title id and the emulator cannot overlay them, so
         // only base games are installed.
         var installable = new List<(string Path, string FolderName)>();
+        var resumable = new List<(string Path, string Destination)>();
         foreach (var pkgPath in packages)
         {
+            // A paused consuming conversion may have cut its package short, so it is not read.
+            if (PkgZarConverter.FindPendingDestination(pkgPath) is { } pending)
+            {
+                resumable.Add((pkgPath, pending));
+                continue;
+            }
+
             if (!TryReadPackageInfo(pkgPath, out var titleId, out var folderName, out var isGame, out var category))
             {
                 continue;
@@ -200,6 +279,11 @@ public partial class MainWindow
                 installable.Add((pkgPath, folderName));
                 installed[key] = Path.Combine(folder, folderName);
             }
+        }
+
+        foreach (var (pkgPath, pending) in resumable)
+        {
+            await ResumePendingConversionAsync(pkgPath, pending);
         }
 
         if (installable.Count == 0)
@@ -228,7 +312,9 @@ public partial class MainWindow
             Localization.Instance.Format(
                 "Library.Pkg.ConfirmMessage",
                 installable.Count,
-                (neededBytes / (1024.0 * 1024 * 1024)).ToString("0.0", System.Globalization.CultureInfo.CurrentCulture)));
+                (neededBytes / (1024.0 * 1024 * 1024)).ToString("0.0", System.Globalization.CultureInfo.CurrentCulture)),
+            offerFormat: true,
+            canConsume: !_isRunning);
         if (await Sheets.ShowAsync(confirm) is not true)
         {
             return;
@@ -237,7 +323,10 @@ public partial class MainWindow
         foreach (var (pkgPath, folderName) in installable)
         {
             // Cancelling one package stops the batch; later packages stay untouched.
-            if (!await InstallPackageIntoAsync(pkgPath, folder, folderName))
+            var installedOne = confirm.AsZar
+                ? await ConvertPackageToZarAsync(pkgPath, Path.Combine(folder, folderName + ".zar"), confirm.ConsumeSource)
+                : await InstallPackageIntoAsync(pkgPath, folder, folderName);
+            if (!installedOne)
             {
                 return;
             }
