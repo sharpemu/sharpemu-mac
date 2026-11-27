@@ -2208,6 +2208,9 @@ public sealed partial class DirectExecutionBackend
 			"ob5xAW4ln-0" or // strchr
 			"9yDWMxEFdJU" or // strrchr
 			"V++UgBtQhn0" or // sceAgcGetDataPacketPayloadAddress
+			"d-6uF9sZDIU" or // sceAgcSetCxRegIndirectPatchAddRegisters
+			"z2duB-hHQSM" or // sceAgcSetShRegIndirectPatchAddRegisters
+			"vRoArM9zaIk" or // sceAgcSetUcRegIndirectPatchAddRegisters
 			"D9sr1xGUriE" or // sceAgcCreatePrimState: register arguments, guest reads and writes only
 			// Per-frame polls a title runs on every input and playback tick.
 			"h8uongcBNVs" or // sceSystemGestureGetTouchEventsCount
@@ -2435,6 +2438,8 @@ public sealed partial class DirectExecutionBackend
 			"LtTouSCZjHM" or // sceAgcCbNop
 			"k3GhuSNmBLU" or // sceAgcCbDispatch
 			"UZbQjYAwwXM" or // sceAgcCbSetShRegistersDirect
+			"n2fD4A+pb+g" or // sceAgcCbSetShRegisterRangeDirect
+			"t1vNu082-jM" or // sceAgcDcbDrawIndexIndirect
 			"JrtiDtKeS38" or // sceAgcAcbResetQueue
 			"cFazmnXpJOE" or // sceAgcAcbEventWrite
 			"KT-hTp-Ch14" or // sceAgcAcbAcquireMem

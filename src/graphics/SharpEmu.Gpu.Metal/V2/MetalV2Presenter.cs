@@ -611,6 +611,7 @@ internal static partial class MetalV2Presenter
         finally
         {
             ReleasePerfOverlayResources();
+            ReleaseOverlayLayerResources();
             Volatile.Write(ref _hostWindow, null);
             _metalLayer = 0;
             lock (_gate)
@@ -661,6 +662,7 @@ internal static partial class MetalV2Presenter
         _drawableWidth = pixelWidth;
         _drawableHeight = pixelHeight;
         SharpEmu.Libs.Media.MoviePresentationServices.SetPresentationSize((uint)pixelWidth, (uint)pixelHeight);
+        SharpEmu.Libs.Overlay.OverlayLayerOutput.ReportSurface(pixelWidth, pixelHeight);
         MetalNative.SendVoidSize(
             _metalLayer,
             MetalNative.Selector("setDrawableSize:"),
@@ -748,7 +750,8 @@ internal static partial class MetalV2Presenter
                 // Before a guest/movie image exists, the prewarm overlay may animate.
                 // The performance panel refreshes on its own clock, so it also counts as animated.
                 if (ReusePresentedFrame &&
-                    !PresentationCache.NeedsPresent(in stamp, (presented == 0 && !movie) || PerfOverlayNeedsPresent()))
+                    !PresentationCache.NeedsPresent(
+                        in stamp, (presented == 0 && !movie) || PerfOverlayNeedsPresent() || OverlayLayersNeedPresent()))
                 {
                     ReportPresentationStatistics(presented: false);
                     // nextDrawable normally paces this loop; skipping it must not spin.
@@ -784,6 +787,7 @@ internal static partial class MetalV2Presenter
                     EncodePresent(encoder, texture, width, height, !movie && presented != 0 && presentedHdr);
                 }
 
+                EncodeOverlayLayers(encoder);
                 EncodePerfOverlay(encoder, window.ContentsScale);
                 MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
                 MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
@@ -1181,7 +1185,7 @@ internal static partial class MetalV2Presenter
             encoder, MetalNative.Selector("drawPrimitives:vertexStart:vertexCount:"), Mtl.PrimitiveTriangle, 0, 3);
     }
 
-    private static bool TryCreatePresentPipeline(
+    internal static bool TryCreatePresentPipeline(
         nint device,
         out nint pipeline,
         out string error,

@@ -3,14 +3,23 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Np;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Np;
 
-public sealed class NpEntitlementAccessExportsTests
+[Collection(nameof(SharpEmu.Libs.Tests.AppContent.AddcontStateCollection))]
+public sealed class NpEntitlementAccessExportsTests : IDisposable
 {
     private const ulong MemoryBase = 0x1_0000_0000;
+
+    public void Dispose()
+    {
+        KernelMemoryCompatExports.ConfigureApplicationInfo(null);
+        AddcontEntitlements.ConfigureConceptId(null);
+        AddcontEntitlements.ResetRuntimeState();
+    }
 
     [Fact]
     public void GetGameTrialsFlagReportsAFullGameAndOnlyWritesOneWord()
@@ -79,6 +88,8 @@ public sealed class NpEntitlementAccessExportsTests
     [InlineData("GHOST2BASE000000")]
     public void GhostOfYoteiMainEntitlement_IsReportedAsInstalled(string label)
     {
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA26344");
+        AddcontEntitlements.ConfigureConceptId("10003923");
         var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
         var context = new CpuContext(memory, Generation.Gen5);
         var labelAddress = MemoryBase + 0x100;
@@ -99,6 +110,8 @@ public sealed class NpEntitlementAccessExportsTests
     [Fact]
     public void GhostOfYoteiOptionalEntitlement_RemainsUnowned()
     {
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA26344");
+        AddcontEntitlements.ConfigureConceptId("10003923");
         var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
         var context = new CpuContext(memory, Generation.Gen5);
         var labelAddress = MemoryBase + 0x100;
@@ -113,68 +126,21 @@ public sealed class NpEntitlementAccessExportsTests
     }
 
     [Fact]
-    public void AddcontList_IsEmptyForATitleWithoutKnownAddons()
+    public void OtherTitlesOwnNoAddcontEntitlements()
     {
-        try
-        {
-            NpEntitlementAccessExports.ConfigureApplicationInfo("PPSA27366");
-            var (result, hitNum, labels) = GetAddcontList(listNum: 8);
-
-            Assert.Equal(0, result);
-            Assert.Equal(0U, hitNum);
-            Assert.Empty(labels);
-        }
-        finally
-        {
-            NpEntitlementAccessExports.ConfigureApplicationInfo(null);
-        }
-    }
-
-    [Theory]
-    [InlineData("PPSA04264", new[] { "85y-je", "5d5c48", "_mtqu6" })]
-    [InlineData("PPSA26344", new[] { "GHOST2APP0000000", "GHOST2BASE000000" })]
-    public void AddcontList_ReportsOnlyTheRunningTitlesLabels(string titleId, string[] expected)
-    {
-        try
-        {
-            NpEntitlementAccessExports.ConfigureApplicationInfo(titleId);
-            var (result, hitNum, labels) = GetAddcontList(listNum: 8);
-
-            Assert.Equal(0, result);
-            Assert.Equal((uint)expected.Length, hitNum);
-            Assert.Equal(expected, labels);
-        }
-        finally
-        {
-            NpEntitlementAccessExports.ConfigureApplicationInfo(null);
-        }
-    }
-
-    private static (int Result, uint HitNum, string[] Labels) GetAddcontList(uint listNum)
-    {
-        const int InfoSize = 0x1C;
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA02633");
+        AddcontEntitlements.ConfigureConceptId("10001615");
         var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
         var context = new CpuContext(memory, Generation.Gen5);
-        var listAddress = MemoryBase + 0x100;
-        var hitNumAddress = MemoryBase + 0x800;
-        context[CpuRegister.Rsi] = listAddress;
-        context[CpuRegister.Rdx] = listNum;
-        context[CpuRegister.Rcx] = hitNumAddress;
+        var labelAddress = MemoryBase + 0x100;
+        var infoAddress = MemoryBase + 0x200;
+        memory.WriteCString(labelAddress, "GHOST2APP0000000");
+        context[CpuRegister.Rsi] = labelAddress;
+        context[CpuRegister.Rdx] = infoAddress;
 
-        var result = NpEntitlementAccessExports.NpEntitlementAccessGetAddcontEntitlementInfoList(context);
-
-        Span<byte> hitNumBytes = stackalloc byte[sizeof(uint)];
-        Assert.True(memory.TryRead(hitNumAddress, hitNumBytes));
-        var hitNum = BinaryPrimitives.ReadUInt32LittleEndian(hitNumBytes);
-        var labels = new List<string>();
-        Span<byte> info = stackalloc byte[InfoSize];
-        for (var index = 0u; index < Math.Min(hitNum, listNum); index++)
-        {
-            Assert.True(memory.TryRead(listAddress + index * InfoSize, info));
-            labels.Add(ReadCString(info[..17]));
-        }
-
-        return (result, hitNum, labels.ToArray());
+        Assert.Equal(
+            unchecked((int)0x817D0007),
+            NpEntitlementAccessExports.NpEntitlementAccessGetAddcontEntitlementInfo(context));
     }
 
     private static string ReadCString(ReadOnlySpan<byte> value)

@@ -430,10 +430,11 @@ public sealed class SelfLoader : ISelfLoader
             tlsModuleId,
             tlsInfo.MemorySize,
             tlsInfo.StaticOffset,
-            importedModuleNames);
+            importedModuleNames,
+            applicationInfo.ConceptId);
     }
 
-    private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
+    private static (string? Title, string? TitleId, string? Version, string? ConceptId) TryLoadParamJson(
         IFileSystem? fs,
         string? mountRoot,
         out ulong? flexibleMemorySize)
@@ -459,7 +460,7 @@ public sealed class SelfLoader : ISelfLoader
             }
         }
 
-        (string? Title, string? TitleId, string? Version) applicationInfo = default;
+        (string? Title, string? TitleId, string? Version, string? ConceptId) applicationInfo = default;
         if (foundPath == null)
         {
             Console.WriteLine("[LOADER] param.json not found (no root path / unknown layout).");
@@ -489,7 +490,8 @@ public sealed class SelfLoader : ISelfLoader
             Console.WriteLine(
                 $"[LOADER] Title: {applicationInfo.Title ?? "(unknown)"}, " +
                 $"TitleId: {applicationInfo.TitleId ?? "(unknown)"}, " +
-                $"Version: {applicationInfo.Version ?? "(unknown)"}");
+                $"Version: {applicationInfo.Version ?? "(unknown)"}, " +
+                $"ConceptId: {applicationInfo.ConceptId ?? "(unknown)"}");
         }
 
         return applicationInfo;

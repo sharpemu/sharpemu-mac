@@ -14,6 +14,7 @@ using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Overlay;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
@@ -139,7 +140,11 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
         _channel = channel;
         _writer = new SplitWriter(channel, channel.Outbound, outboundLock);
         _options = options;
+        GuestOverlayLayers = new RemoteOverlayLayers(Report);
     }
+
+    /// <summary>The overlay layers the guest process painted, for the presenter here.</summary>
+    internal RemoteOverlayLayers GuestOverlayLayers { get; }
 
     /// <summary>True once the start succeeded and the backend is composed.</summary>
     public bool IsReady => _ready;
@@ -259,6 +264,10 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 TakeHostFrame(backend, payload);
                 break;
 
+            case GpuRemoteMessage.OverlayLayer:
+                GuestOverlayLayers.Take(payload);
+                break;
+
             case GpuRemoteMessage.GamepadOutput:
                 ApplyGamepadOutput(GpuSplitWire.Read<GamepadOutputMessage>(payload));
                 break;
@@ -328,11 +337,22 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 // The overlay counts guest flip submissions, which happen in the guest process;
                 // this one presents every guest frame, so it counts those instead (else 0 fps).
                 PerfOverlay.UsePresentedGuestFrameTiming();
+                // The system dialogs' overlay layers are painted in the guest process, for the
+                // drawable here; the window's typed text goes there.
+                OverlayLayerOutput.Source = GuestOverlayLayers;
+                OverlayLayerOutput.SurfaceChanged += SendOverlaySurface;
+                HostWindowInput.TextForwarder = SendTypedText;
                 _globalsInstalled = true;
             }
 
             _backend = _options.ComposeBackend(new SplitGpuEnvironment(_memory, _space, video));
             _ready = true;
+            if (_globalsInstalled)
+            {
+                var (width, height) = OverlayLayerOutput.Surface;
+                SendOverlaySurface(width, height);
+            }
+
             StartInputPoll();
             StartReplicaFollower();
             Console.Error.WriteLine(
@@ -372,6 +392,9 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 break;
             case GpuSplitControl.CountShaderCompilation:
                 backend.CountShaderCompilation();
+                break;
+            case GpuSplitControl.TextInput:
+                HostWindowInput.SetPeerWantsText(control.Width != 0);
                 break;
         }
     }
@@ -424,6 +447,9 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
             case GpuSplitGamepadOutput.Rumble:
                 input.SetRumble(message.A, message.B);
                 break;
+            case GpuSplitGamepadOutput.HapticRumble:
+                input.SetHapticRumble(message.A, message.B, message.DurationMs);
+                break;
             case GpuSplitGamepadOutput.TriggerRumble:
                 input.SetTriggerRumble((message.Flags & 1) != 0 ? message.A : null, (message.Flags & 2) != 0 ? message.B : null);
                 break;
@@ -435,6 +461,12 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
                 break;
             case GpuSplitGamepadOutput.ResetLightbar:
                 input.ResetLightbar();
+                break;
+            case GpuSplitGamepadOutput.ResetOrientation:
+                HostWindowInput.ResetMotionOrientation(forwardToOutput: false);
+                break;
+            case GpuSplitGamepadOutput.TiltCorrection:
+                HostWindowInput.SetMotionTiltCorrection(message.A != 0, forwardToOutput: false);
                 break;
         }
     }
@@ -774,6 +806,19 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
         _ = _writer.Write(GpuRemoteMessage.FlipEvent, in message);
     }
 
+    /// <summary>The drawable took a new size: the guest process paints the overlay layers for it.</summary>
+    internal void SendOverlaySurface(int width, int height)
+    {
+        if (width > 0 && height > 0)
+        {
+            _ = _writer.Write(
+                GpuRemoteMessage.OverlaySurface, new OverlaySurfaceMessage { Width = (uint)width, Height = (uint)height });
+        }
+    }
+
+    /// <summary>Text typed into the window, for the guest process's system dialog.</summary>
+    internal void SendTypedText(string text) => SendNotice(GpuSplitNotice.TypedText, text);
+
     internal void SendNotice(GpuSplitNotice kind, string? text = null)
     {
         var notice = new VideoOutNoticeMessage { Kind = (uint)kind };
@@ -1004,6 +1049,14 @@ public sealed class SplitGpuHost : IGpuHostService, IProtectionRequests, IDispos
         Stop();
         if (_globalsInstalled)
         {
+            OverlayLayerOutput.SurfaceChanged -= SendOverlaySurface;
+            if (ReferenceEquals(OverlayLayerOutput.Source, GuestOverlayLayers))
+            {
+                OverlayLayerOutput.Source = new OverlayLayerPainter();
+            }
+
+            HostWindowInput.TextForwarder = null;
+            HostWindowInput.SetPeerWantsText(false);
             EndOfPipeEvents.Redirect = null;
             VideoOutBackendServices.Bridge = null;
             if (ReferenceEquals(GuestGpuMemoryHook.Current, _memory))

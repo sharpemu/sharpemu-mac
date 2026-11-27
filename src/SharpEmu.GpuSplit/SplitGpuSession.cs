@@ -89,7 +89,11 @@ public sealed class SplitGpuSession : IDisposable
         Relay = new RemoteGpuQueueRelay(this);
         ImageStore = new RemoteImageStore(this, channel.SyncCalls, _state);
         Backend = new RemoteGpuBackend(this);
+        OverlayLayerSender = new SplitOverlayLayerSender(Writer, () => IsAlive);
     }
+
+    /// <summary>Paints this process's overlay layers for the GPU process's drawable and sends them there.</summary>
+    internal SplitOverlayLayerSender OverlayLayerSender { get; }
 
     /// <summary>The proxy <see cref="Libs.Gpu.IGuestGpuBackend"/> the guest's exports call.</summary>
     public RemoteGpuBackend Backend { get; }
@@ -229,6 +233,7 @@ public sealed class SplitGpuSession : IDisposable
 
         _memory.AttachGpuQueue(Relay, null);
         _memory.AttachSpanObserver(ImageStore);
+        OverlayLayerSender.Start();
         if (installGlobals)
         {
             InstallGlobals();
@@ -262,6 +267,8 @@ public sealed class SplitGpuSession : IDisposable
         }
 
         HostWindowInput.Connect(new SplitGamepadOutput(Writer));
+        SystemDialogInput.WantsTextChanged += SendWantsText;
+        SendWantsText(SystemDialogInput.WantsText);
         MirrorResidencyRanges();
         _globalsInstalled = true;
     }
@@ -482,6 +489,13 @@ public sealed class SplitGpuSession : IDisposable
             case GpuRemoteMessage.Input:
                 TakeInput(payload);
                 break;
+
+            case GpuRemoteMessage.OverlaySurface:
+            {
+                var message = GpuSplitWire.Read<OverlaySurfaceMessage>(payload);
+                OverlayLayerSender.SetSurface(message.Width, message.Height);
+                break;
+            }
 
             default:
                 Report($"Ignoring record type {type} from the GPU process ({payload.Length} bytes).");
@@ -803,8 +817,17 @@ public sealed class SplitGpuSession : IDisposable
             AgcBackendServices.ShaderHeaderObserver = null;
             TessellationRings.Observer = null;
             Gen5ShaderTranslator.FusedProgramObserver = null;
+            SystemDialogInput.WantsTextChanged -= SendWantsText;
         }
     }
+
+    // The window lives in the GPU process: it turns key presses into text only while a dialog here takes it.
+    private void SendWantsText(bool wanted) =>
+        _ = Writer.Write(GpuRemoteMessage.Control, new ControlMessage
+        {
+            Kind = (uint)GpuSplitControl.TextInput,
+            Width = wanted ? 1u : 0u,
+        });
 
     internal void Report(string message)
     {
@@ -833,6 +856,7 @@ public sealed class SplitGpuSession : IDisposable
             Detach();
         }
 
+        OverlayLayerSender.Dispose();
         Writer.Close();
         _events.Complete();
         _spinEvents?.CompleteAdding();

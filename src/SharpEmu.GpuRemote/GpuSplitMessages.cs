@@ -21,6 +21,9 @@ public enum GpuSplitControl : uint
     HideSplashScreen = 2,
     RequestClose = 3,
     CountShaderCompilation = 4,
+
+    /// <summary>Width 1 while a system dialog in A takes typed text, 0 when it stops (<c>SystemDialogInput.WantsText</c>).</summary>
+    TextInput = 5,
 }
 
 /// <summary>The steps of a flip that B reports to A's video-out state (<see cref="GpuRemoteMessage.FlipEvent"/>).</summary>
@@ -57,6 +60,9 @@ public enum GpuSplitNotice : uint
 
     /// <summary>The text is the GPU's name, for the window title (<c>SetSelectedGpuName</c>).</summary>
     SelectedGpuName = 4,
+
+    /// <summary>The text is what the user typed into the window (<c>SystemDialogInput.OnText</c>).</summary>
+    TypedText = 5,
 }
 
 /// <summary>What a <see cref="GpuRemoteSyncOpcode.Query"/> asks.</summary>
@@ -97,6 +103,13 @@ public enum GpuSplitGamepadOutput : uint
     AdaptiveTriggers = 3,
     Lightbar = 4,
     ResetLightbar = 5,
+    HapticRumble = 6,
+
+    /// <summary>scePadResetOrientation: the GPU process restarts the orientation it accumulates.</summary>
+    ResetOrientation = 7,
+
+    /// <summary>scePadSetTiltCorrectionState: A is 1 for on, 0 for off.</summary>
+    TiltCorrection = 8,
 }
 
 /// <summary>Status codes of the split's synchronous calls (0 is success).</summary>
@@ -245,6 +258,38 @@ public struct HostFrameMessage
 }
 
 [StructLayout(LayoutKind.Sequential)]
+public struct OverlayLayerMessage
+{
+    /// <summary>The layer's index in A's overlay layer registry (its draw order).</summary>
+    public uint Id;
+
+    /// <summary>0: the layer is hidden and no pixels follow; 1: the pixels of a painted layer follow.</summary>
+    public uint Visible;
+    public long Revision;
+
+    /// <summary>The surface the layer was painted for (an <see cref="OverlaySurfaceMessage"/> of B's).</summary>
+    public uint SurfaceWidth;
+    public uint SurfaceHeight;
+    public int Left;
+    public int Top;
+    public uint Width;
+    public uint Height;
+
+    /// <summary>Bytes of the whole layer (Width * Height * 4); B takes it once every piece arrived.</summary>
+    public uint TotalBytes;
+
+    /// <summary>Where this record's piece goes in the layer.</summary>
+    public uint Offset;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct OverlaySurfaceMessage
+{
+    public uint Width;
+    public uint Height;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 public struct AdaptiveTriggerWire
 {
     /// <summary>0: no effect (null), 1: the bytes below.</summary>
@@ -269,6 +314,9 @@ public struct GamepadOutputMessage
     public byte Flags;
     public AdaptiveTriggerWire Left;
     public AdaptiveTriggerWire Right;
+
+    /// <summary>Haptic rumble: how long the motor levels in A and B hold.</summary>
+    public uint DurationMs;
 }
 
 /// <summary>Flags of a <see cref="ProtectRequestMessage"/>.</summary>
@@ -346,6 +394,10 @@ public struct GamepadStateWire
     public float AngularVelocityX;
     public float AngularVelocityY;
     public float AngularVelocityZ;
+    public float OrientationX;
+    public float OrientationY;
+    public float OrientationZ;
+    public float OrientationW;
     public uint FirstTouchActive;
     public uint FirstTouchId;
     public float FirstTouchX;

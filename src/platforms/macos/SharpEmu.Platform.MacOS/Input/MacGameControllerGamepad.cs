@@ -50,6 +50,11 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
     private byte _leftTriggerRumble;
     private byte _rightTriggerRumble;
     private bool _rumbleDirty;
+    // Timed rumble (SetHapticRumble) layered over the steady motors until it expires, as the SDL adapter does.
+    private byte _hapticLargeMotor;
+    private byte _hapticSmallMotor;
+    private long _hapticExpiresAt;
+    private bool _hapticApplied;
     private uint _lightbar = 0x000040;
     private bool _lightbarDirty = true;
     private HostAdaptiveTriggerEffect? _pendingLeftEffect;
@@ -212,6 +217,7 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
                 "setModeOff");
         _supportsTouchpad = MacObjC.Responds(_profile, "touchpadPrimary");
         CreateHaptics();
+        var motionFed = _outputEnabled && MacMotionFeed.Attach(_controller);
         // A fresh pad starts from the configured lightbar colour and silent motors.
         lock (_outputGate)
         {
@@ -222,7 +228,7 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
 
         Console.Error.WriteLine(
             $"[PAD][INFO] GameController gamepad connected: {_name} type={_type} " +
-            $"adaptive_triggers={_supportsAdaptiveTriggers} touchpad={_supportsTouchpad}");
+            $"adaptive_triggers={_supportsAdaptiveTriggers} touchpad={_supportsTouchpad} motion_feed={motionFed}");
     }
 
     /// <summary>
@@ -242,6 +248,11 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
             return HostGamepadType.DualShock4;
         }
 
+        if (MacObjC.IsKindOf(profile, "GCXboxGamepad"))
+        {
+            return HostGamepadType.Xbox;
+        }
+
         return MapProductCategory(
             MacObjC.ReadNsString(MacObjC.Send(controller, MacObjC.Selector("productCategory"))));
     }
@@ -251,6 +262,8 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
     {
         "DualSense" => HostGamepadType.DualSense,
         "DualShock 4" => HostGamepadType.DualShock4,
+        // GCProductCategoryXboxOne ("Xbox One") also names the Series X|S pads.
+        { } category when category.StartsWith("Xbox", StringComparison.Ordinal) => HostGamepadType.Xbox,
         _ => HostGamepadType.Generic,
     };
 
@@ -276,6 +289,11 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
 
     private void CloseController()
     {
+        if (_outputEnabled)
+        {
+            MacMotionFeed.Detach(_controller);
+        }
+
         _leftHandle?.Dispose();
         _rightHandle?.Dispose();
         _leftTriggerMotor?.Dispose();
@@ -395,27 +413,18 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
             return default;
         }
 
-        var hasAcceleration = !MacObjC.Responds(motion, "hasGravityAndUserAcceleration") ||
-            MacObjC.SendBool(motion, MacObjC.Selector("hasGravityAndUserAcceleration"));
-        var hasRotation = !MacObjC.Responds(motion, "hasRotationRate") ||
-            MacObjC.SendBool(motion, MacObjC.Selector("hasRotationRate"));
+        var hasAcceleration = MacMotionFeed.TryReadAcceleration(motion, out var acceleration);
+        var hasRotation = MacMotionFeed.HasRotationRate(motion);
         if (!hasAcceleration && !hasRotation)
         {
             return default;
         }
 
-        var acceleration = default(MacVector3);
-        if (hasAcceleration)
-        {
-            // GCMotion splits the accelerometer into gravity and user
-            // acceleration, both in g; SDL_SENSOR_ACCEL reported m/s^2, so sum
-            // them and scale to keep guest-visible magnitudes identical.
-            var gravity = MacObjC.SendVector3(motion, MacObjC.Selector("gravity"));
-            var user = MacObjC.SendVector3(motion, MacObjC.Selector("userAcceleration"));
-            acceleration.X = (gravity.X + user.X) * StandardGravity;
-            acceleration.Y = (gravity.Y + user.Y) * StandardGravity;
-            acceleration.Z = (gravity.Z + user.Z) * StandardGravity;
-        }
+        // GCMotion reports acceleration in g; SDL_SENSOR_ACCEL reported m/s^2, so
+        // scale to keep guest-visible magnitudes identical.
+        acceleration.X *= StandardGravity;
+        acceleration.Y *= StandardGravity;
+        acceleration.Z *= StandardGravity;
 
         // GCMotion rotationRate is radians/second, the same unit SDL's gyro used.
         var rotation = hasRotation
@@ -519,6 +528,17 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
         }
     }
 
+    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs)
+    {
+        lock (_outputGate)
+        {
+            _hapticLargeMotor = largeMotor;
+            _hapticSmallMotor = smallMotor;
+            _hapticExpiresAt = Environment.TickCount64 + durationMs;
+            _rumbleDirty = true;
+        }
+    }
+
     public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger)
     {
         lock (_outputGate)
@@ -598,8 +618,16 @@ internal sealed class MacGameControllerGamepad : IHostGamepadOutput, IDisposable
         HostAdaptiveTriggerEffect? rightEffect;
         lock (_outputGate)
         {
-            largeMotor = _largeMotor;
-            smallMotor = _smallMotor;
+            var hapticActive = _hapticExpiresAt - Environment.TickCount64 > 0
+                && (_hapticLargeMotor | _hapticSmallMotor) != 0;
+            if (_hapticApplied && !hapticActive)
+            {
+                _rumbleDirty = true; // the timed rumble ran out: drop back to the steady motors
+            }
+
+            _hapticApplied = hapticActive;
+            largeMotor = Math.Max(_largeMotor, hapticActive ? _hapticLargeMotor : (byte)0);
+            smallMotor = Math.Max(_smallMotor, hapticActive ? _hapticSmallMotor : (byte)0);
             leftTriggerRumble = _leftTriggerRumble;
             rightTriggerRumble = _rightTriggerRumble;
             lightbar = _lightbar;

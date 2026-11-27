@@ -16,6 +16,12 @@ internal sealed class SplitGamepadOutput(SplitWriter writer) : IHostGamepadOutpu
     public void SetRumble(byte largeMotor, byte smallMotor) =>
         Send(new GamepadOutputMessage { Kind = (uint)GpuSplitGamepadOutput.Rumble, A = largeMotor, B = smallMotor });
 
+    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs) =>
+        Send(new GamepadOutputMessage
+        {
+            Kind = (uint)GpuSplitGamepadOutput.HapticRumble, A = largeMotor, B = smallMotor, DurationMs = durationMs,
+        });
+
     public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger) =>
         Send(new GamepadOutputMessage
         {
@@ -37,6 +43,13 @@ internal sealed class SplitGamepadOutput(SplitWriter writer) : IHostGamepadOutpu
         Send(new GamepadOutputMessage { Kind = (uint)GpuSplitGamepadOutput.Lightbar, A = red, B = green, C = blue });
 
     public void ResetLightbar() => Send(new GamepadOutputMessage { Kind = (uint)GpuSplitGamepadOutput.ResetLightbar });
+
+    // The orientation accumulates in the GPU process, where the gamepad's sensor readings arrive.
+    public void ResetMotionOrientation() =>
+        Send(new GamepadOutputMessage { Kind = (uint)GpuSplitGamepadOutput.ResetOrientation });
+
+    public void SetMotionTiltCorrection(bool enabled) =>
+        Send(new GamepadOutputMessage { Kind = (uint)GpuSplitGamepadOutput.TiltCorrection, A = enabled ? (byte)1 : (byte)0 });
 
     private void Send(in GamepadOutputMessage message) => _ = writer.Write(GpuRemoteMessage.GamepadOutput, in message);
 }

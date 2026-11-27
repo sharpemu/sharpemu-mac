@@ -99,6 +99,9 @@ internal sealed class GuestProcessSide : ISplitGuestSide
             case GpuSplitNotice.SelectedGpuName:
                 VideoOutBackendServices.SetSelectedGpuName(text);
                 break;
+            case GpuSplitNotice.TypedText:
+                SystemDialogInput.OnText(text);
+                break;
         }
     }
 
@@ -108,7 +111,8 @@ internal sealed class GuestProcessSide : ISplitGuestSide
         HostWindowInput.SetKeys(keys);
         if (gamepad.Connected)
         {
-            HostWindowInput.SetGamepad(gamepadName, gamepad);
+            // The GPU process feeds the sensor readings to its own orientation and sends the result.
+            HostWindowInput.SetGamepad(gamepadName, gamepad, sourceOrientation: true);
         }
         else
         {

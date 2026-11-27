@@ -366,8 +366,8 @@ internal static class Gen5ComputeFixtures
         0xBF810000,             // s_endpgm
     ];
 
-    public static Gen5MslShader CompileVertexOrThrow(int requiredVertexOutputCount = 0) =>
-        CompileStageRequestOrThrow(VertexWords, ShaderStage.Vertex, requiredVertexOutputCount);
+    public static Gen5MslShader CompileVertexOrThrow(int requiredVertexOutputCount = 0, Gen5MslCodegenOptions? options = null) =>
+        CompileStageRequestOrThrow(VertexWords, ShaderStage.Vertex, requiredVertexOutputCount, options);
 
     public static Gen5MslShader CompilePixelOrThrow(
         Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
@@ -974,7 +974,8 @@ internal static class Gen5ComputeFixtures
             floatMode: floatMode);
     }
 
-    public static Gen5MslShader CompileStageRequestOrThrow(uint[] words, ShaderStage stage, int requiredVertexOutputCount = 0)
+    public static Gen5MslShader CompileStageRequestOrThrow(uint[] words, ShaderStage stage, int requiredVertexOutputCount = 0,
+        Gen5MslCodegenOptions? options = null)
     {
         var memory = new FakeGuestMemory();
         memory.AddRegion(ProgramAddress, words);
@@ -985,7 +986,7 @@ internal static class Gen5ComputeFixtures
         }
 
         var request = RequestOrThrow(program!, stage, requiredVertexOutputCount: requiredVertexOutputCount);
-        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error, options))
         {
             throw new InvalidOperationException($"[{stage}] MSL request emit failed: {error}");
         }

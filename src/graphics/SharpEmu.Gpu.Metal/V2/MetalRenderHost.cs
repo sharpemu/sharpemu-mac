@@ -3184,7 +3184,8 @@ internal sealed partial class MetalRenderHost :
             $"transfers=[{TakeTransferCauses()}] {TakePreludeText()}" +
             (CopiesShareCompute ? $" copies_in_encoder={_copiesInEncoder}" : "") +
             $" alias_writes_discarded={_imageCache.TakeAliasWritesDiscarded()} " +
-            SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport() + " " + TakeReplayHostReport());
+            SharpEmu.Libs.Gpu.Rendering.RenderRecorderStatistics.TakeInPlaceReport() + " " + TakeReplayHostReport() + " " +
+            TakeIndexedRunReport());
         if (_guard is not null)
         {
             Console.Error.WriteLine($"[METAL-V2][GUARD] {_guard.Report()}");

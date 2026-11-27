@@ -177,6 +177,19 @@ public static partial class NpManagerExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // Registration keeps nothing, so there is nothing to drop. Death Stranding unregisters on every
+    // network retry while offline.
+    [SysAbiExport(
+        Nid = "M3wFXbYQtAA",
+        ExportName = "sceNpUnregisterStateCallbackA",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpUnregisterStateCallbackA(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     /// <summary>
     /// Accepts the reachability callback and never invokes it. Reachability
     /// transitions only ever fire on a real PSN connection, which an offline
@@ -553,13 +566,6 @@ public static partial class NpManagerExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNpManager")]
     public static int NpUnregisterStateCallback(CpuContext ctx) => SetReturn(ctx, 0);
-
-    [SysAbiExport(
-        Nid = "M3wFXbYQtAA",
-        ExportName = "sceNpUnregisterStateCallbackA",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNpManager")]
-    public static int NpUnregisterStateCallbackA(CpuContext ctx) => SetReturn(ctx, 0);
 
     [SysAbiExport(
         Nid = "-Rjp3-YViXc",

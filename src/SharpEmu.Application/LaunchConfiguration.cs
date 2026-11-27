@@ -41,6 +41,9 @@ public sealed record LaunchConfiguration(EffectiveLaunchSettings Settings, IRead
             ? this with { CustomEnvironment = CustomEnvironmentVariables.Merge(CustomEnvironment, oneOff) }
             : this;
 
+    /// <summary>Default text of the on-screen keyboard; machine-wide, from the launcher settings.</summary>
+    public const string DefaultProfileVariable = "SHARPEMU_DEFAULT_PROFILE";
+
     // Defaults stay sparse in the settings file, but are explicit at launch so a launcher's
     // inherited shell variables cannot silently change a game's switches. Null restores an
     // automatic choice that is computed by the emulator (for example GPU-process availability).

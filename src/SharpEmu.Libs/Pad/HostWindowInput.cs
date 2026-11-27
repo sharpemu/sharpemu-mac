@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Numerics;
 using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Libs.Pad;
@@ -17,6 +18,8 @@ public static class HostWindowInput
     private static IHostGamepadOutput? _gamepadOutput;
     private static long _version;
     private static readonly WindowInputSource Source = new();
+    private static readonly MotionOrientation Orientation = new();
+    private const float StandardGravity = 9.80665f;
 
     /// <summary>Moves on every change of the state below; a reader polls it to find changes.</summary>
     public static long Version => Interlocked.Read(ref _version);
@@ -76,15 +79,76 @@ public static class HostWindowInput
     /// <summary>Replaces the pressed keys with <paramref name="keys"/> (the guest process's side of <see cref="CopyState"/>).</summary>
     public static void SetKeys(ReadOnlySpan<int> keys)
     {
+        bool changed;
+        List<int>? pressed = null;
         lock (Gate)
         {
+            var before = PressedKeys.Count;
+            var kept = 0;
+            foreach (var key in keys)
+            {
+                if (PressedKeys.Contains(key))
+                {
+                    kept++;
+                }
+                else
+                {
+                    (pressed ??= []).Add(key);
+                }
+            }
+
             PressedKeys.Clear();
             foreach (var key in keys)
             {
                 PressedKeys.Add(key);
             }
 
+            changed = kept != before || PressedKeys.Count != before;
             Bump();
+        }
+
+        // A key that went down since the last state is a press for a system dialog, as SetKey reports it.
+        if (pressed is not null)
+        {
+            foreach (var key in pressed)
+            {
+                SystemDialogInput.OnKeyDown(key);
+            }
+        }
+
+        // The guest process's pad history (PadExports.RecordInputChange) sees the split's key changes too.
+        if (changed) Changed?.Invoke();
+    }
+
+    private static int _peerWantsText;
+
+    /// <summary>
+    /// Whether the window should turn key presses into typed text: a system dialog of this process
+    /// takes text, or (in the split's GPU process, which owns the window) one of the guest process's.
+    /// </summary>
+    public static bool WantsText => SystemDialogInput.WantsText || Volatile.Read(ref _peerWantsText) != 0;
+
+    /// <summary>The split's GPU process: the guest process's system dialog started or stopped taking text.</summary>
+    public static void SetPeerWantsText(bool wanted) => Volatile.Write(ref _peerWantsText, wanted ? 1 : 0);
+
+    /// <summary>Set by the split's GPU process: typed text goes to the guest process instead of this one.</summary>
+    public static Action<string>? TextForwarder { get; set; }
+
+    /// <summary>Text the user typed into the window (layout-translated characters, no control keys).</summary>
+    public static void SubmitText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        if (TextForwarder is { } forward)
+        {
+            forward(text);
+        }
+        else
+        {
+            SystemDialogInput.OnText(text);
         }
     }
 
@@ -99,6 +163,7 @@ public static class HostWindowInput
         }
 
         HostWindowInputSource.Set(Source);
+        Changed?.Invoke();
     }
 
     public static void Disconnect()
@@ -111,16 +176,25 @@ public static class HostWindowInput
             _gamepadState = default;
             _gamepadOutput = null;
             PressedKeys.Clear();
+            Orientation.Reset();
             Bump();
         }
 
         HostWindowInputSource.Clear(Source);
+        Changed?.Invoke();
     }
+
+    // Called after each change of the window, a key, the focus, or a gamepad's buttons or touch contacts, as it
+    // happens: the pad keeps the states between two reads of the game (PadExports.RecordInputChange), so a press and
+    // its release in between both reach it.
+    internal static Action? Changed;
 
     public static void SetFocused(bool focused)
     {
+        bool changed;
         lock (Gate)
         {
+            changed = _focused != focused || (!focused && PressedKeys.Count != 0);
             _focused = focused;
             if (!focused)
             {
@@ -129,46 +203,143 @@ public static class HostWindowInput
 
             Bump();
         }
+
+        if (changed) Changed?.Invoke();
     }
 
     public static void SetKey(int virtualKey, bool down)
     {
+        bool changed;
         lock (Gate)
         {
-            if (down)
-            {
-                PressedKeys.Add(virtualKey);
-            }
-            else
-            {
-                PressedKeys.Remove(virtualKey);
-            }
-
+            changed = down ? PressedKeys.Add(virtualKey) : PressedKeys.Remove(virtualKey);
             Bump();
         }
+
+        if (changed && down) SystemDialogInput.OnKeyDown(virtualKey);
+        if (changed) Changed?.Invoke();
     }
 
-    public static void SetGamepad(string? name, HostGamepadState state)
+    public static void SetGamepad(string? name, HostGamepadState state) =>
+        SetGamepad(name, state, sourceOrientation: false);
+
+    /// <summary>
+    /// <paramref name="sourceOrientation"/>: the state already carries the pad's orientation, accumulated where the
+    /// gamepad's sensor readings arrive (the two-process split's GPU process), so it is kept instead of this process's.
+    /// </summary>
+    public static void SetGamepad(string? name, HostGamepadState state, bool sourceOrientation)
     {
+        bool changed;
         lock (Gate)
         {
+            changed = _gamepadConnected != state.Connected || _gamepadState.Buttons != state.Buttons ||
+                      !SameContacts(_gamepadState.Touch, state.Touch);
+            if (state.Motion.Available && !sourceOrientation)
+            {
+                var orientation = Orientation.Orientation;
+                state = state with
+                {
+                    Motion = state.Motion with
+                    {
+                        OrientationX = orientation.X,
+                        OrientationY = orientation.Y,
+                        OrientationZ = orientation.Z,
+                        OrientationW = orientation.W,
+                    },
+                };
+            }
+
             _gamepadConnected = state.Connected;
             _gamepadName = name;
             _gamepadState = state;
             Bump();
         }
+
+        if (changed) Changed?.Invoke();
+    }
+
+    // One button event of the connected gamepad, applied as it comes: a poll sees only where the buttons ended up.
+    public static void SetGamepadButton(HostGamepadButtons button, bool down)
+    {
+        bool changed;
+        lock (Gate)
+        {
+            var buttons = down ? _gamepadState.Buttons | button : _gamepadState.Buttons & ~button;
+            changed = _gamepadConnected && buttons != _gamepadState.Buttons;
+            if (changed)
+            {
+                _gamepadState = _gamepadState with { Buttons = buttons };
+                Bump();
+            }
+        }
+
+        if (changed) Changed?.Invoke();
     }
 
     public static void ClearGamepad()
     {
+        bool changed;
         lock (Gate)
         {
+            changed = _gamepadConnected;
             _gamepadConnected = false;
             _gamepadName = null;
             _gamepadState = default;
+            Orientation.Reset();
             Bump();
         }
+
+        if (changed) Changed?.Invoke();
     }
+
+    // One sensor reading of the connected gamepad as SDL reports it (acceleration in m/s^2, angular velocity in
+    // radians per second, the sensor's timestamp in nanoseconds). Each gyro reading turns the pad's orientation by its
+    // own interval, which a poll of the latest reading cannot do.
+    public static void ApplyGamepadMotion(bool angularVelocity, float x, float y, float z, ulong timestampNanoseconds)
+    {
+        lock (Gate)
+        {
+            if (angularVelocity)
+            {
+                Orientation.ApplyAngularVelocity(new Vector3(x, y, z), timestampNanoseconds);
+            }
+            else
+            {
+                Orientation.ApplyAcceleration(new Vector3(x, y, z) / StandardGravity);
+            }
+        }
+    }
+
+    // The game's reset and tilt correction also go to the gamepad output, which forwards them to the process that
+    // accumulates the orientation when that is another one (the two-process split). That process applies them with
+    // forwardToOutput false, so they never travel back.
+    public static void ResetMotionOrientation(bool forwardToOutput = true)
+    {
+        IHostGamepadOutput? output;
+        lock (Gate)
+        {
+            Orientation.Reset();
+            output = forwardToOutput ? _gamepadOutput : null;
+        }
+
+        output?.ResetMotionOrientation();
+    }
+
+    public static void SetMotionTiltCorrection(bool enabled, bool forwardToOutput = true)
+    {
+        IHostGamepadOutput? output;
+        lock (Gate)
+        {
+            Orientation.TiltCorrection = enabled;
+            output = forwardToOutput ? _gamepadOutput : null;
+        }
+
+        output?.SetMotionTiltCorrection(enabled);
+    }
+
+    private static bool SameContacts(HostTouchState left, HostTouchState right) =>
+        left.First.Active == right.First.Active && left.First.Id == right.First.Id &&
+        left.Second.Active == right.Second.Active && left.Second.Id == right.Second.Id;
 
     private sealed class WindowInputSource : IHostWindowInputSource
     {
@@ -224,6 +395,17 @@ public static class HostWindowInput
             output?.SetRumble(largeMotor, smallMotor);
         }
 
+        public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs)
+        {
+            IHostGamepadOutput? output;
+            lock (Gate)
+            {
+                output = _gamepadOutput;
+            }
+
+            output?.SetHapticRumble(largeMotor, smallMotor, durationMs);
+        }
+
         public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger)
         {
             IHostGamepadOutput? output;
@@ -276,6 +458,8 @@ public interface IHostGamepadOutput
 {
     void SetRumble(byte largeMotor, byte smallMotor);
 
+    void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs);
+
     void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger);
 
     void SetAdaptiveTriggerEffect(
@@ -285,4 +469,14 @@ public interface IHostGamepadOutput
     void SetLightbar(byte red, byte green, byte blue);
 
     void ResetLightbar();
+
+    /// <summary>scePadResetOrientation, for an output whose process accumulates the orientation elsewhere.</summary>
+    void ResetMotionOrientation()
+    {
+    }
+
+    /// <summary>scePadSetTiltCorrectionState, for an output whose process accumulates the orientation elsewhere.</summary>
+    void SetMotionTiltCorrection(bool enabled)
+    {
+    }
 }

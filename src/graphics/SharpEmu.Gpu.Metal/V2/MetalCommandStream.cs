@@ -3324,6 +3324,50 @@ internal sealed partial class MetalRenderHost : ICommandStreamHost
         _translation!.DrawIndexed(submitId, in arguments);
     }
 
+    /// <summary>
+    /// Upstream c30081163/cb790c35e indexed draw runs: consecutive DRAW_INDEX_INDIRECT packets under the same registers
+    /// whose records lie in one page reach the translation as one deferred draw carrying the records' offsets
+    /// (CommandStreamTranslation.TryDrawIndexedRun), resolved once where it runs; the recorder binds once and issues one
+    /// indirect draw per record when the host can share the bindings (CanShareIndexedBindings), else it records each
+    /// offset in full. SHARPEMU_METAL_V2_INDEXED_RUNS=0 leaves every packet to its own handler.
+    /// </summary>
+    internal bool IndexedRunsEnabled { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_INDEXED_RUNS") != "0";
+
+    // Runs the translation took and the draws in them (stream thread); stages of runs whose bindings the host shared or
+    // refused to share, the run then recorded per offset (render worker, CanShareIndexedBindings).
+    private long _indexedRunsTaken;
+    private long _indexedRunDraws;
+    private long _indexedRunsShared;
+    private long _indexedRunsRefused;
+
+    /// <summary>Indexed draw runs taken, their draws, and run stages whose bindings were shared or refused, for tests.</summary>
+    internal (long Taken, long Draws, long Shared, long Refused) IndexedRunCounts =>
+        (Interlocked.Read(ref _indexedRunsTaken), Interlocked.Read(ref _indexedRunDraws), Interlocked.Read(ref _indexedRunsShared),
+         Interlocked.Read(ref _indexedRunsRefused));
+
+    // The [METAL-V2][TBDR] line's part; resets the counts.
+    private string TakeIndexedRunReport() => string.Create(System.Globalization.CultureInfo.InvariantCulture,
+        $"indexed_runs=(taken={Interlocked.Exchange(ref _indexedRunsTaken, 0)},draws={Interlocked.Exchange(ref _indexedRunDraws, 0)},shared_stages={Interlocked.Exchange(ref _indexedRunsShared, 0)},refused_stages={Interlocked.Exchange(ref _indexedRunsRefused, 0)})");
+
+    bool ICommandStreamHost.TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets)
+    {
+        if (!IndexedRunsEnabled)
+        {
+            return false;
+        }
+
+        using var entryScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(
+            SharpEmu.Libs.VideoOut.RenderPhaseProfile.Phase.CommandDrawEntry);
+        if (!_translation!.TryDrawIndexedRun(submitId, in first, offsets))
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _indexedRunsTaken);
+        Interlocked.Add(ref _indexedRunDraws, offsets.Length);
+        return true;
+    }
+
     public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
     {
         using var entryScope = SharpEmu.Libs.VideoOut.RenderPhaseProfile.MeasureDetail(

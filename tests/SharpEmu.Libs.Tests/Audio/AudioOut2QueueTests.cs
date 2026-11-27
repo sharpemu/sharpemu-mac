@@ -127,7 +127,8 @@ public sealed partial class AudioOut2QueueTests : IDisposable
         SetPcmAttribute(port, LongGrain);
         Advance(context);
         Assert.Equal(0, Push(context, NonBlocking));
-        Assert.Single(stream.Submissions);
+        // The first output primes the dropout reserve with silence before the grain (upstream's AudioOut2 reserve).
+        Assert.Equal(2, stream.Submissions.Count);
 
         // Grains with no audio that follow occupy the queue on the context's clock; reporting the
         // empty device instead made Wwise render a full queue every update.

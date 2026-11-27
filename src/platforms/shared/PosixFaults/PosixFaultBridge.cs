@@ -646,6 +646,39 @@ internal static unsafe class PosixFaultBridge
         }
     }
 
+    /// <summary>The host's MXCSR and x87 control word: the x86-64 System V initial state .NET code runs with.</summary>
+    internal const uint HostMxcsr = 0x1F80;
+    internal const ushort HostFpuControlWord = 0x037F;
+
+    /// <summary>
+    /// Saves the interrupted MXCSR and x87 control word in 16 bytes it pushes and loads the host's. Guest code runs
+    /// with the console's (MXCSR 0x9FC0: flush-to-zero and denormals-are-zero; see EmitFloatingPointControlSwitch),
+    /// and a signal handler on macOS starts with the interrupted thread's, Rosetta included (Linux starts it with a
+    /// fresh state), so without this the managed recovery chain, the GPU page watches and a chained runtime handler
+    /// ran with the guest's flush-to-zero. Pair with <see cref="EmitLeaveHostFloatingPoint"/> at the same stack depth.
+    /// </summary>
+    internal static void EmitEnterHostFloatingPoint(Assembler a)
+    {
+        a.sub(rsp, 16);
+        a.stmxcsr(__dword_ptr[rsp]);
+        a.fnstcw(__word_ptr[rsp + 4]);
+        a.mov(__dword_ptr[rsp + 8], HostMxcsr);
+        a.ldmxcsr(__dword_ptr[rsp + 8]);
+        a.mov(__word_ptr[rsp + 12], HostFpuControlWord);
+        a.fldcw(__word_ptr[rsp + 12]);
+    }
+
+    /// <summary>
+    /// Puts the interrupted MXCSR and x87 control word back (the signal return restores the frame's anyway; a chained
+    /// handler that returns does not go through it) and pops what <see cref="EmitEnterHostFloatingPoint"/> pushed.
+    /// </summary>
+    internal static void EmitLeaveHostFloatingPoint(Assembler a)
+    {
+        a.ldmxcsr(__dword_ptr[rsp]);
+        a.fldcw(__word_ptr[rsp + 4]);
+        a.add(rsp, 16);
+    }
+
     // Guest faults are delivered on the guest stack. The runtime only knows the thread's own stack,
     // so managed code that runs on the guest stack can make a garbage collection misread the frames
     // of that thread. Windows swaps the stack bounds in the TEB while guest code runs; POSIX cannot,
@@ -664,6 +697,7 @@ internal static unsafe class PosixFaultBridge
         a.push(r13);
         a.push(r14);
         a.push(r15);
+        EmitEnterHostFloatingPoint(a);
         a.mov(r12d, edi);
         a.mov(r13, rsi);
         a.mov(r14, rdx);
@@ -705,6 +739,7 @@ internal static unsafe class PosixFaultBridge
         a.call(rax);
         a.Label(ref done);
         a.mov(rsp, rbx);
+        EmitLeaveHostFloatingPoint(a);
         a.pop(r15);
         a.pop(r14);
         a.pop(r13);

@@ -15,6 +15,9 @@ public static partial class KernelMemoryCompatExports
     private const ulong PosixMapExclusive = 0x4000;
     private const ulong PageTableGranule = 2UL * 1024 * 1024;
     private const int MmapCopyChunk = 1024 * 1024;
+    // ENODEV: the descriptor is open but names nothing mmap can map (a directory, the random device).
+    private const int MemoryNoDevice = unchecked((int)0x80020013);
+    private static int _sharedWritableFileMapWarned;
 
     [SysAbiExport(
         Nid = "PGhQHd-dzv8",
@@ -96,12 +99,19 @@ public static partial class KernelMemoryCompatExports
         if (!anonymous)
         {
             lock (_fdGate)
-                _openFiles.TryGetValue(fd, out stream);
-            if (stream is null)
-                return MemoryBadDescriptor;
+            {
+                if (!_openFiles.TryGetValue(fd, out stream))
+                    return _openDirectories.ContainsKey(fd) || _randomDeviceDescriptors.Contains(fd)
+                        ? MemoryNoDevice
+                        : MemoryBadDescriptor;
+            }
             if (!stream.CanRead || !stream.CanSeek ||
                 ((flags & PosixMapShared) != 0 && (protection & OrbisProtCpuWrite) != 0 && !stream.CanWrite))
                 return MemoryAccessDenied;
+            if ((flags & PosixMapShared) != 0 && (protection & OrbisProtCpuWrite) != 0 &&
+                Interlocked.Exchange(ref _sharedWritableFileMapWarned, 1) == 0)
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] mmap: shared writable file mappings are not written back to the file");
         }
 
         var mappedOut = 0UL;
@@ -162,6 +172,18 @@ public static partial class KernelMemoryCompatExports
                 stream.Position = position;
             }
         }
+    }
+
+    internal static void RegisterOpenFileForTests(int descriptor, Stream stream)
+    {
+        lock (_fdGate)
+            _openFiles[descriptor] = stream;
+    }
+
+    internal static void UnregisterOpenFileForTests(int descriptor)
+    {
+        lock (_fdGate)
+            _openFiles.Remove(descriptor);
     }
 
     // Undoes a mapping made under the same lock.

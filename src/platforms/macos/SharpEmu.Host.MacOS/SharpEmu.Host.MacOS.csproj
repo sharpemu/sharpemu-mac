@@ -7,7 +7,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <!-- macOS host services (BSD syscalls, Mach VM, pthread/TLS, dispatch).
        Referenced only by osx-* builds; see the conditional ProjectReference in
        SharpEmu.CLI.csproj. Deliberately does not reference SDL: macOS audio is
-       a native CoreAudio output. -->
+       a native CoreAudio output, and the DualSense's own audio goes through
+       CoreAudio (USB) and IOKit HID reports (Bluetooth). -->
   <PropertyGroup>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <NoWarn>$(NoWarn);1591</NoWarn>
@@ -20,6 +21,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Managed Opus encoder for the DualSense speaker over Bluetooth (no native library, no SDL). -->
+    <PackageReference Include="Concentus" />
   </ItemGroup>
 
   <ItemGroup>

@@ -73,6 +73,17 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
         0xBF810000,                // s_endpgm
     ];
 
+    // One 64-thread group; thread t writes the user-data word s0 to record t of the V# the table at s[4:5] holds (a scalar
+    // load materialized into the dispatch's flattened resource table).
+    private static readonly uint[] StoreTableWord =
+    [
+        0xF4080202, 0xFA000000,    // s_load_dwordx4 s[8:11], s[4:5], 0x0
+        0xBF8CC07F,                // s_waitcnt lgkmcnt(0)
+        0x7E040200,                // v_mov_b32_e32 v2, s0
+        0xE0702000, 0x80020200,    // buffer_store_dword v2, v0, s[8:11], 0 idxen
+        0xBF810000,                // s_endpgm
+    ];
+
     private static readonly SceneVertex[] Quad =
     [
         SceneVertex.At(-1, -1, 0.5f, 0, 1, 0, 1), SceneVertex.At(1, -1, 0.5f, 1, 1, 0, 1),
@@ -395,5 +406,55 @@ public sealed class ReplaySceneTests(ITestOutputHelper output) : SceneTestBase(o
         Assert.True(replays >= 1, "no dispatch was replayed around the refused one");
         Assert.All(with[..64], word => Assert.Equal(4u, word));
         Assert.All(with[64..], word => Assert.Equal(13u, word));
+    }
+
+    private uint[] StoreTableWords(bool replay, bool tableReplay, out long replays, out long tableReplays, out long fieldRefusals)
+    {
+        using var rig = CreateReplayRig()!;
+        rig.Host.DrawReplayEnabled = replay;
+        rig.Host.DispatchReplayEnabled = replay;
+        rig.Host.FlattenedTableReplay = tableReplay;
+        var output = rig.Memory.Allocate(64 * 4, 0x10000);
+        var pm4 = new ScenePm4();
+        // Four dispatches of one program that binds a flattened table, each through a table of its own with the same
+        // words: each replays the one before through the captured table pointer, with its own user data.
+        for (var index = 0u; index < 4; index++)
+        {
+            var table = rig.Memory.Allocate(256, 256);
+            rig.Memory.Write<uint>(table, Descriptors.Buffer(output, 4, 64));
+            rig.Dispatch(pm4, StoreTableWord, [21 + index, 0, 0, 0, (uint)table, (uint)(table >> 32)], 1);
+        }
+
+        rig.Submit(pm4);
+        Report(rig, $"table replay={replay}/{tableReplay}");
+        replays = rig.Host.ReplayCounts.Dispatches;
+        tableReplays = rig.Host.TableReplays;
+        fieldRefusals = rig.Host.ReplayCount(true, "argument_field");
+        Assert.Empty(rig.Fatals);
+        return rig.Read<uint>(output, 64);
+    }
+
+    // Upstream c30081163 seals compute programs whose one replay refusal is their flattened table. The Metal host now
+    // captures them (the table pointer and word count are the one per-item field), so their dispatches replay; with
+    // SHARPEMU_METAL_V2_TABLE_REPLAY=0 they are refused at capture (argument_field) as before. The words written are
+    // those of the full path either way. (A dispatch whose table alone differs, replaceTable, rewrites the argument
+    // buffer; the engine side of it is DispatchTableReplayTests in SharpEmu.Libs.Tests.)
+    [Fact]
+    public void DispatchesOfAFlattenedTableProgramReplayThroughTheCapturedTable()
+    {
+        if (CreateReplayRig() is not { } probe) return;
+        probe.Dispose();
+        var with = StoreTableWords(replay: true, tableReplay: true, out var replays, out var tableReplays, out var fieldRefusals);
+        var without = StoreTableWords(replay: false, tableReplay: true, out var none, out _, out _);
+        var refused = StoreTableWords(replay: true, tableReplay: false, out var refusedReplays, out _, out var refusedFields);
+        Assert.All(with, word => Assert.Equal(24u, word));
+        Assert.Equal(without, with);
+        Assert.Equal(without, refused);
+        Assert.True(replays >= 1, "no dispatch of the table program was replayed");
+        Assert.Equal(0, tableReplays);
+        Assert.Equal(0, fieldRefusals);
+        Assert.Equal(0, none);
+        Assert.Equal(0, refusedReplays);
+        Assert.True(refusedFields >= 1, "with the table replay off, the table program was not refused at capture");
     }
 }

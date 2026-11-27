@@ -29,7 +29,9 @@ namespace SharpEmu.Gpu.Metal.V2;
 /// bytes are what WriteArgumentBuffer would write while every resolved binding they name is unchanged (below) and
 /// the argument plan names nothing else that moves: a stage whose plan has a pointer field (GDS, device-address
 /// page table, fault buffer, flattened table, shader data, mip statistics), a word field other than the constant
-/// fault-buffer word, or a bindless image table is never captured.</item>
+/// fault-buffer word, or a bindless image table is never captured. The one exception is a dispatch's flattened table
+/// (FlattenedTableReplay): the captured pointer names this submission's upload of the sealed table, and a dispatch with
+/// another table writes the argument buffer again (TryReplayDispatch's replaceTable).</item>
 /// <item>The textures: every image binding of the stage was a texture-memo hit or was memoised by its acquire, so
 /// each had a stamp (MetalImageCache.TryStampTextureLocked: no DCC read, no stencil plane, bounded aliases), and
 /// the image cache's binding epoch and image set did not move from the start of the stage's BindResources to the
@@ -65,6 +67,14 @@ internal sealed partial class MetalRenderHost
     internal bool DrawReplayEnabled { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_DRAW_REPLAY") != "0";
 
     internal bool DispatchReplayEnabled { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_DISPATCH_REPLAY") != "0";
+
+    /// <summary>
+    /// Upstream c30081163 ("dispatch replay with a new flattened table"): a compute program that binds a flattened
+    /// resource table is captured too, and a dispatch whose stage differs from the sealed one only in that table
+    /// (RenderRecorder's replaceTable) replays with the table uploaded again and the stage's argument buffer rewritten.
+    /// SHARPEMU_METAL_V2_TABLE_REPLAY=0 refuses such programs at capture again (argument_field).
+    /// </summary>
+    internal bool FlattenedTableReplay { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_METAL_V2_TABLE_REPLAY") != "0";
 
     /// <summary>
     /// Tests: runs when a replay is asked for (true for a dispatch), before any check, as work a completion or another
@@ -116,6 +126,9 @@ internal sealed partial class MetalRenderHost
         public ulong ArgumentOffset;
         public bool ArgumentValid;
         public bool UsesDeviceAddresses;
+
+        // The argument plan has a flattened-table field (dispatches only; FlattenedTableReplay).
+        public bool HasTable;
         public BindingLayout Layout = null!;
         public uint UserDataBase;
 
@@ -195,7 +208,7 @@ internal sealed partial class MetalRenderHost
 
     private enum ReplayMiss
     {
-        Off, Unsealed, Serial, Scope, Stages, Images, Buffers, Vertex, Patch, Count,
+        Off, Unsealed, Serial, Scope, Stages, Images, Buffers, Vertex, Patch, Table, Count,
     }
 
     private static readonly string[] ReplayRefusalNames =
@@ -204,7 +217,7 @@ internal sealed partial class MetalRenderHost
         "argument_field", "traces", "memo_off", "epoch_moved", "vertex_map", "labels", "thread_limits", "not_in_place", "bindings",
     ];
 
-    private static readonly string[] ReplayMissNames = ["off", "unsealed", "serial", "scope", "stages", "images", "buffers", "vertex", "patch"];
+    private static readonly string[] ReplayMissNames = ["off", "unsealed", "serial", "scope", "stages", "images", "buffers", "vertex", "patch", "table"];
 
     private readonly long[] _drawCaptureRefusals = new long[(int)ReplayRefusal.Count];
     private readonly long[] _dispatchCaptureRefusals = new long[(int)ReplayRefusal.Count];
@@ -215,10 +228,14 @@ internal sealed partial class MetalRenderHost
     private long _drawCaptures;
     private long _dispatchCaptures;
     private long _dispatchReplaysRebound;
+    private long _dispatchReplaysTable;
 
     /// <summary>Draws and dispatches the host replayed, for tests.</summary>
     internal (long Draws, long Dispatches, long DispatchesRebound) ReplayCounts =>
         (_drawReplaysServed, _dispatchReplaysServed, _dispatchReplaysRebound);
+
+    /// <summary>Dispatches the host replayed with a new flattened table, for tests.</summary>
+    internal long TableReplays => _dispatchReplaysTable;
 
     /// <summary>Whether a draw (dispatch) is sealed and captured, for tests.</summary>
     internal bool ReplaySealed(bool dispatch) => (dispatch ? _dispatchReplay : _drawReplay).Sealed;
@@ -258,8 +275,8 @@ internal sealed partial class MetalRenderHost
     {
         var text = string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
-            $"replay_host=(draws={_drawReplaysServed},captured={_drawCaptures},capture_refused=[{FormatReplayCounts(_drawCaptureRefusals, ReplayRefusalNames)}],miss=[{FormatReplayCounts(_drawReplayMisses, ReplayMissNames)}]) dispatch_replay_host=(dispatches={_dispatchReplaysServed},rebound={_dispatchReplaysRebound},captured={_dispatchCaptures},capture_refused=[{FormatReplayCounts(_dispatchCaptureRefusals, ReplayRefusalNames)}],miss=[{FormatReplayCounts(_dispatchReplayMisses, ReplayMissNames)}])");
-        _drawReplaysServed = _drawCaptures = _dispatchReplaysServed = _dispatchCaptures = _dispatchReplaysRebound = 0;
+            $"replay_host=(draws={_drawReplaysServed},captured={_drawCaptures},capture_refused=[{FormatReplayCounts(_drawCaptureRefusals, ReplayRefusalNames)}],miss=[{FormatReplayCounts(_drawReplayMisses, ReplayMissNames)}]) dispatch_replay_host=(dispatches={_dispatchReplaysServed},rebound={_dispatchReplaysRebound},table={_dispatchReplaysTable},captured={_dispatchCaptures},capture_refused=[{FormatReplayCounts(_dispatchCaptureRefusals, ReplayRefusalNames)}],miss=[{FormatReplayCounts(_dispatchReplayMisses, ReplayMissNames)}])");
+        _drawReplaysServed = _drawCaptures = _dispatchReplaysServed = _dispatchCaptures = _dispatchReplaysRebound = _dispatchReplaysTable = 0;
         return text;
     }
 
@@ -478,9 +495,16 @@ internal sealed partial class MetalRenderHost
         // resident buffer, made once), the shader-data size, the zero fault word, the step-report slot (a program keeps
         // it for good) and the pair-lock table. Anything else (the device-address table, the flattened table, shader
         // data uploaded out of line) is written per item.
+        // A dispatch's flattened table (its pointer and word count) is the one per-item field a replay writes again: the
+        // captured pointer names this submission's upload of the sealed table, which stands for a dispatch with the same
+        // table, and a dispatch whose table differs (replaceTable) rewrites the argument buffer with its own upload.
+        captured.HasTable = false;
         foreach (var field in ArgumentPlanOf(layout).Fields)
         {
-            var stands = field.FieldKind switch
+            var table = compute && FlattenedTableReplay && field.Kind == DescriptorBindingKind.FlattenedResourceTable &&
+                field.FieldKind is MslArgumentFieldKind.Pointer or MslArgumentFieldKind.Word;
+            captured.HasTable |= table;
+            var stands = table || field.FieldKind switch
             {
                 MslArgumentFieldKind.Pointer => field.Kind is DescriptorBindingKind.GlobalDataShare or DescriptorBindingKind.MipStatistics,
                 MslArgumentFieldKind.Word => field.Kind is DescriptorBindingKind.GlobalDataShare or
@@ -934,7 +958,11 @@ internal sealed partial class MetalRenderHost
         return true;
     }
 
-    public bool TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage)
+    // replaceTable: the stage differs from the sealed one only in its flattened resource table. The captured argument
+    // buffer names the sealed table's upload, so the replay writes the stage's argument buffer again, which uploads this
+    // dispatch's table as the full path does (PointerFieldValue); everything else it names is what the capture bound.
+    // A capture without a table field cannot take a new table and misses (table).
+    public bool TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage, bool replaceTable)
     {
         var capture = _dispatchReplay;
         if (!DispatchReplayEnabled)
@@ -950,6 +978,11 @@ internal sealed partial class MetalRenderHost
         }
 
         capture.Sealed = false;
+        if (replaceTable && (capture.StageCount != 1 || !capture.Stages[0].HasTable))
+        {
+            return MissDispatch(ReplayMiss.Table);
+        }
+
         if (_commandBuffer == 0 || capture.Serial != _submissionSerial)
         {
             return MissDispatch(ReplayMiss.Serial);
@@ -1026,6 +1059,7 @@ internal sealed partial class MetalRenderHost
                     WriteArgumentBuffer(bindings, StageCompute);
                     capture.Commit = -1;
                     _dispatchReplaysRebound++;
+                    replaceTable = false;
                 }
             }
             finally
@@ -1033,6 +1067,14 @@ internal sealed partial class MetalRenderHost
                 ArrayPool<MetalGuestRange>.Shared.Return(before);
                 ArrayPool<uint>.Shared.Return(lengths);
             }
+        }
+
+        if (replaceTable)
+        {
+            // The next seal captures the rewritten argument buffer, whose table pointer is this dispatch's upload.
+            WriteArgumentBuffer(bindings, StageCompute);
+            capture.Commit = -1;
+            _dispatchReplaysTable++;
         }
 
         NoteBufferWordComputeStage(entry, [bindings]);

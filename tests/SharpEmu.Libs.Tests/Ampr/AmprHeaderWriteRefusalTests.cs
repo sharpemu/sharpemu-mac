@@ -117,8 +117,18 @@ public sealed class AmprHeaderWriteRefusalTests
     {
         internal readonly List<(ulong Address, int Count)> Writes = [];
         internal int FailAttempt;
-        public bool TryRead(ulong address, Span<byte> destination) =>
-            throw new InvalidOperationException("Header writes must not read guest memory or the supplied data buffer.");
+        // SetBuffer reads the header's own data pointer first to refuse a buffer that is still attached (upstream's busy
+        // check); the header reads as unattached. Any other read (the supplied data buffer) is still refused.
+        public bool TryRead(ulong address, Span<byte> destination)
+        {
+            if (address >= Header && address + (ulong)destination.Length <= Header + 24)
+            {
+                destination.Clear();
+                return true;
+            }
+
+            throw new InvalidOperationException("Header writes must not read guest memory outside the header or the supplied data buffer.");
+        }
         public bool TryWrite(ulong address, ReadOnlySpan<byte> source)
         {
             Writes.Add((address, source.Length));

@@ -430,6 +430,11 @@ public partial class MainWindow : Window
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
         OpenLogsFolderButton.Click += (_, _) => OpenLogsFolder();
+        DefaultProfileBox.TextChanged += (_, _) =>
+        {
+            _settings.DefaultProfile = GuiSettings.NormalizeDefaultProfile(DefaultProfileBox.Text);
+            ScheduleSettingsSave();
+        };
         GnmTrophyKeyBox.TextChanged += (_, _) =>
         {
             var valid = GnmTrophyPackageReader.TryNormalizeKey(GnmTrophyKeyBox.Text, out var key);
@@ -447,6 +452,7 @@ public partial class MainWindow : Window
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
         AddHandler(KeyDownEvent, OnPreviewKeyDown, RoutingStrategies.Tunnel);
         CtxLaunch.Click += (_, _) => LaunchSelected();
+        CtxLaunchVariables.Click += async (_, _) => await LaunchWithVariablesAsync();
         CtxCreateShortcut.Click += async (_, _) => await CreateSelectedGameShortcutAsync();
         CtxOpenFolder.Click += (_, _) => OpenSelectedGameFolder();
         CtxCopyPath.Click += async (_, _) => await CopySelectedGamePathAsync();
@@ -959,7 +965,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetGamepadConnected(true);
+        SetGamepadConnected(true, pad.Type);
         RefreshControllerHints();
         if ((pad.Buttons & ~_previousPadButtons) != HostGamepadButtons.None)
         {
@@ -1616,6 +1622,7 @@ public partial class MainWindow : Window
         PortableDataToggle.IsChecked = SharpEmu.Logging.SharpEmuPaths.IsPortableMarkerPresent();
         GnmTrophyPackageReader.Configure(_settings.GnmTrophyKey);
         GnmTrophyKeyBox.Text = _settings.GnmTrophyKey;
+        DefaultProfileBox.Text = _settings.DefaultProfile;
         UpdateLogFilePathText();
         _settingsSaveTimer.Stop();
     }
@@ -1874,6 +1881,8 @@ public partial class MainWindow : Window
             _settings.Save();
         }
 
+        // A downloaded folder often holds .pkg files rather than an extracted game.
+        await InstallPackagesInFolderAsync(path);
         await RescanLibraryAsync(addingFolder: true);
     }
 
@@ -2433,6 +2442,7 @@ public partial class MainWindow : Window
 
         GameList.SelectedItem = game;
         CtxLaunch.IsEnabled = !_isRunning;
+        CtxLaunchVariables.IsEnabled = !_isRunning;
         CtxCopyTitleId.IsEnabled = game.TitleId is not null;
         CtxGameSettings.IsEnabled = true;
         CtxPackZar.IsEnabled = GameVersions.PackableForGame(_allGames, game).Count > 0;
@@ -2995,8 +3005,8 @@ public partial class MainWindow : Window
         StartPendingSession();
     }
 
-    // The GNM trophy key is a launcher setting rather than a game's; a custom variable that
-    // names it still wins.
+    // The GNM trophy key, the keyboard's default text and the overlays' theme and language are
+    // launcher settings rather than a game's; a custom variable that names one still wins.
     private IReadOnlyDictionary<string, string?> BuildLaunchEnvironment(LaunchConfiguration configuration)
     {
         var environment = new Dictionary<string, string?>(
@@ -3005,6 +3015,11 @@ public partial class MainWindow : Window
         environment.TryAdd(
             GnmTrophyPackageReader.KeyEnvironmentName,
             string.IsNullOrEmpty(_settings.GnmTrophyKey) ? null : _settings.GnmTrophyKey);
+        foreach (var (name, value) in EmulatorLaunchVariables.Build(_settings))
+        {
+            environment.TryAdd(name, value);
+        }
+
         return environment;
     }
 

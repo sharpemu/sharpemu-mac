@@ -88,13 +88,15 @@ public sealed unsafe class GpuRemoteChannelTests
     [InlineData(5u)]
     [InlineData(6u)]
     [InlineData(7u)]
+    [InlineData(8u)]
+    [InlineData(9u)]
     public void CombinedLayoutRefusesEveryIndependentRecoveryProtocol(uint version)
     {
         if (!OperatingSystem.IsMacOS()) return;
         using var host = GpuRemoteChannel.Create(SharedMemoryRegion.CreateUniqueName("setest"));
         using (var raw = SharedMemoryRegion.Open(host.Name))
             ((RegionHeader*)raw.Pointer)->Version = version;
-        Assert.Equal(8u, GpuRemoteProtocol.Version);
+        Assert.Equal(11u, GpuRemoteProtocol.Version);
         Assert.Throws<InvalidDataException>(() => GpuRemoteChannel.Attach(host.Name));
     }
 

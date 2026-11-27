@@ -57,6 +57,55 @@ public sealed partial class GpuCommandInterpreter
         }
     }
 
+    // Set by the command stream queue for each slice: the queue table and the admission order of the submission.
+    internal CommandStreamQueue? Queues { get; set; }
+
+    // AdmissionOrdinal is declared with the lookahead (GpuCommandInterpreter.Lookahead.cs).
+
+    // A release lands after this many checks at the same packet even if older work still looks runnable: work that keeps
+    // being unblocked by other completions must not hold a release for ever.
+    private const int MaxReleaseYields = 256;
+
+    private PacketCursorStack? _yieldedExecution;
+    private ulong _yieldedPacket;
+    private int _yieldChecks;
+    private bool _suspendedForYield;
+
+    // Whether the last slice suspended at a release waiting for older work, taken by the command stream queue.
+    internal bool TakeReleaseYield()
+    {
+        var yielded = _suspendedForYield;
+        _suspendedForYield = false;
+        return yielded;
+    }
+
+    // The GPU runs every queue at once, so by the time a release lands, the compute work submitted before it has run as far
+    // as its own waits let it, and the CPU may reuse that work's memory as soon as it sees the label. The command stream
+    // runs one queue at a time and can reach the release first. A release the CPU can observe therefore lets the older
+    // submissions of the compute queues run first, without soft waits, and lands once none of them can.
+    private bool YieldsToOlderWork()
+    {
+        if (Queues is not { } queues || _execution is not { } execution)
+        {
+            return false;
+        }
+
+        var again = ReferenceEquals(_yieldedExecution, execution) && _yieldedPacket == _packetAddress;
+        _yieldChecks = again ? _yieldChecks + 1 : 0;
+        if (_yieldChecks >= MaxReleaseYields || !queues.YieldToOlderWork(QueueId, AdmissionOrdinal, runnableOnly: again))
+        {
+            _yieldedExecution = null;
+            _yieldChecks = 0;
+            return false;
+        }
+
+        _yieldedExecution = execution;
+        _yieldedPacket = _packetAddress;
+        _suspendedForYield = true;
+        Suspend();
+        return true;
+    }
+
     // EVENT_WRITE_EOP and EVENT_WRITE_EOS. Each field is decoded on its own: the event type
     // says the write is a timestamp event, the data select what is written, the interrupt
     // select whether the host is told, and the cache action only whether it is a write-back.
@@ -391,6 +440,11 @@ public sealed partial class GpuCommandInterpreter
             7 => EndOfPipeData.AtomicAdd32,
             _ => throw _host.Fatal($"The release-memory data selection is not supported: selection={dataSelection} address=0x{destination:X16}."),
         };
+
+        if ((interruptSelector != 0 || (dataSelection != 0 && destination != 0)) && YieldsToOlderWork())
+        {
+            return;
+        }
 
         WarnUnknownReleaseMemGcr(gcrControl);
 

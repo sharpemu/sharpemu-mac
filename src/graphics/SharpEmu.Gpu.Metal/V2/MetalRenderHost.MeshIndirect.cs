@@ -210,10 +210,14 @@ internal sealed partial class MetalRenderHost
     private bool TakesLaunchArguments(ulong address, ulong size) =>
         IndirectArgumentsOnGpu && (address & 0x3) == 0 && HasPendingGpuWrite(address, size);
 
+    // The record address the last PrepareIndirectDraw was given (CanShareIndexedBindings).
+    private ulong _preparedIndirectAddress;
+
     public void PrepareIndirectDraw(in PipelineHandle pipeline, ulong argumentsAddress, BufferBinding arguments, bool indexed, uint indexLimit)
     {
         _requestedLaunch = null;
         _tracedIndirectArguments = argumentsAddress;
+        _preparedIndirectAddress = argumentsAddress;
         // The draw reads its record: a fill the open pass holds over it lands first.
         LandDeferredFillsOver(argumentsAddress, 64);
         var entry = RequirePipelineEntry(in pipeline);

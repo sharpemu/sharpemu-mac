@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers;
 using SharpEmu.Libs.Gpu.Rendering;
 
 namespace SharpEmu.Gpu.Metal.V2;
@@ -163,38 +164,49 @@ internal sealed partial class MetalRenderHost
             return PostedWordCopyRefusal.Input;
         }
 
-        var data = GC.AllocateUninitializedArray<byte>((int)size);
-        if (!_memory.TryRead(source, data.AsSpan(0, (int)sourceSize)))
+        // Upstream c30081163 rents these from a bounded pool (StoreBufferPool) instead of allocating up to 16 MiB per copy,
+        // which churned the large object heap. Both consumers below take the bytes before they return (the host store
+        // writes them, the command-processor write copies them to staging), so the buffer goes back at once.
+        var rented = ArrayPool<byte>.Shared.Rent((int)size);
+        try
         {
-            return PostedWordCopyRefusal.Input;
-        }
+            var data = rented.AsSpan(0, (int)size);
+            if (!_memory.TryRead(source, data[..(int)sourceSize]))
+            {
+                return PostedWordCopyRefusal.Input;
+            }
 
-        for (var filled = (int)sourceSize; filled < data.Length;)
-        {
-            var count = Math.Min(filled, data.Length - filled);
-            data.AsSpan(0, count).CopyTo(data.AsSpan(filled));
-            filled += count;
-        }
+            for (var filled = (int)sourceSize; filled < data.Length;)
+            {
+                var count = Math.Min(filled, data.Length - filled);
+                data[..count].CopyTo(data[filled..]);
+                filled += count;
+            }
 
-        if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
-        {
-            SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(destination, size, SharpEmu.HLE.GpuMemory.OverlapWrite.CpWrite);
-        }
+            if (SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.Enabled)
+            {
+                SharpEmu.HLE.GpuMemory.FrameOverlapDiagnostic.NoteGpuWrite(destination, size, SharpEmu.HLE.GpuMemory.OverlapWrite.CpWrite);
+            }
 
-        if (hostStore)
-        {
-            StorePostedWordCopy(destination, data);
-            Interlocked.Increment(ref _postedWordCopyHostStores);
+            if (hostStore)
+            {
+                StorePostedWordCopy(destination, data);
+                Interlocked.Increment(ref _postedWordCopyHostStores);
+                return PostedWordCopyRefusal.None;
+            }
+
+            if (!TryEncodeCommandProcessorWrite(destination, data, "word copy", causal: true))
+            {
+                return PostedWordCopyRefusal.Encode;
+            }
+
+            Interlocked.Increment(ref _gpuTimedCommandProcessorWrites);
             return PostedWordCopyRefusal.None;
         }
-
-        if (!TryEncodeCommandProcessorWrite(destination, data, "word copy", causal: true))
+        finally
         {
-            return PostedWordCopyRefusal.Encode;
+            ArrayPool<byte>.Shared.Return(rented);
         }
-
-        Interlocked.Increment(ref _gpuTimedCommandProcessorWrites);
-        return PostedWordCopyRefusal.None;
     }
 
     // Whether no GPU work recorded or submitted can still read or write these bytes: no command buffer open (everything
@@ -209,7 +221,7 @@ internal sealed partial class MetalRenderHost
     // The copy's bytes stored now, as a host fill stores (TryFillGuestMemoryOnHost), and logged with no pending serial: a
     // look-ahead resolution that read these bytes before the store is refused at its take (LoggedWriteCoversRead). The
     // store comes first, so a resolution that begins after the log entry reads the stored bytes.
-    private void StorePostedWordCopy(ulong destination, byte[] data)
+    private void StorePostedWordCopy(ulong destination, ReadOnlySpan<byte> data)
     {
         var size = (ulong)data.Length;
         if (!_memory.TryWrite(destination, data))

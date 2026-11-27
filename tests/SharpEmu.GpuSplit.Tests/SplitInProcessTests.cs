@@ -9,9 +9,11 @@ using SharpEmu.HLE.Host;
 using SharpEmu.Host.MacOS;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Overlay;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
+using SkiaSharp;
 using Xunit;
 
 namespace SharpEmu.GpuSplit.Tests;
@@ -446,6 +448,92 @@ public sealed unsafe class SplitInProcessTests
     }
 
     [MacOSFact]
+    public void OverlayLayersArePaintedForTheGpuSidesSurfaceAndCrossInPieces()
+    {
+        using var split = new InProcessSplit();
+        var layer = new SolidLayer();
+        split.Session.OverlayLayerSender.Layers = () => [layer];
+        var store = split.Host.GuestOverlayLayers;
+
+        // Nothing is painted before the GPU side reports its drawable.
+        layer.Show();
+        split.Session.OverlayLayerSender.SendChanges();
+        Assert.Empty(Collect(store, 1280, 720));
+
+        split.Host.SendOverlaySurface(1280, 720);
+        Wait.Until(() => Collect(store, 1280, 720).Count == 1, "the painted layer");
+        var frame = Assert.Single(Collect(store, 1280, 720));
+        // The layer's 600x400 bounds are centred; its render used 300 rows, centred in them as the
+        // Vulkan presenter places them. 600 * 300 * 4 bytes take several ring records.
+        Assert.Equal((340, 160 + 50, 600, 300), (frame.Left, frame.Top, frame.Width, frame.Height));
+        Assert.True(frame.Pixels.Length > SplitOverlayLayerSender.PieceBytes);
+        Assert.Equal(new byte[] { 30, 20, 10, 255 }, frame.Pixels[^4..]);
+        var version = store.Version;
+
+        // An unchanged layer is not sent again; a new drawable size repaints it.
+        split.Session.OverlayLayerSender.SendChanges();
+        split.Host.SendOverlaySurface(1920, 1080);
+        Wait.Until(() => Collect(store, 1920, 1080).Count == 1, "the layer repainted for the new size");
+        Assert.Empty(Collect(store, 1280, 720));
+        Assert.Equal(version + 1, store.Version);
+
+        layer.Hide();
+        Wait.Until(() => Collect(store, 1920, 1080).Count == 0, "the hidden layer");
+
+        // Typed text goes back to the guest; the guest's dialog says when the window should type.
+        split.Host.SendTypedText("é1");
+        Wait.Until(() => split.GuestSide.Notices.Contains((GpuSplitNotice.TypedText, "é1")), "the typed text");
+        try
+        {
+            Assert.True(split.Session.Writer.Write(
+                GpuRemoteMessage.Control, new ControlMessage { Kind = (uint)GpuSplitControl.TextInput, Width = 1 }));
+            Wait.Until(() => HostWindowInput.WantsText, "the window taking text");
+            Assert.True(split.Session.Writer.Write(
+                GpuRemoteMessage.Control, new ControlMessage { Kind = (uint)GpuSplitControl.TextInput, Width = 0 }));
+            Wait.Until(() => !HostWindowInput.WantsText, "the window no longer taking text");
+        }
+        finally
+        {
+            HostWindowInput.SetPeerWantsText(false);
+        }
+    }
+
+    private static List<OverlayLayerFrame> Collect(IOverlayLayerSource source, int width, int height)
+    {
+        var frames = new List<OverlayLayerFrame>();
+        source.Collect(width, height, frames);
+        return frames;
+    }
+
+    private sealed class SolidLayer : OverlayLayer
+    {
+        private volatile bool _visible;
+
+        public override bool IsVisible => _visible;
+
+        public void Show()
+        {
+            _visible = true;
+            Invalidate();
+        }
+
+        public void Hide()
+        {
+            _visible = false;
+            Invalidate();
+        }
+
+        public override SKRectI Bounds(int surfaceWidth, int surfaceHeight) =>
+            Centered(surfaceWidth, surfaceHeight, 600, 400);
+
+        public override int Render(SKCanvas canvas, int width, int height, float unit)
+        {
+            canvas.Clear(new SKColor(10, 20, 30));
+            return 300;
+        }
+    }
+
+    [MacOSFact]
     public void ControlCallsFramesQueriesAndMirrorsCross()
     {
         using var split = new InProcessSplit();
@@ -489,10 +577,38 @@ public sealed unsafe class SplitInProcessTests
             output.ResetLightbar();
             _ = backend.SubmitDone(null!);
             Assert.Equal(new[] { "rumble 10 20", "triggers  7", "lightbar 1 2 3", "adaptive 11 none", "reset" }, source.Calls);
+
+            // The orientation accumulates on the GPU side, where the sensor readings arrive; the game's reset
+            // crosses to it, and the orientation crosses back with the pad state.
+            var motion = new HostGamepadState(
+                Connected: true, Buttons: 0, LeftX: 128, LeftY: 128, RightX: 128, RightY: 128, LeftTrigger: 0,
+                RightTrigger: 0, Type: HostGamepadType.DualSense, Connection: HostGamepadConnection.Unknown,
+                Motion: new HostMotionState(true, 0, -9.8f, 0, 0, 0, 0), Touch: default, BatteryPercent: 100);
+            HostWindowInput.ApplyGamepadMotion(angularVelocity: true, 0, 0, 1f, 1_000_000);
+            HostWindowInput.ApplyGamepadMotion(angularVelocity: true, 0, 0, 1f, 51_000_000);
+            HostWindowInput.SetGamepad("pad", motion);
+            _ = HostWindowInput.CopyState(stackalloc int[4], out _, out var turned, out _);
+            Assert.True(turned.Motion.OrientationW < 0.9999f);
+            var crossed = SplitConvert.FromWire(SplitConvert.ToWire(turned));
+            Assert.Equal(turned.Motion, crossed.Motion);
+
+            output.SetMotionTiltCorrection(true);
+            output.ResetMotionOrientation();
+            _ = backend.SubmitDone(null!);
+            HostWindowInput.SetGamepad("pad", motion);
+            _ = HostWindowInput.CopyState(stackalloc int[4], out _, out var reset, out _);
+            Assert.Equal(1f, reset.Motion.OrientationW);
+
+            // A state that carries its source's orientation keeps it.
+            HostWindowInput.SetGamepad("pad", crossed, sourceOrientation: true);
+            _ = HostWindowInput.CopyState(stackalloc int[4], out _, out var kept, out _);
+            Assert.Equal(crossed.Motion, kept.Motion);
         }
         finally
         {
             HostWindowInputSource.Clear(source);
+            HostWindowInput.SetMotionTiltCorrection(false, forwardToOutput: false);
+            HostWindowInput.ClearGamepad();
         }
 
         backend.RequestClose();
@@ -538,6 +654,7 @@ public sealed unsafe class SplitInProcessTests
         public string? DescribeConnectedGamepad() => null;
 
         public void SetRumble(byte largeMotor, byte smallMotor) => Calls.Add($"rumble {largeMotor} {smallMotor}");
+        public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs) => Calls.Add($"haptic {largeMotor} {smallMotor} {durationMs}");
 
         public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger) => Calls.Add($"triggers {leftTrigger} {rightTrigger}");
 

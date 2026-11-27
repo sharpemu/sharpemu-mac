@@ -125,10 +125,11 @@ public sealed unsafe partial class MetalDccMaterializationTests(ITestOutputHelpe
             ClearRanges.Add(range);
         }
 
+        public readonly List<(float Depth, bool ClearDepth, bool ClearStencil, SubresourceRange Range)> DepthClears = [];
+
         public void ClearTextureDepthStencil(nint texture, ulong pixelFormat, in SubresourceRange range, uint width, uint height,
-            float depth, byte stencil, bool clearDepth, bool clearStencil)
-        {
-        }
+            float depth, byte stencil, bool clearDepth, bool clearStencil) =>
+            DepthClears.Add((depth, clearDepth, clearStencil, range));
     }
 
     private sealed class Rig : IDisposable

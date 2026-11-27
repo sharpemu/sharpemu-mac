@@ -425,6 +425,10 @@ internal sealed class MetalCachedImage : IDisposable
         }
     }
 
+    // The collection tick of the last use before the current frame's first, or ulong.MaxValue for none: an image used
+    // in each of the two frames before the current one is a recurring alias (MetalImageCache.FrameAliases.cs).
+    public ulong PreviousUseTick = ulong.MaxValue;
+
     /// <summary>Stopwatch ticks of the last use; kept only with SHARPEMU_LOG_MEMORY=1 (idle-age census).</summary>
     public long LastAccessTimestamp;
 

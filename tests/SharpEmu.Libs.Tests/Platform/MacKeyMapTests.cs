@@ -18,6 +18,7 @@ public sealed class MacKeyMapTests
     [InlineData(MacVirtualKeyCode.Tab, 0x09)]
     [InlineData(MacVirtualKeyCode.Return, 0x0D)]
     [InlineData(MacVirtualKeyCode.Escape, 0x1B)]
+    [InlineData(MacVirtualKeyCode.ForwardDelete, 0x2E)]
     [InlineData(MacVirtualKeyCode.LeftArrow, 0x25)]
     [InlineData(MacVirtualKeyCode.UpArrow, 0x26)]
     [InlineData(MacVirtualKeyCode.RightArrow, 0x27)]
@@ -74,4 +75,18 @@ public sealed class MacKeyMapTests
         Assert.False(MacKeyMap.TryMapVirtualKey(keyCode, out var virtualKey));
         Assert.Equal(0, virtualKey);
     }
+
+    [Theory]
+    [InlineData("a", "a")]
+    [InlineData("é", "é")]
+    [InlineData(" ", " ")]
+    [InlineData("\r", "")]
+    [InlineData("\t", "")]
+    [InlineData("\u007F", "")]
+    [InlineData("\u001B", "")]
+    [InlineData("\uF702", "")] // NSLeftArrowFunctionKey
+    [InlineData("\uF728", "")] // NSDeleteFunctionKey
+    [InlineData(null, "")]
+    public void OnlyPrintableCharactersAreTyped(string? characters, string expected) =>
+        Assert.Equal(expected, MacKeyMap.TypedText(characters));
 }

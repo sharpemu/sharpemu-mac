@@ -152,6 +152,15 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var values = payload.Slice(1, (int)count);
+        // Inside an open run these writes are in the compute range (IsRunPacket); the rollback puts them back.
+        if (_runs is { IsOpen: true })
+        {
+            for (var index = 0u; index < count; index++)
+            {
+                NoteRunUndo(offset + index);
+            }
+        }
+
         Registers.Shader.SetRange(offset, values);
         var consumed = RegisterWriteTable.WriteShaderPacket(TypedRegisters, in packet, offset, values);
         if (GpuResourceOrigin.Enabled)
@@ -262,8 +271,26 @@ public sealed partial class GpuCommandInterpreter
         // to it, and the unsynchronized copy exists only for the table trace.
         Span<byte> tableBlock = stackalloc byte[(int)Math.Min(count, (uint)entriesPerBlock) * entryBytes];
         Span<byte> beforeSynchronization = TraceRegisterTables ? stackalloc byte[entriesPerBlock * entryBytes] : default;
+        // A shader table inside an open run is logged before its check, so a member finalized after the check that writes it
+        // rolls the run back; a table the check finds GPU-written closes the run before the live read.
+        if (_runs is { IsOpen: true } runs)
+        {
+            if (bank != RegisterBank.Shader || !runs.NoteTable(tableAddress, (ulong)count * entryBytes))
+            {
+                if (CloseRunInHandler())
+                {
+                    return;
+                }
+            }
+        }
+
         // A table captured at submit is used unless the GPU may have written it since.
         var gpuWritten = !_submittedCommands.IsEmpty && _host.HasGpuWrittenCommandData(tableAddress, (ulong)count * entryBytes);
+        if (gpuWritten && _runs is { IsOpen: true } && CloseRunInHandler())
+        {
+            return;
+        }
+
         byte[]? retained = null;
         if (_submittedRegisterTables is { } tables && tables.TryGetValue(packet.PacketAddress, out var submitted) &&
             (ulong)submitted.Length == (ulong)count * entryBytes && !gpuWritten)
@@ -342,6 +369,20 @@ public sealed partial class GpuCommandInterpreter
                     if (offset >= RegisterBankLayout.ShaderRegisterCount)
                     {
                         throw _host.Fatal($"The shader table register is outside the bank: offset=0x{offset:X8} raw=0x{rawOffset:X8} value=0x{value:X8} table=0x{tableAddress:X16}.");
+                    }
+
+                    // A rollback restores only the compute registers, so an entry outside them closes the run first.
+                    if (_runs is { IsOpen: true })
+                    {
+                        if (offset < RunComputeRangeStart && CloseRunInHandler())
+                        {
+                            return;
+                        }
+
+                        if (_runs.IsOpen)
+                        {
+                            NoteRunUndo(offset);
+                        }
                     }
 
                     Registers.Shader[offset] = value;

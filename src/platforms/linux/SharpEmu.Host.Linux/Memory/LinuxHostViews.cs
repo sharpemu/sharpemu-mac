@@ -242,6 +242,16 @@ internal sealed unsafe partial class LinuxHostViews : IHostViewMemory
         }
     }
 
+    // The region table keeps every page's access as ChangeAccess set it.
+    public IReadOnlyList<HostPageAccess> QueryAccess(ulong address, ulong size)
+    {
+        lock (HostViewRegions.Gate)
+        {
+            return HostViewMemory.CollectAccess(address, size, static current =>
+                HostViewRegions.TryQuery(current, out var info) ? (true, info) : (false, default));
+        }
+    }
+
     public bool FreeOwnedRange(ulong address, ulong size)
     {
         lock (HostViewRegions.Gate)

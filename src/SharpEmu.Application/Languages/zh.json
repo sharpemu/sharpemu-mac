@@ -76,13 +76,11 @@
   "Overlay.Widget.Add.Desc": "在性能显示上再放一个组件。在游戏中用 F3 移动并调整大小。",
   "Overlay.Widget.Add.Button": "添加",
   "Overlay.Group.WidgetSettings": "{0}设置",
-
   "Page.Library": "游戏库",
   "Page.Options": "设置",
   "Page.Trophies": "奖杯",
   "Page.GameCount.One": "1 个游戏",
   "Page.GameCount.Other": "{0} 个游戏",
-
   "Library.SearchWatermark": "搜索游戏库…",
   "Library.Versions.Title": "选择版本",
   "Library.Versions.Description": "已安装多个版本。请选择一个版本以继续。",
@@ -94,7 +92,6 @@
   "Library.OpenFile": "打开文件…",
   "Library.View.Grid": "堆叠视图",
   "Library.View.Carousel": "横排视图",
-
   "Library.Context.Launch": "启动",
   "Library.Context.Patches": "补丁",
   "Library.Patches.Empty": "未找到适用于此游戏版本的补丁",
@@ -132,7 +129,6 @@
   "Library.Context.GameSettings": "游戏设置…",
   "Library.Context.Remove": "从游戏库中移除",
   "Library.Context.PackZar": "打包为 .zar…",
-
   "Library.Pack.Title": "打包为 .zar",
   "Library.Pack.Heading": "正在打包 {0}",
   "Library.Pack.Explanation": "这会将整个游戏文件夹存储为单个压缩的 .zar 文件。SharpEmu 可直接从中运行游戏而无需解包，通常占用更少的磁盘空间，游戏表现相同。游戏文件夹会被保留；归档写入并校验完成后，您可以选择将其删除。",
@@ -150,24 +146,20 @@
   "Library.Pack.DoneDeleted": "完成。归档已就绪，游戏文件夹已删除。",
   "Library.Pack.DeleteSkipped": "完成。由于无法确认归档包含全部文件，游戏文件夹已保留。",
   "Library.Pack.DeleteFailed": "归档已就绪，但删除游戏文件夹失败：{0}",
-
   "Library.Empty.Title": "您的游戏库是空的",
   "Library.Empty.Hint": "添加包含游戏的文件夹即可开始使用。",
   "Library.Empty.SearchTitle": "没有符合搜索条件的游戏",
   "Library.Empty.SearchHint": "游戏库中没有与“{0}”匹配的内容。",
   "Library.Empty.AddFolder": "＋ 添加游戏文件夹",
-
   "Library.Loading": "正在加载游戏库…",
   "Library.ScanningFolder": "正在扫描文件夹…",
   "Library.Stat.Version": "版本",
   "Library.Stat.Installed": "安装时间",
   "Library.Stat.TitleId": "标题 ID",
   "Common.Back": "返回",
-
   "Library.Music.Volume": "标题音乐音量",
   "Library.Music.Mute": "静音标题音乐",
   "Library.Music.Unmute": "取消静音标题音乐",
-
   "Options.General": "常规",
   "Options.Logging": "日志",
   "Options.Env.Tab": "环境",
@@ -193,10 +185,8 @@
   "Options.Section.Launcher": "启动器",
   "Options.Section.Display": "显示",
   "Options.Graphics": "图形",
-
   "Options.Console.Language.Label": "主机语言",
   "Options.Console.Language.Desc": "向游戏报告的系统语言。",
-
   "Options.WindowMode.Label": "窗口模式",
   "Options.WindowMode.Desc": "普通窗口、桌面无边框或独占全屏。",
   "Options.WindowMode.Windowed": "窗口化",
@@ -233,11 +223,8 @@
   "Options.Env.BinkPlayback.Host": "主机 (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "游戏",
   "Options.Env.BinkPlayback.Skip": "跳过",
-
-
   "Options.Strict.Label": "严格动态库解析",
   "Options.Strict.Desc": "当导入符号无法解析时，使启动失败。",
-
   "Options.LogLevel.Label": "日志级别",
   "Options.LogLevel.Desc": "模拟器控制台输出的详细程度。",
   "Options.LogLevel.Trace": "跟踪",
@@ -246,37 +233,27 @@
   "Options.LogLevel.Warning": "警告",
   "Options.LogLevel.Error": "错误",
   "Options.LogLevel.Critical": "严重",
-
   "Options.TraceImports.Label": "导入跟踪上限",
   "Options.TraceImports.Desc": "跟踪每个模块的前 N 个导入（0 = 关闭）。",
-
   "Options.CrashDump.Label": "崩溃转储",
   "Options.CrashDump.Desc": "将崩溃转储保存在运行日志旁（仅限 Windows x64）。转储文件可能很大，并包含隐私数据。",
   "Options.LogToFile.Label": "记录到文件",
   "Options.LogToFile.Desc": "将模拟器输出同步写入日志文件。",
-
   "Options.LogFilePath.Label": "日志文件路径",
   "Options.LogFilePath.Default": "未设置自定义路径 — 日志保存在模拟器旁的 user/logs 中。",
   "Options.LogFilePath.Select": "选择…",
-
   "Options.OverrideLogFile.Label": "覆盖日志文件",
   "Options.OverrideLogFile.Desc": "使用确切的文件路径，而不是追加标题 ID 和时间戳。",
-
   "Options.TitleMusic.Label": "标题音乐",
   "Options.TitleMusic.Desc": "在游戏库中循环播放所选游戏的预览音乐。",
-
   "Options.Discord.Label": "Discord 状态",
   "Options.Discord.Desc": "在您的 Discord 个人资料中显示正在运行的游戏。",
-
   "Options.Language.Label": "模拟器语言",
   "Options.Language.Desc": "启动器全局使用的语言。立即生效。",
-
   "Common.On": "开",
   "Common.Off": "关",
   "Common.Save": "保存",
   "Common.Cancel": "取消",
-
-
   "Console.Title": "控制台",
   "Console.SearchWatermark": "搜索...",
   "Console.AutoScroll": "自动滚动",
@@ -284,7 +261,6 @@
   "Console.Copy": "复制",
   "Console.Clear": "清除",
   "Console.WindowTitle": "SharpEmu 控制台",
-
   "Launch.NoGameSelected": "未选择游戏",
   "Launch.NoGameHint": "从游戏库中选择一个游戏，或直接打开 eboot.bin。",
   "Launch.Idle": "空闲",
@@ -303,14 +279,12 @@
   "Launch.Command": "$ SharpEmu {0}",
   "Launch.StartFailed": "无法启动模拟器：{0}",
   "Launch.ProcessExited": "进程已退出，退出码 {0}（{1}）。",
-
   "Exit.Ok": "正常",
   "Exit.InvalidArguments": "参数无效",
   "Exit.EbootNotFound": "未找到 eboot",
   "Exit.RuntimeException": "运行时异常",
   "Exit.EmulationError": "模拟错误",
   "Exit.Unknown": "未知",
-
   "Status.EmulatorLocating": "模拟器：正在查找…",
   "Status.EmulatorPath": "模拟器：{0}",
   "Status.EmulatorNotFound": "模拟器：未找到 SharpEmu 可执行文件 — 请先构建 SharpEmu.CLI。",
@@ -324,13 +298,10 @@
   "Status.Running": "正在运行 {0}",
   "Status.Stopping": "正在停止…",
   "Status.Idle": "空闲",
-
   "Clipboard.Path": "路径",
   "Clipboard.TitleId": "标题 ID",
-
   "Discord.Playing": "正在玩 {0}",
   "Discord.Browsing": "正在浏览游戏库",
-
   "Dialog.ChooseGameFolder": "选择包含游戏的文件夹",
   "Dialog.OpenExecutable": "打开要启动的可执行文件",
   "Dialog.PsExecutables": "PS 可执行文件",
@@ -339,7 +310,6 @@
   "Dialog.LogFiles": "日志文件",
   "Dialog.SaveZar": "保存游戏归档",
   "Dialog.ZarFiles": "游戏归档",
-
   "Options.About": "关于",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "源代码、问题反馈和项目开发。",
@@ -349,7 +319,6 @@
   "About.Discord.Desc": "加入社区，获取支持并关注开发动态。",
   "About.GithubButton": "在 GitHub 上参与贡献！",
   "About.DiscordButton": "加入我们的 Discord！",
-
   "Updater.Auto.Label": "启动时检查更新",
   "Updater.Auto.Desc": "检查 GitHub，不会延迟启动。",
   "Updater.Label": "更新",
@@ -402,6 +371,34 @@
   "Trophies.Sort.Name": "名称",
   "Trophies.SearchWatermark": "搜索游戏",
   "Trophies.NoMatch": "没有符合搜索条件的游戏。",
+  "Overlay.SaveData.Title": "保存数据",
+  "Overlay.SaveData.Caption.Load": "请选择要读取的保存数据。",
+  "Overlay.SaveData.Caption.Save": "请选择保存位置。",
+  "Overlay.SaveData.Caption.Delete": "请选择要删除的保存数据。",
+  "Overlay.SaveData.Caption.Other": "请选择保存数据。",
+  "Overlay.SaveData.Select": "确定",
+  "Overlay.SaveData.Back": "返回",
+  "Overlay.SaveData.Move": "移动",
+  "Overlay.SaveData.Delete": "删除",
+  "Overlay.SaveData.Cancel": "取消",
+  "Overlay.SaveData.NewItem": "新建保存数据",
+  "Overlay.SaveData.NewItemDetail": "在空栏位中创建新的存档。",
+  "Overlay.SaveData.LastSaved": "最后保存",
+  "Overlay.SaveData.Size": "大小",
+  "Overlay.SaveData.ConfirmDelete": "要删除此保存数据吗？",
+  "Overlay.SaveData.ConfirmDeleteNote": "删除的保存数据无法恢复。",
+  "Overlay.SaveData.InUse": "此保存数据正在使用中，无法删除。",
+  "Overlay.Ime.Title": "输入文本",
+  "Overlay.Ime.Done": "完成",
+  "Overlay.Ime.Send": "发送",
+  "Overlay.Ime.Search": "搜索",
+  "Overlay.Ime.Go": "前往",
+  "Overlay.Ime.Close": "关闭",
+  "Overlay.Ime.Delete": "删除",
+  "Overlay.Ime.Space": "空格",
+  "Overlay.Ime.Cursor": "光标",
+  "Overlay.Ime.Select": "选择",
+  "Overlay.Ime.Type": "使用键盘输入",
   "LibraryMenu.Library": "游戏库",
   "LibraryMenu.View": "视图",
   "LibraryMenu.Row": "横排",
@@ -410,6 +407,22 @@
   "LibraryMenu.Volume": "音量",
   "LibraryMenu.AddGames": "添加游戏",
   "LibraryMenu.AddFolder": "添加文件夹…",
+  "Library.Pkg.Install": "安装 PKG…",
+  "Library.Pkg.Heading": "正在安装 {0}",
+  "Library.Pkg.Explanation": "这会把伪造的 PKG 解压到一个游戏文件夹中，SharpEmu 会像运行其他游戏一样运行它。大型包需要较长时间，并且需要足够容纳整个游戏的可用磁盘空间。",
+  "Library.Pkg.Preparing": "正在读取包…",
+  "Library.Pkg.Progress": "{0} / {1} GB（{2}%）",
+  "Library.Pkg.Cancelling": "正在取消…",
+  "Library.Pkg.Failed": "安装失败：{0}",
+  "Library.Pkg.SkippedNotGame": "已跳过 {0}：暂不支持补丁和 DLC 包（{1}）。",
+  "Library.Pkg.AlreadyInstalled": "已跳过 {0}：已安装在 {1}。",
+  "Library.Pkg.ConfirmTitle": "安装 PKG 文件？",
+  "Library.Pkg.ConfirmMessage": "在此文件夹中找到 {0} 个 PKG 文件。现在安装吗？这需要 {1} GB 的可用空间。",
+  "Library.Pkg.ConfirmInstall": "安装",
+  "Library.Pkg.ConfirmSkip": "暂不",
+  "Dialog.OpenPkg": "选择要安装的 PKG",
+  "Dialog.PkgFiles": "PS4/PS5 包",
+  "Dialog.ChoosePkgInstallFolder": "选择游戏的安装位置",
   "Hero.GameSettings": "游戏设置",
   "Hero.Console": "控制台",
   "Hint.LibraryMenu": "游戏库菜单",

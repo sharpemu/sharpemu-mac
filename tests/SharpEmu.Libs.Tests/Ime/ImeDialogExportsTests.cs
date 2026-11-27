@@ -35,20 +35,27 @@ public sealed class ImeDialogExportsTests : IDisposable
 
     private readonly FakeCpuMemory _memory = new(Base, 0x1000);
     private readonly CpuContext _ctx;
+    private const string AutofillVariable = "SHARPEMU_IME_AUTOFILL";
     private readonly string? _savedText;
+    private readonly string? _savedAutofill;
 
+    // These tests cover the keyboard-less Running -> Finished path (SHARPEMU_IME_AUTOFILL=1). Without it Init opens the
+    // on-screen keyboard, whose close reads the host pad (SystemDialogInput.Release), which an arm64 test host cannot create.
     public ImeDialogExportsTests()
     {
         _ctx = new CpuContext(_memory, Generation.Gen5);
         _savedText = Environment.GetEnvironmentVariable(ImeDialogExports.DefaultTextEnvironmentVariable);
+        _savedAutofill = Environment.GetEnvironmentVariable(AutofillVariable);
         Environment.SetEnvironmentVariable(ImeDialogExports.DefaultTextEnvironmentVariable, null);
+        Environment.SetEnvironmentVariable(AutofillVariable, "1");
         ImeDialogExports.ResetForTests();
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(ImeDialogExports.DefaultTextEnvironmentVariable, _savedText);
         ImeDialogExports.ResetForTests();
+        Environment.SetEnvironmentVariable(ImeDialogExports.DefaultTextEnvironmentVariable, _savedText);
+        Environment.SetEnvironmentVariable(AutofillVariable, _savedAutofill);
     }
 
     [Fact]

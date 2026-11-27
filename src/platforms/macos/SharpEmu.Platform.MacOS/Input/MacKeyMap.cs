@@ -39,6 +39,7 @@ internal static class MacVirtualKeyCode
     public const ushort M = 0x2E;
     public const ushort Tab = 0x30;
     public const ushort Delete = 0x33;
+    public const ushort ForwardDelete = 0x75;
     public const ushort Escape = 0x35;
     public const ushort F11 = 0x67;
     public const ushort F3 = 0x63;
@@ -60,7 +61,7 @@ internal static class MacVirtualKeyCode
 /// window. The guest-facing key set is defined by what
 /// <c>HostWindowInput.SetKey</c> consumers expect, which the SDL host window
 /// produced from SDL keycodes; this table reproduces exactly that set (A-Z plus
-/// backspace, tab, return, escape and the four arrows) so key behaviour is
+/// backspace, tab, return, escape, forward delete and the four arrows) so key behaviour is
 /// identical on both windowing backends. Pure logic, no AppKit — unit tested.
 /// </summary>
 internal static class MacKeyMap
@@ -77,6 +78,7 @@ internal static class MacKeyMap
             MacVirtualKeyCode.Tab => 0x09,        // VK_TAB
             MacVirtualKeyCode.Return => 0x0D,     // VK_RETURN
             MacVirtualKeyCode.Escape => 0x1B,     // VK_ESCAPE
+            MacVirtualKeyCode.ForwardDelete => 0x2E, // VK_DELETE
             MacVirtualKeyCode.LeftArrow => 0x25,  // VK_LEFT
             MacVirtualKeyCode.UpArrow => 0x26,    // VK_UP
             MacVirtualKeyCode.RightArrow => 0x27, // VK_RIGHT
@@ -110,5 +112,29 @@ internal static class MacKeyMap
             _ => 0,
         };
         return virtualKey != 0;
+    }
+
+    /// <summary>
+    /// The text a key press types, from <c>-[NSEvent characters]</c> (already translated by the
+    /// keyboard layout, dead keys included): everything but control characters and the private-use
+    /// range AppKit reports function, arrow and navigation keys in (U+F700-U+F8FF).
+    /// </summary>
+    public static string TypedText(string? characters)
+    {
+        if (string.IsNullOrEmpty(characters))
+        {
+            return string.Empty;
+        }
+
+        var builder = new System.Text.StringBuilder(characters.Length);
+        foreach (var character in characters)
+        {
+            if (!char.IsControl(character) && character is not (>= '\uF700' and <= '\uF8FF'))
+            {
+                builder.Append(character);
+            }
+        }
+
+        return builder.ToString();
     }
 }

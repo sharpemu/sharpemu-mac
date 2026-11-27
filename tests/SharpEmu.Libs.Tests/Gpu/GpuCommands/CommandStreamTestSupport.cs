@@ -34,6 +34,10 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
 
     public Func<int, ulong>? ReadOcclusionSamples { get; set; }
 
+    public SharpEmu.Libs.Gpu.Pipelines.ComputeTickets? ComputeTickets { get; set; }
+
+    public IDeferredDispatchRuns? DispatchRuns { get; set; }
+
     public Func<int, bool>? PendingPublications { get; set; }
 
     public Func<ulong, ulong, bool>? GpuWrittenCommandData { get; set; }
@@ -404,6 +408,14 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost, ICommandS
     public bool ResolvesIndirectThreadDispatchOnGpu { get; set; }
 
     public bool ResolvesIndirectDrawOnGpu { get; set; }
+    public List<uint[]>? IndexedRuns { get; set; }
+
+    public bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets)
+    {
+        if (IndexedRuns is null) return false;
+        IndexedRuns.Add(offsets.ToArray());
+        return true;
+    }
 
     public bool ResolvesIndirectAutoDrawOnGpu { get; set; }
 
